@@ -302,6 +302,45 @@ CREATE INDEX idx_frames_captured_at ON frames (captured_at);
 
 **Retention differs from the event log:** this table is *not* purged after 1 day — a frame's metadata should live at least as long as the frame file itself, so it stays retrievable across the kind of reconnect scenario described in the intro (Wi-Fi drop during a long capture sequence). Cleanup of a frame (file + its metadata row) is tied to the frame's own lifecycle — e.g. once `transferred_at` is set and the Client Computer has confirmed receipt — not to a fixed time window; the exact cleanup policy is left to the frame storage/transfer implementation (see the corresponding todos) rather than fixed here.
 
+## Retrieving frames
+
+Two separate concerns: finding out what frames exist (metadata, cheap, queried against the `frames` table above), and getting the frame bytes themselves (potentially large FITS files). They're deliberately split into different tool calls rather than one "give me everything" call.
+
+**`list_frames`** — query frame metadata with optional filters, returning `frame_id`s and everything else in the `frames` table except the file path (an internal server-side detail, not exposed to the client):
+
+```json
+{
+  "runId": "b3f1c2d4-...",
+  "device": null,
+  "since": "2026-07-14T00:00:00Z",
+  "transferredOnly": false
+}
+```
+
+```json
+{
+  "kind": "frameList",
+  "frames": [
+    {
+      "frameId": "frame-0001",
+      "runId": "b3f1c2d4-...",
+      "device": "ZWO CCD ASI2600MM Pro",
+      "sizeBytes": 33554432,
+      "capturedAt": "2026-07-14T22:04:11Z",
+      "transferredAt": null
+    }
+  ]
+}
+```
+
+**`get_frame_metadata`** — the same shape for a single `frameId`, useful once a client already knows the id (e.g. from a `scriptCompleted` result's `frames` list).
+
+**Frame content is exposed as an MCP resource**, not embedded in a tool result: each frame gets a `frame://{frame_id}` URI, read via the standard `resources/read` request rather than a bespoke "download" tool — this reuses MCP's existing binary content handling (a base64 `blob` resource content) instead of inventing another transfer mechanism.
+
+**Explicit transfer confirmation, not read-implies-received.** `transferred_at` is *not* set just because the server sent the bytes — a network drop mid-transfer shouldn't be recorded as a successful transfer. Instead, the client calls a `confirm_frame_transfer` tool with the `frameId` once it has verified the frame is safely saved locally; only that sets `transferred_at`. This follows the same "don't trust delivery, wait for acknowledgement" principle already applied to the event log and script status.
+
+**Open question, not resolved here:** MCP's base resource-read mechanism returns the whole content in one response — there's no native chunked/range read. For typical FITS frames this is likely fine, but if frame sizes turn out to be large enough to matter (very large sensors, or long-exposure stacks) we may need our own chunking convention (e.g. `offset`/`length` parameters) layered on top. Deferred until real frame sizes from actual hardware are known rather than solved speculatively now.
+
 ## Imaging rig metadata
 
 Scripts (and the MCP server generally) need to know about the physical imaging setup — telescope, focuser, filter wheel, imaging camera, guide camera — not just the live INDI devices currently connected. INDI can report *some* of this at runtime (a camera's pixel count, pixel size and bit depth, and sometimes cooling capability, are commonly exposed through its `CCD_INFO`-family properties), but it has no concept of aperture, focal length, or which physical optical train a device is wired through (imaging vs. guiding) — that's operator knowledge with no protocol representation. A user may also swap rigs entirely between sessions, so the server must be able to store **multiple** rig definitions, not just one.
