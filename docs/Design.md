@@ -250,3 +250,54 @@ CREATE INDEX idx_frames_captured_at ON frames (captured_at);
 ```
 
 **Retention differs from the event log:** this table is *not* purged after 1 day — a frame's metadata should live at least as long as the frame file itself, so it stays retrievable across the kind of reconnect scenario described in the intro (Wi-Fi drop during a long capture sequence). Cleanup of a frame (file + its metadata row) is tied to the frame's own lifecycle — e.g. once `transferred_at` is set and the Client Computer has confirmed receipt — not to a fixed time window; the exact cleanup policy is left to the frame storage/transfer implementation (see the corresponding todos) rather than fixed here.
+
+## Imaging rig metadata
+
+Scripts (and the MCP server generally) need to know about the physical imaging setup — telescope, focuser, filter wheel, imaging camera, guide camera — not just the live INDI devices currently connected. INDI can report *some* of this at runtime (a camera's pixel count, pixel size and bit depth, and sometimes cooling capability, are commonly exposed through its `CCD_INFO`-family properties), but it has no concept of aperture, focal length, or which physical optical train a device is wired through (imaging vs. guiding) — that's operator knowledge with no protocol representation. A user may also swap rigs entirely between sessions, so the server must be able to store **multiple** rig definitions, not just one.
+
+**Rig definitions are YAML documents, not SQLite rows** — unlike the event log and frame metadata (high-volume, write-heavy, time-indexed operational data, which is why those use SQLite), a rig definition is low-volume, human-curated configuration that changes rarely. This mirrors the scripting layer: declarative data, loaded with `yaml.safe_load`, validated against a schema, and — like scripts — potentially authored on the Client Computer and uploaded, so the same safety discipline applies. Each rig is one YAML file (e.g. under `rigs/*.yaml`), identified by a stable `id` that scripts reference (e.g. a script parameter `"rig": "newtonian-8in"`).
+
+**Schema (sketch):**
+
+```yaml
+id: newtonian-8in
+name: 8" Newtonian imaging rig
+telescope:
+  imaging:
+    apertureMm: 203
+    focalLengthMm: 1000
+  guiding:
+    apertureMm: 60
+    focalLengthMm: 240
+focuser:
+  minPosition: 0
+  maxPosition: 50000
+filterWheel:
+  slots:
+    1: Luminance
+    2: Red
+    3: Green
+    4: Blue
+    5: Ha
+    6: OIII
+    7: SII
+camera:
+  imaging:
+    device: "ZWO CCD ASI2600MM Pro"
+    cooled: true
+    pixelsX: 6248
+    pixelsY: 4176
+    pixelSizeMicron: 3.76
+    bitDepth: 16
+  guiding:
+    device: "ZWO CCD ASI120MM Mini"
+    cooled: false
+    pixelsX: 1280
+    pixelsY: 960
+    pixelSizeMicron: 3.75
+    bitDepth: 12
+```
+
+**The YAML definition is authoritative; live INDI properties are advisory.** Where a field overlaps with something INDI reports (camera pixel size/count/bit depth), the server can cross-check the connected device's live properties against the configured rig and flag a mismatch — but it never overrides the declared config, since INDI can't confirm the parts of the rig it has no visibility into (aperture, focal length, imaging vs. guiding role).
+
+**No silent auto-selection.** Because the server "cannot be certain" which rig is physically mounted, it must not guess. Instead, a `suggest_rig` tool can match currently-connected INDI device names against the `device` fields of configured rigs and propose a likely match, but the operator (or client) explicitly confirms/selects the active rig — scripts and tool calls reference a rig by `id`, never by an auto-detected guess.
