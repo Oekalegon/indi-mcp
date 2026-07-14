@@ -1,0 +1,48 @@
+[project]
+name = "indi-mcp"
+version = "0.1.0"
+description = "An MCP server that controls astrophotography equipment via INDI on a Raspberry Pi or equivalent devices"
+readme = "README.md"
+authors = [
+    { name = "dieudonneWillems", email = "don_willems@me.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.28.1",
+    "indipyclient>=0.9.1",
+]
+
+[project.scripts]
+indi-mcp = "indi_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.10.8,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.0",
+    "ty>=0.0.1a0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=6.0.0",
+    "pre-commit>=4.0.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/indi_mcp"]
