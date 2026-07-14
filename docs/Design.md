@@ -164,3 +164,41 @@ If pausing is attempted on a run that doesn't support it, the call is rejected r
   "reason": "This script has no safe point to pause at"
 }
 ```
+
+## Event streams
+
+The `kind`-tagged JSON events above (both the INDI messaging-layer events and the scripting-layer events) aren't only returned as direct tool-call results — long-running scripts and ongoing device activity need a push channel too. This raises the question of whether the INDI messaging layer and the scripting layer should share one event stream or use separate ones.
+
+**Decision: two separate, subscribable streams that share the same `kind`/`type` envelope.**
+
+* `indi://messages` — the INDI messaging layer stream: `propertyDefinition`, `propertyUpdate`, `propertyCommand`, `propertyDeleted`, `message` events. Can optionally be scoped per device, e.g. `indi://messages/{device}`, for clients only interested in one instrument.
+* `indi://scripts` — the scripting layer stream: `scriptStarted`, `scriptProgress`, `scriptCompleted`, `scriptFailed`, `scriptCancelled`, `scriptPaused`, `scriptResumed`, `scriptPauseRejected` events. Can optionally be scoped per run, e.g. `indi://scripts/{runId}`.
+
+They're kept separate rather than merged because:
+
+* **Different volume and audience.** INDI property updates can be chatty across many devices; script events are comparatively rare, high-level milestones. A client that only cares whether a capture sequence finished shouldn't have to filter a firehose of property updates, and a device-control UI shouldn't have script bookkeeping mixed into its property feed.
+* **Mirrors the layering.** The messaging layer and scripting layer are already separate layers in this design; separate streams keep that boundary intact and let each schema evolve independently.
+* **Selective subscription.** A client subscribes only to the stream(s) — and, optionally, the device/run scope — it actually needs.
+
+They share the same envelope convention (not the same channel) so client-side parsing code is uniform across both, and so a `scriptProgress` event can reference the specific `propertyUpdate` that triggered it, e.g.:
+
+```json
+{
+  "kind": "scriptProgress",
+  "runId": "b3f1c2d4-...",
+  "step": 3,
+  "totalSteps": 10,
+  "message": "Capturing frame 3 of 10",
+  "triggeredBy": {
+    "kind": "propertyUpdate",
+    "type": "number",
+    "device": "CCD Simulator",
+    "name": "CCD_EXPOSURE",
+    "state": "Ok"
+  }
+}
+```
+
+**Mechanism:** these are implemented as standard MCP subscribable resources. A client calls `resources/subscribe` on a URI (e.g. `indi://scripts` or `indi://scripts/{runId}`); the server sends `notifications/resources/updated` whenever a new event occurs; the client calls `resources/read` to fetch it. Resource content is a small JSON envelope with a rolling window of recent events, e.g. `{ "events": [ ... ] }`.
+
+**These subscriptions are a best-effort, live-only channel, not the resilience mechanism.** A client that was offline (e.g. the Wi-Fi drop scenario from the intro) should not assume it received every event it missed — it should treat the subscription as "notify me while I'm connected" and use the `runId`-based polling tools (`get_script_status`, etc.) as the source of truth to catch up after reconnecting, rather than expecting a replayed event log.
