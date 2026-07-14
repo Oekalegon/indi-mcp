@@ -1,0 +1,41 @@
+name: Enforce merge policy
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR source → target
+        shell: bash
+        run: |
+          BASE="${{ github.event.pull_request.base.ref }}"
+          HEAD="${{ github.event.pull_request.head.ref }}"
+
+          echo "🔀 PR: $HEAD → $BASE"
+
+          # Rule 1: main only accepts release/* or hotfix/*
+          if [[ "$BASE" == "main" ]]; then
+            if [[ "$HEAD" != release/* && "$HEAD" != hotfix/* ]]; then
+              echo "❌ Only release/* or hotfix/* may merge into main"
+              exit 1
+            fi
+          fi
+
+          # Rule 2: develop accepts everything except main
+          if [[ "$BASE" == "develop" ]]; then
+            if [[ "$HEAD" == "main" ]]; then
+              echo "❌ main must not merge into develop"
+              exit 1
+            fi
+          fi
+
+          # Rule 3 (optional): restrict PR targets
+          if [[ "$BASE" != "main" && "$BASE" != "develop" ]]; then
+            echo "❌ PRs may only target main or develop"
+            exit 1
+          fi
+
+          echo "✅ Merge policy satisfied"
