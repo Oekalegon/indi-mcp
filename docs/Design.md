@@ -79,9 +79,12 @@ The tool call's immediate result acknowledges the run has started, using the sam
   "kind": "scriptStarted",
   "runId": "b3f1c2d4-...",
   "script": "capture_sequence",
-  "startedAt": "2026-07-14T18:50:00Z"
+  "startedAt": "2026-07-14T18:50:00Z",
+  "pausable": true
 }
 ```
+
+Whether a run can be paused (see below) depends on the script itself — some scripts have no safe point to suspend at (e.g. mid-slew), others do (e.g. between exposures in a capture sequence). The `pausable` flag reports this upfront, decided by the script definition rather than by the caller.
 
 **Progress** — while connected, the client receives streamed progress notifications for the run; after a reconnect, the same information can be fetched with a `runId` lookup (e.g. a `get_script_status` tool):
 
@@ -120,5 +123,44 @@ The tool call's immediate result acknowledges the run has started, using the sam
     "message": "Mount slew timed out",
     "propertyState": "Alert"
   }
+}
+```
+
+**Cancelling** — a `cancel_script` tool call, taking just the `runId`, always applies (any run can be cancelled, regardless of `pausable`). It stops the script promptly at the next safe point and returns a terminal status:
+
+```json
+{
+  "kind": "scriptCancelled",
+  "runId": "b3f1c2d4-...",
+  "cancelledAtStep": 4,
+  "finishedAt": "2026-07-14T18:55:00Z"
+}
+```
+
+**Pausing and resuming** — `pause_script` and `resume_script` tool calls, also taking just the `runId`. These only succeed if the run's `pausable` flag was `true`:
+
+```json
+{
+  "kind": "scriptPaused",
+  "runId": "b3f1c2d4-...",
+  "pausedAtStep": 4
+}
+```
+
+```json
+{
+  "kind": "scriptResumed",
+  "runId": "b3f1c2d4-...",
+  "resumedAtStep": 4
+}
+```
+
+If pausing is attempted on a run that doesn't support it, the call is rejected rather than silently ignored or queued:
+
+```json
+{
+  "kind": "scriptPauseRejected",
+  "runId": "b3f1c2d4-...",
+  "reason": "This script has no safe point to pause at"
 }
 ```
