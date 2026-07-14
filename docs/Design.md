@@ -165,6 +165,57 @@ If pausing is attempted on a run that doesn't support it, the call is rejected r
 }
 ```
 
+## Composing scripts
+
+The intent is to start with small, primitive scripts — `cool_camera`, `slew`, `plate_solve`, `select_filter`, `focus`, `capture_frame` — and build realistic imaging sequences out of them, rather than writing every sequence as one long flat list of raw INDI steps. For example, "capture 20×5min frames of M101, refocusing periodically" is really: cool the camera, slew, plate-solve until precision is met, select the filter, then repeatedly focus and capture. **Scripts must be able to call other scripts.**
+
+This doesn't need a separate mechanism — a "call another script" step reuses the exact same `run_script` invocation already defined above, just issued internally instead of from the Client Computer:
+
+```yaml
+- step: run_script
+  script: capture_frame
+  parameters:
+    exposureSeconds: 300
+    device: "ZWO CCD ASI2600MM Pro"
+```
+
+Illustrating the M101 example as composition (not a final step schema — that's still INDIMCP-6's job — just showing the shape):
+
+```yaml
+id: capture_sequence_m101
+name: Capture 20x5min frames of M101 with periodic refocus
+steps:
+  - step: run_script
+    script: cool_camera
+    parameters: { targetTempC: -10 }
+  - step: run_script
+    script: slew
+    parameters: { target: M101 }
+  - step: run_script
+    script: plate_solve_until_precision
+    parameters: { toleranceArcsec: 5 }
+  - step: run_script
+    script: select_filter
+    parameters: { filter: Luminance }
+  - repeat: 20
+    steps:
+      - step: run_script
+        script: focus
+        every: 2
+      - step: run_script
+        script: capture_frame
+        parameters: { exposureSeconds: 300 }
+```
+
+Composability raises a few things the schema and execution engine (INDIMCP-6/INDIMCP-7) need to resolve, noted here so they aren't lost:
+
+* **Same script library, resolved by id.** Sub-scripts are looked up from the same script store a top-level `run_script` call would use — there's no separate "library" of reusable fragments.
+* **Cycle detection at validation time.** Loading scripts must build a call graph across the whole library and reject a cycle (A calls B calls A) before anything runs, not discover infinite recursion at runtime.
+* **Nested progress, not opaque sub-runs.** A sub-script gets its own `runId` but is tagged with a `parentRunId`, so `scriptProgress`/`scriptCompleted`/etc. events form a walkable execution tree — a client watching the top-level `runId` shouldn't lose visibility into what's happening inside a nested `focus` or `plate_solve_until_precision` call.
+* **Cancellation cascades.** Cancelling the top-level run cancels whichever sub-script is currently executing.
+* **Pausability becomes dynamic.** Each script declares its own `pausable` flag; for a composite run, the *effective* pausability at any moment is whatever the currently-executing (sub-)script declares — e.g. pausable between `capture_frame` calls but not mid-`slew`. This means `pausable` may need to be re-reported as execution moves between sub-scripts, not fixed once at `scriptStarted` — full mechanics still to be worked out in the schema design.
+* **A `repeat`/loop construct is needed** ("do this N times", "repeat until plate-solve precision is met") — kept as a closed, schema-defined construct (a count, or a repeat-until using the same restricted comparison-operator vocabulary already established for conditionals), not an embedded expression language, consistent with the safety rules above.
+
 ## Event streams
 
 The `kind`-tagged JSON events above (both the INDI messaging-layer events and the scripting-layer events) aren't only returned as direct tool-call results — long-running scripts and ongoing device activity need a push channel too. This raises the question of whether the INDI messaging layer and the scripting layer should share one event stream or use separate ones.
