@@ -227,3 +227,26 @@ CREATE INDEX idx_events_run_id ON events (run_id);
 **Retention:** events older than **1 day** are purged, since this log exists to bridge reconnects and short-term history — not as permanent storage (captured frames have their own, separate storage; see the scripting layer above). Purging runs periodically (e.g. hourly) as a `DELETE FROM events WHERE occurred_at < ?` against the indexed column, followed by an incremental `VACUUM` to reclaim space and limit SD-card write wear.
 
 **Catch-up query:** a client that reconnects can fetch what it missed with a query against this log — e.g. a `get_events` tool taking `stream`, optional `device`/`run_id` filters, and a `since` timestamp — rather than relying only on `get_script_status` for scripts and having no equivalent history for INDI messages.
+
+## Frame storage metadata
+
+The captured frames themselves (FITS files etc.) are stored as plain files on the INDI Device — see the "INDI scripting layer" and Frame Storage component above. Alongside those files, **metadata about each frame** is tracked in the same local SQLite database as the event log (a second table, not a separate database file — one embedded DB for the INDI Device is enough): which script run produced it, which device captured it, when, and whether it's been transferred to the Client Computer yet.
+
+**Schema (sketch):**
+
+```sql
+CREATE TABLE frames (
+  id INTEGER PRIMARY KEY,
+  frame_id TEXT UNIQUE NOT NULL,  -- id used in MCP-facing responses
+  run_id TEXT,                    -- the script run that produced it, NULL if captured ad hoc
+  device TEXT NOT NULL,
+  path TEXT NOT NULL,             -- path on the INDI Device, relative to the frame storage root
+  size_bytes INTEGER,
+  captured_at TEXT NOT NULL,      -- ISO 8601 UTC
+  transferred_at TEXT             -- NULL until the Client Computer has retrieved it
+);
+CREATE INDEX idx_frames_run_id ON frames (run_id);
+CREATE INDEX idx_frames_captured_at ON frames (captured_at);
+```
+
+**Retention differs from the event log:** this table is *not* purged after 1 day — a frame's metadata should live at least as long as the frame file itself, so it stays retrievable across the kind of reconnect scenario described in the intro (Wi-Fi drop during a long capture sequence). Cleanup of a frame (file + its metadata row) is tied to the frame's own lifecycle — e.g. once `transferred_at` is set and the Client Computer has confirmed receipt — not to a fixed time window; the exact cleanup policy is left to the frame storage/transfer implementation (see the corresponding todos) rather than fixed here.
