@@ -52,3 +52,73 @@ For example, an INDI `defNumberVector` becomes:
 ```
 
 and a client sending an INDI `newNumberVector` to slew becomes a `propertyCommand` with the same `type`/`elements` shape. The exact schema (naming of nested fields, how BLOBs are represented/streamed, etc.) still needs to be worked out in full — this section fixes the naming convention it should follow, not the final schema.
+
+## Calling scripts and script results
+
+This section covers only the JSON shape of *calling* a script and getting its results back over MCP — not the YAML script language itself (which properties/steps/conditionals it supports), which is a separate, later design task.
+
+Because scripts run long-running sequences on the INDI Device and are explicitly meant to keep running even if the Client Computer disconnects (see the intro above), invoking a script is **asynchronous**: the tool call that starts a script returns immediately with a `runId`, rather than blocking until the script finishes. That `runId` is then used both for live progress updates and for polling the outcome after a reconnect.
+
+**Starting a script** — an MCP tool call (e.g. `run_script`) with arguments naming the script and its parameters:
+
+```json
+{
+  "script": "capture_sequence",
+  "parameters": {
+    "device": "CCD Simulator",
+    "count": 10,
+    "exposureSeconds": 30
+  }
+}
+```
+
+The tool call's immediate result acknowledges the run has started, using the same `kind`-based convention as the messaging layer:
+
+```json
+{
+  "kind": "scriptStarted",
+  "runId": "b3f1c2d4-...",
+  "script": "capture_sequence",
+  "startedAt": "2026-07-14T18:50:00Z"
+}
+```
+
+**Progress** — while connected, the client receives streamed progress notifications for the run; after a reconnect, the same information can be fetched with a `runId` lookup (e.g. a `get_script_status` tool):
+
+```json
+{
+  "kind": "scriptProgress",
+  "runId": "b3f1c2d4-...",
+  "step": 3,
+  "totalSteps": 10,
+  "message": "Capturing frame 3 of 10"
+}
+```
+
+**Completion** — a terminal status once the run finishes, successfully or not:
+
+```json
+{
+  "kind": "scriptCompleted",
+  "runId": "b3f1c2d4-...",
+  "finishedAt": "2026-07-14T19:05:00Z",
+  "result": {
+    "framesCaptured": 10,
+    "frames": [
+      { "id": "frame-0001", "path": "M31/2026-07-14/frame-0001.fits" }
+    ]
+  }
+}
+```
+
+```json
+{
+  "kind": "scriptFailed",
+  "runId": "b3f1c2d4-...",
+  "failedAtStep": 4,
+  "error": {
+    "message": "Mount slew timed out",
+    "propertyState": "Alert"
+  }
+}
+```
