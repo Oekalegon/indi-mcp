@@ -16,7 +16,8 @@ Early setup stage — project scaffolding only, no functionality implemented yet
 
 * Python 3.12+, managed with [uv](https://docs.astral.sh/uv/)
 * [Official Python MCP SDK](https://github.com/modelcontextprotocol/python-sdk) (`mcp`)
-* [`indipyclient`](https://indipyclient.readthedocs.io) — pure-Python INDI client
+* [`indipyclient`](https://indipyclient.readthedocs.io) — pure-Python INDI client, used for equipment control
+* [`indiweb`](https://pypi.org/project/indiweb/) — used as a library only (its `IndiServer`/`DriverCollection` classes), for `indiserver` process/FIFO control and driver-catalog parsing; its bundled web app is not used
 * [Ruff](https://docs.astral.sh/ruff/) for linting and formatting
 * [ty](https://github.com/astral-sh/ty) for static type checking
 * [pytest](https://docs.pytest.org/), with `pytest-asyncio` and `pytest-cov`

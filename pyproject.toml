@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "mcp>=1.28.1",
     "indipyclient>=0.9.1",
+    "indiweb>=1.1.0",
 ]
 
 [project.scripts]
