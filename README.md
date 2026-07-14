@@ -8,6 +8,10 @@ An [MCP](https://modelcontextprotocol.io) server that controls astrophotography 
 * **INDI server management** — manage the INDI server itself: install/remove drivers, and start, stop or restart the server, all via MCP.
 * **Frame storage** — captured frames are stored on the Raspberry Pi and can be listed, inspected and transferred to another computer on the local network via MCP.
 
+## Documentation
+
+* [Design Document](docs/Design.md)
+
 ## Status
 
 Early setup stage — project scaffolding only, no functionality implemented yet.
