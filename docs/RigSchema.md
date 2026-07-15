@@ -57,15 +57,17 @@ camera:
     bitDepth: 12
 rotator:
   device: "Rotator Simulator"
-powerHub:
-  device: "Pegasus PPBA"
-observatoryControl:
-  device: "Dome Simulator"
-flatScreen:
-  device: "Flat Panel Simulator"
-dewHeaters:
-  - device: "Pegasus PPBA:Dew A"
-  - device: "Pegasus PPBA:Dew B"
+devices:
+  - role: powerHub
+    device: "Pegasus PPBA"
+  - role: observatoryControl
+    device: "Dome Simulator"
+  - role: flatScreen
+    device: "Flat Panel Simulator"
+  - role: dewHeater
+    device: "Pegasus PPBA:Dew A"
+  - role: dewHeater
+    device: "Pegasus PPBA:Dew B"
 ```
 
 ## Fields
@@ -95,19 +97,17 @@ dewHeaters:
 | `camera.imaging.pixelsX` / `pixelsY` | integer | yes | Sensor resolution. |
 | `camera.imaging.pixelSizeMicron` | number | yes | Pixel pitch, in microns. |
 | `camera.imaging.bitDepth` | integer | yes | ADC bit depth (e.g. `16`). |
-| `rotator` | object | no | A camera-field rotator, if one is used. |
-| `powerHub` | object | no | A powered USB/power-distribution hub (e.g. Pegasus PPBA), if one is used. |
-| `observatoryControl` | object | no | A dome or roll-off-roof controller, if the rig is housed in a controllable observatory. |
-| `flatScreen` | object | no | A flat-field panel, if one is used for calibration frames. |
-| `rotator.device` / `powerHub.device` / `observatoryControl.device` / `flatScreen.device` | string | yes (if the section is present) | The INDI device name for that component's driver. |
-| `dewHeaters` | list of objects | no (default: empty) | Dew heater channels/straps, if any are used. A list rather than a single device, since rigs commonly have more than one independently-controlled channel. |
-| `dewHeaters[].device` | string | yes | The INDI device name for that dew heater channel. |
+| `rotator` | object | no | A camera-field rotator, if one is used. Gets its own typed field (rather than living in `devices` below) because it's part of the imaging train, like `mount`/`focuser`/`filterWheel`/`camera`. |
+| `rotator.device` | string | yes (if `rotator` is present) | The INDI device name for the rotator driver. |
+| `devices` | list of objects | no (default: empty) | Any other equipment that doesn't need config beyond a device name and a role — power hubs, observatory/dome control, flat-field panels, dew heaters, and anything else this schema doesn't have a dedicated field for. |
+| `devices[].role` | string | yes | A free-form label for what this device is (e.g. `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"`). Not a fixed enum — a rig can use a role this schema's authors never anticipated, so a new device type never requires a schema change. `role` values aren't required to be unique: a rig commonly has more than one device sharing a role (e.g. several independently-controlled dew heater channels). |
+| `devices[].device` | string | yes | The INDI device name for that device's driver. |
 
 (`camera.guiding` fields mirror `camera.imaging`'s, shown once above.)
 
-`rotator`, `powerHub`, `observatoryControl`, `flatScreen`, and each entry of `dewHeaters` are, for
-now, just a `device` name with no further config — unlike e.g. `focuser`'s position range. Extra
-fields can be added later if a concrete use case needs them (e.g. a rotator's position range).
+A component only needs its own typed field, instead of an entry in `devices`, once it needs
+config beyond a device name — the way `focuser` needs a position range and `filterWheel` needs
+slot names. Everything else — including device types not yet anticipated — belongs in `devices`.
 
 ## Design notes
 

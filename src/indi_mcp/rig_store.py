@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "AuxiliaryDevice",
     "Camera",
     "CameraTrains",
     "Device",
@@ -86,6 +87,21 @@ class CameraTrains(_StrictModel):
     guiding: Camera | None = None
 
 
+class AuxiliaryDevice(_StrictModel):
+    """An additional INDI device that doesn't need config beyond its name and role.
+
+    `role` is a free-form label (e.g. `"powerHub"`, `"observatoryControl"`,
+    `"flatScreen"`, `"dewHeater"`) rather than a fixed enum, so a rig can
+    declare a device type this schema doesn't have a dedicated field for yet
+    without requiring a schema change. Roles that don't need per-role config
+    (unlike e.g. `focuser`'s position range) fit here; give a component its
+    own typed field instead once it needs more than a device name.
+    """
+
+    role: str
+    device: str
+
+
 class Rig(_StrictModel):
     """A single imaging rig definition, as declared in one `rigs/*.yaml` file."""
 
@@ -97,10 +113,7 @@ class Rig(_StrictModel):
     filterWheel: Filterwheel
     camera: CameraTrains
     rotator: Device | None = None
-    powerHub: Device | None = None
-    observatoryControl: Device | None = None
-    flatScreen: Device | None = None
-    dewHeaters: list[Device] = []
+    devices: list[AuxiliaryDevice] = []
 
 
 class RigSummary(TypedDict):
