@@ -5,8 +5,9 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from indi_mcp import indi_driver, indi_server
+from indi_mcp import indi_driver, indi_messaging, indi_server
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
+from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,36 @@ async def stop_indi_driver(label: str) -> DriverStatus:
 async def list_running_indi_drivers() -> list[DriverStatus]:
     """List all currently running INDI drivers."""
     return await indi_driver.list_running_drivers()
+
+
+@mcp.tool()
+async def start_indi_messaging(host: str = "localhost", port: int = INDI_PORT) -> MessagingStatus:
+    """Connect to the INDI server and start streaming its property/message events."""
+    return await indi_messaging.start_messaging(host, port)
+
+
+@mcp.tool()
+async def stop_indi_messaging() -> MessagingStatus:
+    """Disconnect from the INDI server and stop streaming its events."""
+    return await indi_messaging.stop_messaging()
+
+
+@mcp.tool()
+async def get_indi_messaging_status() -> MessagingStatus:
+    """Report whether the INDI messaging stream is running, and its host/port."""
+    return await indi_messaging.get_status()
+
+
+@mcp.tool()
+async def list_indi_messages(device: str | None = None, limit: int = 50) -> list[IndiEvent]:
+    """List the most recently seen INDI events, newest first, optionally filtered to one device."""
+    return indi_messaging.list_messages(device, limit)
+
+
+@mcp.tool()
+async def send_indi_property(device: str, name: str, elements: dict[str, str]) -> IndiEvent:
+    """Send a command to an INDI device, setting `elements` on its property `name`."""
+    return await indi_messaging.send_property(device, name, elements)
 
 
 def run(transport: Transport = "stdio") -> None:
