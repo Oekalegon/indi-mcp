@@ -27,6 +27,16 @@ uv run indi-mcp-cli driver start "CCD Simulator"
 uv run indi-mcp-cli listen --device "CCD Simulator"   # prints incoming events until Ctrl+C
 ```
 
+The `driver` subcommands read the driver catalog from `/usr/share/indi/` by default, which only
+exists where INDI's drivers are actually installed (e.g. the Raspberry Pi). On a machine with a
+local INDI install elsewhere (e.g. Homebrew on macOS, typically `/usr/local/share/indi`), point
+`indiweb` at it via the `INDI_DATA_DIR` env var:
+
+```bash
+export INDI_DATA_DIR=/usr/local/share/indi
+uv run indi-mcp-cli driver list
+```
+
 ## Status
 
 Early setup stage — MCP server skeleton in place, with INDI server management tools (start/stop/restart/status) implemented.
