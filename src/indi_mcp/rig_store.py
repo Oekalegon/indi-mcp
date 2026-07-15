@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "Camera",
     "CameraTrains",
+    "Device",
     "Filterwheel",
     "Focuser",
-    "Mount",
     "Rig",
     "RigSummary",
     "Telescope",
@@ -55,7 +55,9 @@ class Telescope(_StrictModel):
     guiding: TelescopeTrain | None = None
 
 
-class Mount(_StrictModel):
+class Device(_StrictModel):
+    """A rig component that is just an INDI device name, with no extra config."""
+
     device: str
 
 
@@ -89,11 +91,16 @@ class Rig(_StrictModel):
 
     id: str
     name: str
-    mount: Mount
+    mount: Device
     telescope: Telescope
     focuser: Focuser
     filterWheel: Filterwheel
     camera: CameraTrains
+    rotator: Device | None = None
+    powerHub: Device | None = None
+    observatoryControl: Device | None = None
+    flatScreen: Device | None = None
+    dewHeaters: list[Device] = []
 
 
 class RigSummary(TypedDict):

@@ -390,9 +390,22 @@ camera:
     pixelsY: 960
     pixelSizeMicron: 3.75
     bitDepth: 12
+rotator:
+  device: "Rotator Simulator"
+powerHub:
+  device: "Pegasus PPBA"
+observatoryControl:
+  device: "Dome Simulator"
+flatScreen:
+  device: "Flat Panel Simulator"
+dewHeaters:
+  - device: "Pegasus PPBA:Dew A"
+  - device: "Pegasus PPBA:Dew B"
 ```
 
-Every component that corresponds to an actual INDI driver — `mount`, `focuser`, `filterWheel`, `camera.imaging`, `camera.guiding` — carries a `device` field naming that INDI device. The `telescope` block (aperture/focal length) has no `device` of its own since it isn't a driver; it's optical data associated with the `mount` (and, for the guiding train, with whatever the guide camera is attached to).
+Every component that corresponds to an actual INDI driver — `mount`, `focuser`, `filterWheel`, `camera.imaging`, `camera.guiding`, `rotator`, `powerHub`, `observatoryControl`, `flatScreen`, each entry of `dewHeaters` — carries a `device` field naming that INDI device. The `telescope` block (aperture/focal length) has no `device` of its own since it isn't a driver; it's optical data associated with the `mount` (and, for the guiding train, with whatever the guide camera is attached to).
+
+`rotator`, `powerHub`, `observatoryControl`, `flatScreen` and `dewHeaters` are all optional — a rig need not have a field rotator, powered USB/dew hub, dome/roof controller, flat-field panel, or dew heater. Unlike the other components, `dewHeaters` is a list rather than a single device, since a rig commonly has more than one independently-controlled heater channel/strap. For now each of these is just a `device` name with no further config, unlike e.g. `focuser`'s position range — extra fields can be added if a concrete use case needs them.
 
 **The YAML definition is authoritative; live INDI properties are advisory.** Where a field overlaps with something INDI reports (camera pixel size/count/bit depth), the server can cross-check the connected device's live properties against the configured rig and flag a mismatch — but it never overrides the declared config, since INDI can't confirm the parts of the rig it has no visibility into (aperture, focal length, imaging vs. guiding role).
 
@@ -400,7 +413,7 @@ Every component that corresponds to an actual INDI driver — `mount`, `focuser`
 
 ### Checking that a rig's devices are present
 
-Once a rig is selected (for a script run, or explicitly via a `check_rig` tool), the server checks every declared `device` field (`mount`, `focuser`, `filterWheel`, `camera.imaging`, `camera.guiding` if present) against the INDI devices currently connected to `indiserver`, and **warns rather than blocks** on any that are missing:
+Once a rig is selected (for a script run, or explicitly via a `check_rig` tool), the server checks every declared `device` field (`mount`, `focuser`, `filterWheel`, `camera.imaging`, `camera.guiding`, `rotator`, `powerHub`, `observatoryControl`, `flatScreen`, each of `dewHeaters`, whichever are present) against the INDI devices currently connected to `indiserver`, and **warns rather than blocks** on any that are missing:
 
 ```json
 {

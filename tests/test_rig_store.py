@@ -42,6 +42,17 @@ camera:
     pixelsY: 960
     pixelSizeMicron: 3.75
     bitDepth: 12
+rotator:
+  device: "Rotator Simulator"
+powerHub:
+  device: "Pegasus PPBA"
+observatoryControl:
+  device: "Dome Simulator"
+flatScreen:
+  device: "Flat Panel Simulator"
+dewHeaters:
+  - device: "Pegasus PPBA:Dew A"
+  - device: "Pegasus PPBA:Dew B"
 """
 
 MINIMAL_RIG_YAML = """
@@ -97,6 +108,18 @@ def test_load_rigs_parses_valid_rig_file(tmp_path: Path) -> None:
     assert rig.camera.imaging.device == "ZWO CCD ASI2600MM Pro"
     assert rig.camera.guiding is not None
     assert rig.camera.guiding.bitDepth == 12
+    assert rig.rotator is not None
+    assert rig.rotator.device == "Rotator Simulator"
+    assert rig.powerHub is not None
+    assert rig.powerHub.device == "Pegasus PPBA"
+    assert rig.observatoryControl is not None
+    assert rig.observatoryControl.device == "Dome Simulator"
+    assert rig.flatScreen is not None
+    assert rig.flatScreen.device == "Flat Panel Simulator"
+    assert [d.device for d in rig.dewHeaters] == [
+        "Pegasus PPBA:Dew A",
+        "Pegasus PPBA:Dew B",
+    ]
 
 
 def test_load_rigs_allows_omitting_optional_guiding_trains(tmp_path: Path) -> None:
@@ -109,6 +132,11 @@ def test_load_rigs_allows_omitting_optional_guiding_trains(tmp_path: Path) -> No
     assert rig.telescope.guiding is None
     assert rig.camera.guiding is None
     assert rig.filterWheel.slots == {}
+    assert rig.rotator is None
+    assert rig.powerHub is None
+    assert rig.observatoryControl is None
+    assert rig.flatScreen is None
+    assert rig.dewHeaters == []
 
 
 def test_load_rigs_skips_files_with_invalid_yaml(tmp_path: Path) -> None:

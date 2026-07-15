@@ -55,6 +55,17 @@ camera:
     pixelsY: 960
     pixelSizeMicron: 3.75
     bitDepth: 12
+rotator:
+  device: "Rotator Simulator"
+powerHub:
+  device: "Pegasus PPBA"
+observatoryControl:
+  device: "Dome Simulator"
+flatScreen:
+  device: "Flat Panel Simulator"
+dewHeaters:
+  - device: "Pegasus PPBA:Dew A"
+  - device: "Pegasus PPBA:Dew B"
 ```
 
 ## Fields
@@ -84,8 +95,19 @@ camera:
 | `camera.imaging.pixelsX` / `pixelsY` | integer | yes | Sensor resolution. |
 | `camera.imaging.pixelSizeMicron` | number | yes | Pixel pitch, in microns. |
 | `camera.imaging.bitDepth` | integer | yes | ADC bit depth (e.g. `16`). |
+| `rotator` | object | no | A camera-field rotator, if one is used. |
+| `powerHub` | object | no | A powered USB/power-distribution hub (e.g. Pegasus PPBA), if one is used. |
+| `observatoryControl` | object | no | A dome or roll-off-roof controller, if the rig is housed in a controllable observatory. |
+| `flatScreen` | object | no | A flat-field panel, if one is used for calibration frames. |
+| `rotator.device` / `powerHub.device` / `observatoryControl.device` / `flatScreen.device` | string | yes (if the section is present) | The INDI device name for that component's driver. |
+| `dewHeaters` | list of objects | no (default: empty) | Dew heater channels/straps, if any are used. A list rather than a single device, since rigs commonly have more than one independently-controlled channel. |
+| `dewHeaters[].device` | string | yes | The INDI device name for that dew heater channel. |
 
 (`camera.guiding` fields mirror `camera.imaging`'s, shown once above.)
+
+`rotator`, `powerHub`, `observatoryControl`, `flatScreen`, and each entry of `dewHeaters` are, for
+now, just a `device` name with no further config — unlike e.g. `focuser`'s position range. Extra
+fields can be added later if a concrete use case needs them (e.g. a rotator's position range).
 
 ## Design notes
 
