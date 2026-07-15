@@ -76,6 +76,7 @@ def test_to_indi_event_converts_set_vector_to_property_update() -> None:
 
     indi_event = _to_indi_event(event)
 
+    assert indi_event is not None
     assert indi_event["kind"] == "propertyUpdate"
     assert indi_event["type"] == "number"
     assert indi_event["elements"] == {"CCD_EXPOSURE_VALUE": "5.0"}
@@ -86,6 +87,7 @@ def test_to_indi_event_converts_del_property() -> None:
 
     indi_event = _to_indi_event(event)
 
+    assert indi_event is not None
     assert indi_event["kind"] == "propertyDeleted"
     assert indi_event["type"] is None
     assert indi_event["message"] == "gone"
@@ -96,6 +98,7 @@ def test_to_indi_event_converts_message() -> None:
 
     indi_event = _to_indi_event(event)
 
+    assert indi_event is not None
     assert indi_event["kind"] == "message"
     assert indi_event["message"] == "hello"
 
