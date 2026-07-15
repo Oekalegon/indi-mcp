@@ -524,6 +524,7 @@ dependencies = [
     { name = "indipyclient" },
     { name = "indiweb" },
     { name = "mcp" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -541,6 +542,7 @@ requires-dist = [
     { name = "indipyclient", specifier = ">=0.9.1" },
     { name = "indiweb", specifier = ">=1.1.0" },
     { name = "mcp", specifier = ">=1.28.1" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [package.metadata.requires-dev]

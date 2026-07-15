@@ -13,6 +13,8 @@ An [MCP](https://modelcontextprotocol.io) server that controls astrophotography 
 * [Design Document](docs/Design.md)
 * [Deployment](docs/Deployment.md) — running the server locally (`stdio`) vs. as a
   systemd service on the Raspberry Pi (`streamable-http`)
+* [Rig YAML Schema](docs/RigSchema.md) — field reference for `rigs/*.yaml` imaging rig
+  definitions
 
 ## Debug CLI
 
