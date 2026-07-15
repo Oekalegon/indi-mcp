@@ -79,6 +79,27 @@ async def test_restart_server_switches_to_new_port(mocks: Mocks) -> None:
     assert status == {"running": True, "port": 7626}
 
 
+async def test_start_server_polls_until_process_becomes_visible(mocks: Mocks) -> None:
+    mocks.server.is_running.side_effect = [False, False, True]
+
+    status = await indi_server.start_server(port=7625)
+
+    assert mocks.server.is_running.call_count == 3
+    assert status == {"running": True, "port": 7625}
+
+
+async def test_start_server_returns_not_running_if_poll_times_out(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(indi_server, "_STARTUP_POLL_TIMEOUT", 0.05)
+    monkeypatch.setattr(indi_server, "_STARTUP_POLL_INTERVAL", 0.01)
+    mocks.server.is_running.return_value = False
+
+    status = await indi_server.start_server(port=7625)
+
+    assert status == {"running": False, "port": 7625}
+
+
 async def test_get_status_reports_running_state(mocks: Mocks) -> None:
     mocks.server.is_running.return_value = False
 

@@ -34,6 +34,9 @@ _server = _IndiServer()
 _current_port = INDI_PORT
 _async_cmd: AsyncSystemCommand | None = None
 
+_STARTUP_POLL_TIMEOUT = 2.0
+_STARTUP_POLL_INTERVAL = 0.1
+
 
 class IndiServerStatus(TypedDict):
     """Current state of the managed `indiserver` process."""
@@ -65,7 +68,7 @@ async def start_server(port: int = INDI_PORT) -> IndiServerStatus:
     await asyncio.to_thread(_clear_fifo)
     _async_cmd = await asyncio.to_thread(_launch, port)
     _current_port = port
-    return await get_status()
+    return await _wait_until_running()
 
 
 async def stop_server() -> IndiServerStatus:
@@ -91,3 +94,18 @@ async def get_status() -> IndiServerStatus:
     """Report whether `indiserver` is running, and on which port."""
     running = await asyncio.to_thread(_server.is_running, _current_port)
     return {"running": running, "port": _current_port}
+
+
+async def _wait_until_running() -> IndiServerStatus:
+    """Poll `get_status` until `indiserver` is visible to psutil or the timeout elapses.
+
+    Right after launch, `is_running` can briefly report False even though the
+    process started successfully, because psutil hasn't picked it up yet.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _STARTUP_POLL_TIMEOUT
+    status = await get_status()
+    while not status["running"] and loop.time() < deadline:
+        await asyncio.sleep(_STARTUP_POLL_INTERVAL)
+        status = await get_status()
+    return status
