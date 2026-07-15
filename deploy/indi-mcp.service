@@ -1,0 +1,23 @@
+[Unit]
+Description=INDI MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=indi-mcp
+Group=indi-mcp
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/indi-mcp
+ExecStart=/opt/indi-mcp/.venv/bin/indi-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+# Hardening (loosen if it breaks USB/serial or INDI-driver process access)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/indi-mcp
+
+[Install]
+WantedBy=multi-user.target

@@ -104,8 +104,18 @@ async def send_indi_property(device: str, name: str, elements: dict[str, str]) -
     return await indi_messaging.send_property(device, name, elements)
 
 
-def run(transport: Transport = "stdio") -> None:
-    """Start serving the MCP server over the given transport."""
+def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
+    """Start serving the MCP server over the given transport.
+
+    `host`/`port` only apply to the `sse` and `streamable-http` transports.
+    """
     logging.basicConfig(level=logging.INFO)
-    logger.info("Starting indi-mcp server (transport=%s)", transport)
+    if transport != "stdio":
+        mcp.settings.host = host
+        mcp.settings.port = port
+        logger.info(
+            "Starting indi-mcp server (transport=%s, host=%s, port=%d)", transport, host, port
+        )
+    else:
+        logger.info("Starting indi-mcp server (transport=%s)", transport)
     mcp.run(transport=transport)
