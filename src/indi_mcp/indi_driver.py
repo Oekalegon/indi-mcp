@@ -8,6 +8,9 @@ start/stop the server itself.
 
 import asyncio
 import logging
+import os
+import shutil
+from pathlib import Path
 from typing import TypedDict
 
 from indiweb.driver import DeviceDriver, DriverCollection
@@ -35,6 +38,8 @@ class DriverInfo(TypedDict):
     label: str
     version: str
     family: str
+    binary: str
+    installed: bool
 
 
 class DriverStatus(TypedDict):
@@ -58,11 +63,32 @@ def _find_driver(label: str) -> DeviceDriver:
     return driver
 
 
+def _is_binary_installed(binary: str) -> bool:
+    """Check whether a driver's binary is actually present and executable.
+
+    Catalog entries come from XML shipped by driver packages that may not be
+    installed (e.g. indi-full extras), so the binary they reference can be
+    missing even though the entry is listed.
+    """
+    if not binary:
+        return False
+    if Path(binary).is_absolute():
+        return os.access(binary, os.X_OK)
+    return shutil.which(binary) is not None
+
+
 async def get_driver_catalog() -> list[DriverInfo]:
     """List every driver known to the INDI driver catalog (installed on this device)."""
     drivers = await asyncio.to_thread(lambda: _get_catalog().drivers)
     return [
-        {"name": d.name, "label": d.label, "version": d.version, "family": d.family}
+        {
+            "name": d.name,
+            "label": d.label,
+            "version": d.version,
+            "family": d.family,
+            "binary": d.binary,
+            "installed": _is_binary_installed(d.binary),
+        }
         for d in drivers
     ]
 
