@@ -30,7 +30,14 @@ def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
     monkeypatch.setattr(indi_server, "restart_server", restart_server)
 
     catalog = [
-        {"name": "indi_simulator_ccd", "label": "CCD Simulator", "version": "1.0", "family": "CCDs"}
+        {
+            "name": "indi_simulator_ccd",
+            "label": "CCD Simulator",
+            "version": "1.0",
+            "family": "CCDs",
+            "binary": "indi_simulator_ccd",
+            "installed": True,
+        }
     ]
     get_driver_catalog = AsyncMock(return_value=catalog)
     list_running_drivers = AsyncMock(return_value=[{"label": "CCD Simulator", "running": True}])
@@ -100,7 +107,30 @@ async def test_driver_list_prints_catalog(capsys: pytest.CaptureFixture[str]) ->
 
     await args.func(args)
 
-    assert "CCD Simulator" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "CCD Simulator" in out
+    assert "not installed" not in out
+
+
+async def test_driver_list_flags_uninstalled_binaries(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    catalog = [
+        {
+            "name": "indi_v4l2_ccd",
+            "label": "DMK CCD",
+            "version": "1.0",
+            "family": "CCDs",
+            "binary": "indi_v4l2_ccd",
+            "installed": False,
+        }
+    ]
+    monkeypatch.setattr(indi_driver, "get_driver_catalog", AsyncMock(return_value=catalog))
+    args = _parse(["driver", "list"])
+
+    await args.func(args)
+
+    assert "[not installed]" in capsys.readouterr().out
 
 
 async def test_driver_running_prints_labels(capsys: pytest.CaptureFixture[str]) -> None:
