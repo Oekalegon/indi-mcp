@@ -93,9 +93,7 @@ class MessagingStatus(TypedDict):
 
 def _elements(event: Any) -> dict[str, str] | None:
     if isinstance(event, setBLOBVector):
-        return {
-            name: f"{size} bytes ({fmt})" for name, (size, fmt) in event.sizeformat.items()
-        }
+        return {name: f"{size} bytes ({fmt})" for name, (size, fmt) in event.sizeformat.items()}
     if isinstance(event, defBLOBVector):
         return None
     return dict(event.data)

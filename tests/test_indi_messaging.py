@@ -138,12 +138,28 @@ async def test_get_status_reports_disconnected_state_before_starting() -> None:
 
 def test_list_messages_returns_newest_first_and_filters_by_device() -> None:
     indi_messaging._buffer.appendleft(
-        {"kind": "message", "type": None, "device": "A", "name": None,
-         "state": None, "message": "first", "elements": None, "timestamp": "t1"}
+        {
+            "kind": "message",
+            "type": None,
+            "device": "A",
+            "name": None,
+            "state": None,
+            "message": "first",
+            "elements": None,
+            "timestamp": "t1",
+        }
     )
     indi_messaging._buffer.appendleft(
-        {"kind": "message", "type": None, "device": "B", "name": None,
-         "state": None, "message": "second", "elements": None, "timestamp": "t2"}
+        {
+            "kind": "message",
+            "type": None,
+            "device": "B",
+            "name": None,
+            "state": None,
+            "message": "second",
+            "elements": None,
+            "timestamp": "t2",
+        }
     )
 
     messages = indi_messaging.list_messages()
@@ -156,8 +172,16 @@ def test_list_messages_returns_newest_first_and_filters_by_device() -> None:
 def test_list_messages_respects_limit() -> None:
     for i in range(5):
         indi_messaging._buffer.appendleft(
-            {"kind": "message", "type": None, "device": None, "name": None,
-             "state": None, "message": str(i), "elements": None, "timestamp": "t"}
+            {
+                "kind": "message",
+                "type": None,
+                "device": None,
+                "name": None,
+                "state": None,
+                "message": str(i),
+                "elements": None,
+                "timestamp": "t",
+            }
         )
 
     assert len(indi_messaging.list_messages(limit=2)) == 2
