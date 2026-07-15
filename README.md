@@ -11,6 +11,8 @@ An [MCP](https://modelcontextprotocol.io) server that controls astrophotography 
 ## Documentation
 
 * [Design Document](docs/Design.md)
+* [Deployment](docs/Deployment.md) — running the server locally (`stdio`) vs. as a
+  systemd service on the Raspberry Pi (`streamable-http`)
 
 ## Status
 
