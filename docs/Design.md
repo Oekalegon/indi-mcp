@@ -354,44 +354,44 @@ id: newtonian-8in
 name: 8" Newtonian imaging rig
 mount:
   device: "Telescope Simulator"
-telescope:
-  imaging:
+imagingTrain:
+  telescope:
     apertureMm: 203
     focalLengthMm: 1000
-  guiding:
-    apertureMm: 60
-    focalLengthMm: 240
-focuser:
-  device: "Focuser Simulator"
-  minPosition: 0
-  maxPosition: 50000
-filterWheel:
-  device: "Filter Wheel Simulator"
-  slots:
-    1: Luminance
-    2: Red
-    3: Green
-    4: Blue
-    5: Ha
-    6: OIII
-    7: SII
-camera:
-  imaging:
+  focuser:
+    device: "Focuser Simulator"
+    minPosition: 0
+    maxPosition: 50000
+  filterWheel:
+    device: "Filter Wheel Simulator"
+    slots:
+      1: Luminance
+      2: Red
+      3: Green
+      4: Blue
+      5: Ha
+      6: OIII
+      7: SII
+  rotator:
+    device: "Rotator Simulator"
+  camera:
     device: "ZWO CCD ASI2600MM Pro"
     cooled: true
     pixelsX: 6248
     pixelsY: 4176
     pixelSizeMicron: 3.76
     bitDepth: 16
-  guiding:
+guidingTrain:
+  telescope:
+    apertureMm: 60
+    focalLengthMm: 240
+  camera:
     device: "ZWO CCD ASI120MM Mini"
     cooled: false
     pixelsX: 1280
     pixelsY: 960
     pixelSizeMicron: 3.75
     bitDepth: 12
-rotator:
-  device: "Rotator Simulator"
 devices:
   - role: powerHub
     device: "Pegasus PPBA"
@@ -405,9 +405,58 @@ devices:
     device: "Pegasus PPBA:Dew B"
 ```
 
-Every component that corresponds to an actual INDI driver — `mount`, `focuser`, `filterWheel`, `camera.imaging`, `camera.guiding`, `rotator`, each entry of `devices` — carries a `device` field naming that INDI device. The `telescope` block (aperture/focal length) has no `device` of its own since it isn't a driver; it's optical data associated with the `mount` (and, for the guiding train, with whatever the guide camera is attached to).
+**A rig is built from optical trains, not a flat list of components.** `imagingTrain` and the
+optional `guidingTrain` are each a `{telescope, camera, focuser?, filterWheel?, rotator?}` —
+the same shape — because a guiding setup is really just another (usually simpler) optical
+train: its own telescope optics feeding its own camera, occasionally with its own focuser or
+filter wheel too, even though in practice a guide scope is almost always just a telescope +
+camera. `mount` sits outside both trains since it's the shared physical platform, not part of
+either optical path.
 
-`rotator` and `devices` are both optional. `rotator` gets its own typed field, alongside `mount`/`focuser`/`filterWheel`/`camera`, because it's part of the imaging train like they are. Everything else that doesn't need config beyond a device name — power hubs, observatory/dome control, flat-field panels, dew heaters, and whatever else turns up later — goes in the generic `devices` list instead of a dedicated named field per device type: each entry is `{role, device}`, where `role` is a free-form label (not a fixed enum), so a rig can declare a device type this schema has no dedicated field for without needing a schema change. `devices` also naturally supports more than one of the same role (e.g. multiple independently-controlled dew heater channels), which a single named field couldn't. A component graduates from `devices` to its own typed field only once it needs config beyond a device name (the way `focuser` needs a position range and `filterWheel` needs slot names).
+Every component that corresponds to an actual INDI driver — `mount`, each train's `focuser`,
+`filterWheel`, `camera`, `rotator` (imaging train only), the off-axis guider's `camera`, each
+entry of `devices` — carries a `device` field naming that INDI device. `telescope`
+(aperture/focal length) has no `device` of its own since it isn't a driver; it's the optical
+data for that train.
+
+**Off-axis guiding is an alternative to a separate guiding train, not an addition to it.** An
+off-axis guider (OAG) picks off guide-camera light from the imaging train's own optical path via
+a prism, rather than using a second scope with its own optics. It's declared as
+`imagingTrain.offAxisGuider.camera` (just a camera — it shares the imaging train's telescope) and
+is mutually exclusive with `guidingTrain`: a rig guides via a separate scope or via an OAG, never
+both, so the schema rejects a rig declaring both.
+
+```yaml
+imagingTrain:
+  telescope:
+    apertureMm: 200
+    focalLengthMm: 800
+  camera:
+    device: "ZWO CCD ASI2600MM Pro"
+    pixelsX: 6248
+    pixelsY: 4176
+    pixelSizeMicron: 3.76
+    bitDepth: 16
+  offAxisGuider:
+    camera:
+      device: "ZWO CCD ASI120MM Mini"
+      pixelsX: 1280
+      pixelsY: 960
+      pixelSizeMicron: 3.75
+      bitDepth: 12
+```
+
+`devices` is the catch-all for equipment that doesn't need config beyond a device name — power
+hubs, observatory/dome control, flat-field panels, dew heaters, and whatever else turns up
+later — instead of a dedicated named field per device type: each entry is `{role, device}`,
+where `role` is a free-form label (not a fixed enum), so a rig can declare a device type this
+schema has no dedicated field for without needing a schema change. `devices` also naturally
+supports more than one of the same role (e.g. multiple independently-controlled dew heater
+channels), which a single named field couldn't. A component graduates from `devices` to its own
+typed field only once it needs config beyond a device name (the way `focuser` needs a position
+range and `filterWheel` needs slot names) — which is also why `rotator` is a typed field on
+`imagingTrain` rather than living in `devices`: it's a core part of the imaging train, the same
+way `focuser`/`filterWheel`/`camera` are.
 
 **The YAML definition is authoritative; live INDI properties are advisory.** Where a field overlaps with something INDI reports (camera pixel size/count/bit depth), the server can cross-check the connected device's live properties against the configured rig and flag a mismatch — but it never overrides the declared config, since INDI can't confirm the parts of the rig it has no visibility into (aperture, focal length, imaging vs. guiding role).
 
@@ -415,7 +464,7 @@ Every component that corresponds to an actual INDI driver — `mount`, `focuser`
 
 ### Checking that a rig's devices are present
 
-Once a rig is selected (for a script run, or explicitly via a `check_rig` tool), the server checks every declared `device` field (`mount`, `focuser`, `filterWheel`, `camera.imaging`, `camera.guiding`, `rotator`, and each entry of `devices`, whichever are present) against the INDI devices currently connected to `indiserver`, and **warns rather than blocks** on any that are missing:
+Once a rig is selected (for a script run, or explicitly via a `check_rig` tool), the server checks every declared `device` field across `mount`, `imagingTrain` (including its `offAxisGuider` if present), `guidingTrain` if present, and each entry of `devices`, against the INDI devices currently connected to `indiserver`, and **warns rather than blocks** on any that are missing:
 
 ```json
 {

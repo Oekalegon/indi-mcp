@@ -1,8 +1,8 @@
 # Rig YAML Schema
 
-An imaging **rig** describes the physical equipment mounted for a session — telescope
-optics, focuser, filter wheel, imaging camera, and (optionally) a separate guiding train —
-that INDI itself has no protocol representation for. See
+An imaging **rig** describes the physical equipment mounted for a session — an imaging train
+(telescope optics, focuser, filter wheel, rotator, camera), an optional separate guiding train,
+and a mount — that INDI itself has no protocol representation for. See
 [Design.md § Imaging rig metadata](Design.md#imaging-rig-metadata) for the background and
 rationale; this document is the field-by-field reference for the YAML format.
 
@@ -19,44 +19,44 @@ id: newtonian-8in
 name: 8" Newtonian imaging rig
 mount:
   device: "Telescope Simulator"
-telescope:
-  imaging:
+imagingTrain:
+  telescope:
     apertureMm: 203
     focalLengthMm: 1000
-  guiding:
-    apertureMm: 60
-    focalLengthMm: 240
-focuser:
-  device: "Focuser Simulator"
-  minPosition: 0
-  maxPosition: 50000
-filterWheel:
-  device: "Filter Wheel Simulator"
-  slots:
-    1: Luminance
-    2: Red
-    3: Green
-    4: Blue
-    5: Ha
-    6: OIII
-    7: SII
-camera:
-  imaging:
+  focuser:
+    device: "Focuser Simulator"
+    minPosition: 0
+    maxPosition: 50000
+  filterWheel:
+    device: "Filter Wheel Simulator"
+    slots:
+      1: Luminance
+      2: Red
+      3: Green
+      4: Blue
+      5: Ha
+      6: OIII
+      7: SII
+  rotator:
+    device: "Rotator Simulator"
+  camera:
     device: "ZWO CCD ASI2600MM Pro"
     cooled: true
     pixelsX: 6248
     pixelsY: 4176
     pixelSizeMicron: 3.76
     bitDepth: 16
-  guiding:
+guidingTrain:
+  telescope:
+    apertureMm: 60
+    focalLengthMm: 240
+  camera:
     device: "ZWO CCD ASI120MM Mini"
     cooled: false
     pixelsX: 1280
     pixelsY: 960
     pixelSizeMicron: 3.75
     bitDepth: 12
-rotator:
-  device: "Rotator Simulator"
 devices:
   - role: powerHub
     device: "Pegasus PPBA"
@@ -70,44 +70,92 @@ devices:
     device: "Pegasus PPBA:Dew B"
 ```
 
+An off-axis-guided rig looks like this instead of having a `guidingTrain` (see
+[Off-axis guiding](#off-axis-guiding) below):
+
+```yaml
+imagingTrain:
+  telescope:
+    apertureMm: 200
+    focalLengthMm: 800
+  camera:
+    device: "ZWO CCD ASI2600MM Pro"
+    pixelsX: 6248
+    pixelsY: 4176
+    pixelSizeMicron: 3.76
+    bitDepth: 16
+  offAxisGuider:
+    camera:
+      device: "ZWO CCD ASI120MM Mini"
+      pixelsX: 1280
+      pixelsY: 960
+      pixelSizeMicron: 3.75
+      bitDepth: 12
+```
+
 ## Fields
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `id` | string | yes | Stable identifier for this rig. Used by scripts and MCP tools (`get_rig`, and eventually rig-aware script parameters) to reference it. Must be unique across all rig files; if two files declare the same `id`, the one loaded first (files are read in sorted filename order) wins and the other is skipped. |
 | `name` | string | yes | Human-readable display name. |
-| `mount` | object | yes | The telescope mount. |
+| `mount` | object | yes | The telescope mount. Sits outside both trains — it's the shared physical platform, not part of either optical path. |
 | `mount.device` | string | yes | The INDI device name for the mount driver (e.g. `"Telescope Simulator"`). |
-| `telescope` | object | yes | Optical data for the telescope. Has no `device` of its own — it isn't a driver, it's data associated with what's attached to the mount. |
-| `telescope.imaging` | object | yes | Optics of the main imaging telescope. |
-| `telescope.imaging.apertureMm` | number | yes | Aperture, in millimeters. |
-| `telescope.imaging.focalLengthMm` | number | yes | Focal length, in millimeters. |
-| `telescope.guiding` | object | no | Optics of a separate guide scope, if one is used. Same shape as `telescope.imaging`. Omit if guiding shares the imaging optical train, or if the rig isn't guided. |
-| `focuser` | object | yes | The focuser. |
-| `focuser.device` | string | yes | The INDI device name for the focuser driver. |
-| `focuser.minPosition` / `focuser.maxPosition` | integer | yes | The focuser's travel range, in its native position units. |
-| `filterWheel` | object | yes | The filter wheel. |
-| `filterWheel.device` | string | yes | The INDI device name for the filter wheel driver. |
+| `imagingTrain` | object | yes | The main imaging optical train: telescope optics through to the imaging camera. |
+| `guidingTrain` | object | no | A separate guiding optical train, if the rig uses one. Same shape as `imagingTrain`, minus `offAxisGuider` (see [Off-axis guiding](#off-axis-guiding)). Omit if guiding shares the imaging train via an off-axis guider, or if the rig isn't guided. |
+
+### Optical train fields (`imagingTrain` / `guidingTrain`)
+
+Both trains share the same shape: a `telescope` and `camera` are required; `focuser`,
+`filterWheel`, and `rotator` are optional on **either** train, since in principle any of them
+could apply to a guiding setup even though in practice a guide scope is almost always just a
+telescope + camera with none of the three.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `telescope` | object | yes | Optical data for this train. Has no `device` of its own — it isn't a driver, it's data associated with what's attached to the mount (or, for an off-axis guider, the imaging train's own telescope). |
+| `telescope.apertureMm` | number | yes | Aperture, in millimeters. |
+| `telescope.focalLengthMm` | number | yes | Focal length, in millimeters. |
+| `camera` | object | yes | The camera for this train. |
+| `camera.device` | string | yes | The INDI device name for the camera driver. |
+| `camera.cooled` | boolean | no (default: `false`) | Whether the camera has active sensor cooling. |
+| `camera.pixelsX` / `camera.pixelsY` | integer | yes | Sensor resolution. |
+| `camera.pixelSizeMicron` | number | yes | Pixel pitch, in microns. |
+| `camera.bitDepth` | integer | yes | ADC bit depth (e.g. `16`). |
+| `focuser` | object | no | The focuser for this train, if it has one. |
+| `focuser.device` | string | yes (if `focuser` is present) | The INDI device name for the focuser driver. |
+| `focuser.minPosition` / `focuser.maxPosition` | integer | yes (if `focuser` is present) | The focuser's travel range, in its native position units. |
+| `filterWheel` | object | no | The filter wheel for this train, if it has one. |
+| `filterWheel.device` | string | yes (if `filterWheel` is present) | The INDI device name for the filter wheel driver. |
 | `filterWheel.slots` | map of integer → string | no (default: empty) | Filter name per slot position (1-indexed, matching the filter wheel's own numbering). Omit or leave incomplete for slots that aren't in use or aren't yet decided. |
-| `camera` | object | yes | The camera(s) used for imaging and (optionally) guiding. |
-| `camera.imaging` | object | yes | The main imaging camera. |
-| `camera.guiding` | object | no | The guide camera, if a separate one is used. Same shape as `camera.imaging`. Omit if there is no separate guide camera. |
-| `camera.imaging.device` / `camera.guiding.device` | string | yes | The INDI device name for the camera driver. |
-| `camera.imaging.cooled` / `camera.guiding.cooled` | boolean | no (default: `false`) | Whether the camera has active sensor cooling. |
-| `camera.imaging.pixelsX` / `pixelsY` | integer | yes | Sensor resolution. |
-| `camera.imaging.pixelSizeMicron` | number | yes | Pixel pitch, in microns. |
-| `camera.imaging.bitDepth` | integer | yes | ADC bit depth (e.g. `16`). |
-| `rotator` | object | no | A camera-field rotator, if one is used. Gets its own typed field (rather than living in `devices` below) because it's part of the imaging train, like `mount`/`focuser`/`filterWheel`/`camera`. |
+| `rotator` | object | no | A camera-field rotator, if this train has one. |
 | `rotator.device` | string | yes (if `rotator` is present) | The INDI device name for the rotator driver. |
+
+### Off-axis guiding
+
+`imagingTrain.offAxisGuider` is an alternative to `guidingTrain`, not an addition to it — the
+schema rejects a rig that declares both. An off-axis guider (OAG) picks off guide-camera light
+from the imaging train's own optical path via a prism, so it needs no telescope optics of its
+own, just a camera.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `imagingTrain.offAxisGuider` | object | no | An off-axis guider on the imaging train. Mutually exclusive with `guidingTrain`. |
+| `imagingTrain.offAxisGuider.camera` | object | yes (if `offAxisGuider` is present) | The guide camera. Same shape as any other `camera` field above. |
+
+### Other devices
+
+| Field | Type | Required | Description |
+|---|---|---|---|
 | `devices` | list of objects | no (default: empty) | Any other equipment that doesn't need config beyond a device name and a role — power hubs, observatory/dome control, flat-field panels, dew heaters, and anything else this schema doesn't have a dedicated field for. |
 | `devices[].role` | string | yes | A free-form label for what this device is (e.g. `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"`). Not a fixed enum — a rig can use a role this schema's authors never anticipated, so a new device type never requires a schema change. `role` values aren't required to be unique: a rig commonly has more than one device sharing a role (e.g. several independently-controlled dew heater channels). |
 | `devices[].device` | string | yes | The INDI device name for that device's driver. |
 
-(`camera.guiding` fields mirror `camera.imaging`'s, shown once above.)
-
 A component only needs its own typed field, instead of an entry in `devices`, once it needs
 config beyond a device name — the way `focuser` needs a position range and `filterWheel` needs
-slot names. Everything else — including device types not yet anticipated — belongs in `devices`.
+slot names. That's also why `rotator` is a typed field on the optical trains rather than living
+in `devices`: it's a core part of the imaging train, the same way `focuser`/`filterWheel`/`camera`
+are. Everything else — including device types not yet anticipated — belongs in `devices`.
 
 ## Design notes
 

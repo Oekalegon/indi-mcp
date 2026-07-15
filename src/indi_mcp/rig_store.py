@@ -1,13 +1,13 @@
 """Loading and querying imaging rig definitions.
 
-Rig definitions describe the physical imaging setup (mount, telescope optics,
-focuser, filter wheel, imaging/guide cameras) that INDI itself has no
-protocol representation for. They are YAML documents under a rigs directory
-(one file per rig, see `docs/RigSchema.md`), not SQLite rows, since this is
-low-volume human-curated configuration rather than write-heavy operational
-data. Like the scripting layer, files are parsed with `yaml.safe_load` and
-validated against a schema, since they may be authored on the Client
-Computer and uploaded.
+Rig definitions describe the physical imaging setup (mount, imaging train,
+optional guiding train) that INDI itself has no protocol representation for.
+They are YAML documents under a rigs directory (one file per rig, see
+`docs/RigSchema.md`), not SQLite rows, since this is low-volume
+human-curated configuration rather than write-heavy operational data. Like
+the scripting layer, files are parsed with `yaml.safe_load` and validated
+against a schema, since they may be authored on the Client Computer and
+uploaded.
 """
 
 import logging
@@ -16,21 +16,22 @@ from pathlib import Path
 from typing import TypedDict
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "AuxiliaryDevice",
     "Camera",
-    "CameraTrains",
     "Device",
     "Filterwheel",
     "Focuser",
+    "ImagingTrain",
+    "OffAxisGuider",
+    "OpticalTrain",
     "Rig",
     "RigSummary",
-    "Telescope",
-    "TelescopeTrain",
+    "TelescopeOptics",
     "get_rig",
     "list_rigs",
     "load_rigs",
@@ -46,14 +47,11 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class TelescopeTrain(_StrictModel):
+class TelescopeOptics(_StrictModel):
+    """Aperture/focal length of one optical train. Not a driver, so no `device` field."""
+
     apertureMm: float
     focalLengthMm: float
-
-
-class Telescope(_StrictModel):
-    imaging: TelescopeTrain
-    guiding: TelescopeTrain | None = None
 
 
 class Device(_StrictModel):
@@ -82,9 +80,37 @@ class Camera(_StrictModel):
     bitDepth: int
 
 
-class CameraTrains(_StrictModel):
-    imaging: Camera
-    guiding: Camera | None = None
+class OffAxisGuider(_StrictModel):
+    """A guide camera picked off the imaging train's own light path via a prism.
+
+    An alternative to a separate `guidingTrain`: rather than a second scope
+    with its own optics, the guide camera shares the imaging train's
+    telescope. Mutually exclusive with `guidingTrain` (see `Rig`).
+    """
+
+    camera: Camera
+
+
+class OpticalTrain(_StrictModel):
+    """One optical path from telescope to camera: the imaging train, or a separate guiding train.
+
+    `focuser`/`filterWheel`/`rotator` are optional here because a guiding
+    train usually only has a camera (most guide scopes are manual-focus,
+    with no filter wheel or field rotator), but any of them can occur on
+    either train.
+    """
+
+    telescope: TelescopeOptics
+    camera: Camera
+    focuser: Focuser | None = None
+    filterWheel: Filterwheel | None = None
+    rotator: Device | None = None
+
+
+class ImagingTrain(OpticalTrain):
+    """The main imaging train, which may also carry an off-axis guider."""
+
+    offAxisGuider: OffAxisGuider | None = None
 
 
 class AuxiliaryDevice(_StrictModel):
@@ -108,12 +134,18 @@ class Rig(_StrictModel):
     id: str
     name: str
     mount: Device
-    telescope: Telescope
-    focuser: Focuser
-    filterWheel: Filterwheel
-    camera: CameraTrains
-    rotator: Device | None = None
+    imagingTrain: ImagingTrain
+    guidingTrain: OpticalTrain | None = None
     devices: list[AuxiliaryDevice] = []
+
+    @model_validator(mode="after")
+    def _check_guiding_method_is_unambiguous(self) -> "Rig":
+        if self.guidingTrain is not None and self.imagingTrain.offAxisGuider is not None:
+            raise ValueError(
+                "a rig can't declare both `guidingTrain` and `imagingTrain.offAxisGuider` "
+                "— guiding via a separate scope and via an off-axis guider are mutually exclusive"
+            )
+        return self
 
 
 class RigSummary(TypedDict):
