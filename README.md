@@ -14,7 +14,7 @@ An [MCP](https://modelcontextprotocol.io) server that controls astrophotography 
 
 ## Status
 
-Early setup stage — project scaffolding only, no functionality implemented yet.
+Early setup stage — MCP server skeleton in place (no tools/resources implemented yet).
 
 ## Tech stack
 
