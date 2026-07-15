@@ -6,12 +6,15 @@ import pytest
 from indi_mcp import indi_driver, indi_server
 
 
-def _make_driver(label: str, name: str = "indi_ccd_simulator") -> MagicMock:
+def _make_driver(
+    label: str, name: str = "indi_ccd_simulator", binary: str = "indi_ccd_simulator"
+) -> MagicMock:
     driver = MagicMock()
     driver.label = label
     driver.name = name
     driver.version = "1.0"
     driver.family = "CCDs"
+    driver.binary = binary
     return driver
 
 
@@ -36,12 +39,56 @@ def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
     return Mocks(server=server, catalog=catalog)
 
 
-async def test_get_driver_catalog_lists_known_drivers(mocks: Mocks) -> None:
+async def test_get_driver_catalog_lists_known_drivers(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(indi_driver.shutil, "which", lambda binary: "/usr/bin/" + binary)
+
     catalog = await indi_driver.get_driver_catalog()
 
     assert catalog == [
-        {"name": "indi_ccd_simulator", "label": "CCD Simulator", "version": "1.0", "family": "CCDs"}
+        {
+            "name": "indi_ccd_simulator",
+            "label": "CCD Simulator",
+            "version": "1.0",
+            "family": "CCDs",
+            "binary": "indi_ccd_simulator",
+            "installed": True,
+        }
     ]
+
+
+async def test_get_driver_catalog_flags_binaries_that_are_not_installed(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(indi_driver.shutil, "which", lambda binary: None)
+
+    catalog = await indi_driver.get_driver_catalog()
+
+    assert catalog[0]["installed"] is False
+
+
+@pytest.mark.parametrize(
+    ("binary", "which_result", "exists", "expected"),
+    [
+        ("", None, False, False),
+        ("indi_ccd_simulator", "/usr/bin/indi_ccd_simulator", False, True),
+        ("indi_ccd_simulator", None, False, False),
+        ("/opt/indi/bin/indi_ccd_simulator", None, True, True),
+        ("/opt/indi/bin/indi_ccd_simulator", None, False, False),
+    ],
+)
+def test_is_binary_installed(
+    monkeypatch: pytest.MonkeyPatch,
+    binary: str,
+    which_result: str | None,
+    exists: bool,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(indi_driver.shutil, "which", lambda _binary: which_result)
+    monkeypatch.setattr(indi_driver.os, "access", lambda _path, _mode: exists)
+
+    assert indi_driver._is_binary_installed(binary) is expected
 
 
 async def test_start_driver_starts_known_driver(mocks: Mocks) -> None:

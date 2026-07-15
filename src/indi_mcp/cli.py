@@ -60,8 +60,10 @@ async def _cmd_server_restart(args: argparse.Namespace) -> None:
 async def _cmd_driver_list(_args: argparse.Namespace) -> None:
     catalog = await indi_driver.get_driver_catalog()
     for driver in catalog:
+        marker = "" if driver["installed"] else "  [not installed]"
         print(
-            f"{driver['label']:<30} {driver['family']:<20} {driver['name']} ({driver['version']})"
+            f"{driver['label']:<30} {driver['family']:<20} "
+            f"{driver['name']} ({driver['version']}){marker}"
         )
 
 
