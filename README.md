@@ -14,6 +14,19 @@ An [MCP](https://modelcontextprotocol.io) server that controls astrophotography 
 * [Deployment](docs/Deployment.md) — running the server locally (`stdio`) vs. as a
   systemd service on the Raspberry Pi (`streamable-http`)
 
+## Debug CLI
+
+`indi-mcp-cli` is a small standalone tool for manually testing/debugging the INDI server and
+driver management tools, without needing an MCP client:
+
+```bash
+uv run indi-mcp-cli server status
+uv run indi-mcp-cli server start --port 7624
+uv run indi-mcp-cli driver list
+uv run indi-mcp-cli driver start "CCD Simulator"
+uv run indi-mcp-cli listen --device "CCD Simulator"   # prints incoming events until Ctrl+C
+```
+
 ## Status
 
 Early setup stage — MCP server skeleton in place, with INDI server management tools (start/stop/restart/status) implemented.
