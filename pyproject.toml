@@ -11,8 +11,8 @@ dependencies = [
     "mcp>=1.28.1",
     "indipyclient>=0.9.1",
     "indiweb>=1.1.0",
-    "psutil>=7.0.0",
     "pyyaml>=6.0.3",
+    "psutil>=7.0.0",
 ]
 
 [project.scripts]
