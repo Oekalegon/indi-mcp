@@ -244,3 +244,21 @@ async def test_list_running_drivers_keeps_mdpd_driver_with_no_local_process_matc
     running = await indi_driver.list_running_drivers()
 
     assert running == [{"label": "MDPD Device", "running": True}]
+
+
+async def test_classify_device_returns_the_driver_family_for_a_known_device(
+    mocks: Mocks,
+) -> None:
+    mocks.catalog.by_label.return_value = _make_driver("CCD Simulator")
+
+    family = await indi_driver.classify_device("CCD Simulator")
+
+    assert family == "CCDs"
+
+
+async def test_classify_device_returns_none_for_an_unrecognized_device(mocks: Mocks) -> None:
+    mocks.catalog.by_label.return_value = None
+
+    family = await indi_driver.classify_device("Unrecognized Device")
+
+    assert family is None

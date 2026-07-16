@@ -32,13 +32,16 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "Component",
+    "DraftDeviceInfo",
     "KNOWN_ROLES",
     "Rig",
     "RigCheck",
+    "RigDraft",
     "RigSuggestion",
     "RigSummary",
     "Role",
     "check_rig",
+    "draft_rig",
     "get_rig",
     "list_rigs",
     "load_rigs",
@@ -178,6 +181,44 @@ class RigCheck(TypedDict):
     missing: list[str]
 
 
+class DraftDeviceInfo(TypedDict):
+    """One connected INDI device, as gathered by the caller for `draft_rig`.
+
+    `draft_rig` itself never talks to INDI or the driver catalog — the
+    caller (`server.draft_rig`) resolves `family` via the driver catalog
+    and the property values via the messaging layer, so this module stays
+    testable with plain data (see `suggest_rig`/`check_rig`).
+    """
+
+    name: str
+    family: str | None
+    ccdInfo: dict[str, str] | None
+    filterNames: dict[str, str] | None
+    focusRange: tuple[float, float] | None
+
+
+class RigDraft(TypedDict):
+    """A pre-filled rig skeleton for the operator to complete and save.
+
+    Never a finalized, saved `Rig`: `notes` calls out anything `draft_rig`
+    could not fill in with confidence — fields INDI has no way to supply,
+    or an ambiguous role assignment — that the operator must resolve
+    before saving it as a real rig.
+    """
+
+    kind: str
+    components: list[Component]
+    notes: list[str]
+
+
+_FAMILY_TO_ROLE: dict[str, Role] = {
+    "CCDs": "camera",
+    "Filter Wheels": "filterWheel",
+    "Focusers": "focuser",
+    "Telescopes": "mount",
+}
+"""Driver catalog family names (`DeviceDriver.family`) recognized by `draft_rig`."""
+
 _rigs: dict[str, Rig] = {}
 
 
@@ -285,6 +326,126 @@ def check_rig(rig_id: str, connected_devices: Iterable[str]) -> RigCheck:
         "present": present,
         "missing": missing,
     }
+
+
+def draft_rig(devices: Iterable[DraftDeviceInfo]) -> RigDraft:
+    """Pre-fill a draft rig skeleton from connected devices' families and live properties.
+
+    Each `"CCDs"` device becomes a `camera` component (`guideCamera` for all
+    of them if more than one camera is connected, since which one is the
+    imaging camera isn't something INDI can tell us); `"Filter Wheels"`,
+    `"Focusers"`, and `"Telescopes"` devices become `filterWheel`,
+    `focuser`, and `mount` components respectively, with whatever `ccdInfo`
+    /`filterNames`/`focusRange` data is available filled in. Every drafted
+    component's `id` is its device name — a stable, unique placeholder the
+    operator is free to rename. Other roles (`telescope`, `powerHub`, ...)
+    have no INDI driver family to detect them by, so they're never drafted.
+
+    This never produces a finalized rig, only a starting point: `notes`
+    calls out fields it could not fill in (see "Assisting rig creation from
+    connected devices" in `docs/Design.md`) for the operator to complete
+    and save themselves (see "No silent auto-selection" in
+    `docs/RigSchema.md`).
+    """
+    devices = list(devices)
+    cameras = [device for device in devices if device["family"] == "CCDs"]
+    single_camera = len(cameras) == 1
+
+    components: list[Component] = []
+    notes: list[str] = []
+    for device in devices:
+        role = _FAMILY_TO_ROLE.get(device["family"])
+        if role is None:
+            continue
+        if role == "camera" and not single_camera:
+            role = "guideCamera"
+        components.append(_draft_component(role, device))
+
+    if len(cameras) > 1:
+        notes.append(
+            "More than one camera detected; all were drafted as guideCamera "
+            "since which one does the imaging isn't visible to INDI. Change "
+            "the imaging camera's role to camera."
+        )
+    if any(component.role in ("camera", "guideCamera") for component in components):
+        notes.append(
+            "apertureMm/focalLengthMm have no INDI equivalent; add telescope/"
+            "guideTelescope components with those fields before saving."
+        )
+
+    return {"kind": "rigDraft", "components": components, "notes": notes}
+
+
+def _draft_component(role: Role, device: DraftDeviceInfo) -> Component:
+    """Build one draft `Component` for `device`, filling in whatever `role`-specific data it has."""
+    if role in ("camera", "guideCamera"):
+        pixels_x, pixels_y, pixel_size, bit_depth = _ccd_info_fields(device["ccdInfo"])
+        return Component(
+            role=role,
+            id=device["name"],
+            device=device["name"],
+            pixelsX=pixels_x,
+            pixelsY=pixels_y,
+            pixelSizeMicron=pixel_size,
+            bitDepth=bit_depth,
+        )
+    if role == "filterWheel":
+        slots = _filter_slots(device["filterNames"])
+        return Component(role=role, id=device["name"], device=device["name"], slots=slots or None)
+    if role == "focuser" and device["focusRange"] is not None:
+        min_position, max_position = device["focusRange"]
+        return Component(
+            role=role,
+            id=device["name"],
+            device=device["name"],
+            minPosition=int(min_position),
+            maxPosition=int(max_position),
+        )
+    return Component(role=role, id=device["name"], device=device["name"])
+
+
+def _ccd_info_fields(
+    ccd_info: dict[str, str] | None,
+) -> tuple[int | None, int | None, float | None, int | None]:
+    """Map a `CCD_INFO` property's members to (pixelsX, pixelsY, pixelSizeMicron, bitDepth)."""
+    if not ccd_info:
+        return None, None, None, None
+    pixels_x = _parse_number(ccd_info.get("CCD_MAX_X"))
+    pixels_y = _parse_number(ccd_info.get("CCD_MAX_Y"))
+    pixel_size = _parse_number(ccd_info.get("CCD_PIXEL_SIZE"))
+    bit_depth = _parse_number(ccd_info.get("CCD_BITSPERPIXEL"))
+    return (
+        int(pixels_x) if pixels_x is not None else None,
+        int(pixels_y) if pixels_y is not None else None,
+        pixel_size,
+        int(bit_depth) if bit_depth is not None else None,
+    )
+
+
+def _filter_slots(filter_names: dict[str, str] | None) -> dict[int, str]:
+    """Parse a `FILTER_NAME` property's `FILTER_SLOT_NAME_<n>` members into `{slot: name}`."""
+    if not filter_names:
+        return {}
+    slots: dict[int, str] = {}
+    for member_name, value in filter_names.items():
+        prefix = "FILTER_SLOT_NAME_"
+        if not member_name.startswith(prefix):
+            continue
+        try:
+            slot = int(member_name[len(prefix) :])
+        except ValueError:
+            continue
+        slots[slot] = value
+    return slots
+
+
+def _parse_number(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _match_devices(rig: Rig, connected: set[str]) -> tuple[list[str], list[str]]:

@@ -430,3 +430,147 @@ def test_check_rig_rejects_unknown_id(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unknown rig"):
         rig_store.check_rig("does-not-exist", [])
+
+
+def _device(
+    name: str,
+    family: str | None,
+    *,
+    ccd_info: dict[str, str] | None = None,
+    filter_names: dict[str, str] | None = None,
+    focus_range: tuple[float, float] | None = None,
+) -> rig_store.DraftDeviceInfo:
+    return {
+        "name": name,
+        "family": family,
+        "ccdInfo": ccd_info,
+        "filterNames": filter_names,
+        "focusRange": focus_range,
+    }
+
+
+def test_draft_rig_drafts_a_single_camera_from_ccd_info() -> None:
+    draft = rig_store.draft_rig(
+        [
+            _device(
+                "ZWO CCD ASI2600MM Pro",
+                "CCDs",
+                ccd_info={
+                    "CCD_MAX_X": "6248",
+                    "CCD_MAX_Y": "4176",
+                    "CCD_PIXEL_SIZE": "3.76",
+                    "CCD_BITSPERPIXEL": "16",
+                },
+            )
+        ]
+    )
+
+    assert draft["components"] == [
+        rig_store.Component(
+            role="camera",
+            id="ZWO CCD ASI2600MM Pro",
+            device="ZWO CCD ASI2600MM Pro",
+            pixelsX=6248,
+            pixelsY=4176,
+            pixelSizeMicron=3.76,
+            bitDepth=16,
+        )
+    ]
+    assert any("apertureMm" in note for note in draft["notes"])
+
+
+def test_draft_rig_drafts_multiple_cameras_as_guide_cameras_with_a_note() -> None:
+    draft = rig_store.draft_rig(
+        [
+            _device("ZWO CCD ASI2600MM Pro", "CCDs"),
+            _device("ZWO CCD ASI120MM Mini", "CCDs"),
+        ]
+    )
+
+    assert [c.role for c in draft["components"]] == ["guideCamera", "guideCamera"]
+    assert any("more than one camera" in note.lower() for note in draft["notes"])
+
+
+def test_draft_rig_drafts_a_camera_with_no_ccd_info_yet() -> None:
+    draft = rig_store.draft_rig([_device("CCD Simulator", "CCDs", ccd_info=None)])
+
+    assert draft["components"] == [
+        rig_store.Component(role="camera", id="CCD Simulator", device="CCD Simulator")
+    ]
+
+
+def test_draft_rig_drafts_a_filter_wheel_with_slots_from_filter_name() -> None:
+    draft = rig_store.draft_rig(
+        [
+            _device(
+                "Filter Wheel Simulator",
+                "Filter Wheels",
+                filter_names={
+                    "FILTER_SLOT_NAME_1": "Luminance",
+                    "FILTER_SLOT_NAME_2": "Red",
+                },
+            )
+        ]
+    )
+
+    assert draft["components"] == [
+        rig_store.Component(
+            role="filterWheel",
+            id="Filter Wheel Simulator",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        )
+    ]
+    assert draft["notes"] == []
+
+
+def test_draft_rig_drafts_a_filter_wheel_with_no_filter_name_yet() -> None:
+    draft = rig_store.draft_rig(
+        [_device("Filter Wheel Simulator", "Filter Wheels", filter_names=None)]
+    )
+
+    assert draft["components"] == [
+        rig_store.Component(
+            role="filterWheel", id="Filter Wheel Simulator", device="Filter Wheel Simulator"
+        )
+    ]
+    assert draft["notes"] == []
+
+
+def test_draft_rig_drafts_a_focuser_with_its_position_range() -> None:
+    draft = rig_store.draft_rig(
+        [_device("Focuser Simulator", "Focusers", focus_range=(0.0, 50000.0))]
+    )
+
+    assert draft["components"] == [
+        rig_store.Component(
+            role="focuser",
+            id="Focuser Simulator",
+            device="Focuser Simulator",
+            minPosition=0,
+            maxPosition=50000,
+        )
+    ]
+    assert draft["notes"] == []
+
+
+def test_draft_rig_drafts_a_mount() -> None:
+    draft = rig_store.draft_rig([_device("Telescope Simulator", "Telescopes")])
+
+    assert draft["components"] == [
+        rig_store.Component(role="mount", id="Telescope Simulator", device="Telescope Simulator")
+    ]
+    assert draft["notes"] == []
+
+
+def test_draft_rig_ignores_devices_with_no_recognized_family() -> None:
+    draft = rig_store.draft_rig([_device("Pegasus PPBA", "Power"), _device("Unknown Widget", None)])
+
+    assert draft["components"] == []
+    assert draft["notes"] == []
+
+
+def test_draft_rig_with_no_devices_returns_an_empty_draft() -> None:
+    draft = rig_store.draft_rig([])
+
+    assert draft == {"kind": "rigDraft", "components": [], "notes": []}

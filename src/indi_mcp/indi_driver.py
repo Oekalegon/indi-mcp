@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "DriverInfo",
     "DriverStatus",
+    "classify_device",
     "get_driver_catalog",
     "list_running_drivers",
     "start_driver",
@@ -76,6 +77,18 @@ def _is_binary_installed(binary: str) -> bool:
     if Path(binary).is_absolute():
         return os.access(binary, os.X_OK)
     return shutil.which(binary) is not None
+
+
+async def classify_device(name: str) -> str | None:
+    """Return the driver family (e.g. `"CCDs"`, `"Focusers"`) for the INDI device `name`.
+
+    `None` if `name` isn't a known driver label. Device names match driver
+    labels 1:1 (drivers are always started with `-n "<label>"`, see
+    `_running_driver_labels`), so this looks the name up directly as a
+    catalog label rather than needing its own device-to-driver mapping.
+    """
+    driver = await asyncio.to_thread(lambda: _get_catalog().by_label(name))
+    return driver.family if driver is not None else None
 
 
 async def get_driver_catalog() -> list[DriverInfo]:
