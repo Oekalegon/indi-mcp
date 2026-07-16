@@ -270,13 +270,11 @@ def check_rig(rig_id: str, connected_devices: Iterable[str]) -> RigCheck:
 
     Unlike `suggest_rig`, which scores every loaded rig to help pick one,
     this checks a single already-selected rig's component `device` fields
-    against `connected_devices` and reports which are `present`/`missing`.
-    It never raises on a missing device: a rig might be intentionally used
-    without one of its devices (e.g. imaging without a guide camera), and
-    anything that actually needs the missing device will fail naturally
-    when it tries to use it. Components without a `device` field (e.g.
-    `telescope`, `guideTelescope`) have nothing INDI-visible to check, so
-    they're excluded from both lists.
+    against `connected_devices` and reports which are `present`/`missing`
+    (see `_match_devices`). It never raises on a missing device: a rig
+    might be intentionally used without one of its devices (e.g. imaging
+    without a guide camera), and anything that actually needs the missing
+    device will fail naturally when it tries to use it.
     """
     rig = get_rig(rig_id)
     present, missing = _match_devices(rig, set(connected_devices))
