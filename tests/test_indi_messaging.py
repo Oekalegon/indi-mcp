@@ -233,7 +233,7 @@ async def test_send_property_sends_new_vector_and_records_event(mocks: Mocks) ->
     assert indi_messaging.list_messages()[0] == event
 
 
-async def test_list_devices_rejects_when_not_started() -> None:
+def test_list_devices_rejects_when_not_started() -> None:
     with pytest.raises(RuntimeError, match="not started"):
         indi_messaging.list_devices()
 

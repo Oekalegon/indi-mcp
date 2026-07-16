@@ -335,7 +335,7 @@ def test_suggest_rig_sorts_best_match_first(tmp_path: Path) -> None:
     assert [s["rigId"] for s in suggestions] == ["minimal", "newtonian-8in"]
 
 
-def test_suggest_rig_scores_rig_with_no_device_components_as_zero(tmp_path: Path) -> None:
+def test_suggest_rig_scores_rig_with_no_device_components_as_none(tmp_path: Path) -> None:
     (tmp_path / "no-devices.yaml").write_text(
         'id: no-devices\nname: "No devices"\ncomponents:\n'
         "  - role: telescope\n    id: main-scope\n    apertureMm: 203\n"
@@ -349,8 +349,23 @@ def test_suggest_rig_scores_rig_with_no_device_components_as_zero(tmp_path: Path
             "kind": "rigSuggestion",
             "rigId": "no-devices",
             "rigName": "No devices",
-            "score": 0.0,
+            "score": None,
             "matched": [],
             "missing": [],
         }
     ]
+
+
+def test_suggest_rig_sorts_a_real_zero_score_ahead_of_a_none_score(tmp_path: Path) -> None:
+    (tmp_path / "a-minimal.yaml").write_text(MINIMAL_RIG_YAML)
+    (tmp_path / "b-no-devices.yaml").write_text(
+        'id: no-devices\nname: "No devices"\ncomponents:\n'
+        "  - role: telescope\n    id: main-scope\n    apertureMm: 203\n"
+    )
+    rig_store.load_rigs(tmp_path)
+
+    suggestions = rig_store.suggest_rig([])
+
+    assert [s["rigId"] for s in suggestions] == ["minimal", "no-devices"]
+    assert suggestions[0]["score"] == 0.0
+    assert suggestions[1]["score"] is None

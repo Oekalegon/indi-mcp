@@ -161,7 +161,7 @@ class RigSuggestion(TypedDict):
     kind: str
     rigId: str
     rigName: str
-    score: float
+    score: float | None
     matched: list[str]
     missing: list[str]
 
@@ -228,6 +228,10 @@ def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
     "No silent auto-selection" in `docs/RigSchema.md`). Components without a
     `device` field (e.g. `telescope`, `guideTelescope`) have nothing
     INDI-visible to check them against, so they're excluded from the score.
+    A rig with no device-bearing components at all has nothing to check
+    against, so its `score` is `None` rather than `0.0` — a rig that's been
+    checked and found to have nothing connected is a different situation
+    from a rig where there was nothing to check.
     """
     connected = set(connected_devices)
     suggestions: list[RigSuggestion] = []
@@ -242,7 +246,7 @@ def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
             else:
                 missing.append(component.id)
         total = len(matched) + len(missing)
-        score = len(matched) / total if total else 0.0
+        score = len(matched) / total if total else None
         suggestions.append(
             {
                 "kind": "rigSuggestion",
@@ -253,5 +257,10 @@ def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
                 "missing": missing,
             }
         )
-    suggestions.sort(key=lambda suggestion: suggestion["score"], reverse=True)
+    suggestions.sort(key=lambda suggestion: _sort_key(suggestion["score"]), reverse=True)
     return suggestions
+
+
+def _sort_key(score: float | None) -> float:
+    """Sort `None` (nothing to check) after every real score, including 0.0."""
+    return score if score is not None else -1.0
