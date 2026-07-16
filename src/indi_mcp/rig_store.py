@@ -34,9 +34,11 @@ __all__ = [
     "Component",
     "KNOWN_ROLES",
     "Rig",
+    "RigCheck",
     "RigSuggestion",
     "RigSummary",
     "Role",
+    "check_rig",
     "get_rig",
     "list_rigs",
     "load_rigs",
@@ -166,6 +168,16 @@ class RigSuggestion(TypedDict):
     missing: list[str]
 
 
+class RigCheck(TypedDict):
+    """Whether a specific rig's devices are currently connected."""
+
+    kind: str
+    rigId: str
+    ok: bool
+    present: list[str]
+    missing: list[str]
+
+
 _rigs: dict[str, Rig] = {}
 
 
@@ -259,6 +271,39 @@ def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
         )
     suggestions.sort(key=lambda suggestion: _sort_key(suggestion["score"]), reverse=True)
     return suggestions
+
+
+def check_rig(rig_id: str, connected_devices: Iterable[str]) -> RigCheck:
+    """Warn (rather than fail) about a specific rig's devices that aren't currently connected.
+
+    Unlike `suggest_rig`, which scores every loaded rig to help pick one,
+    this checks a single already-selected rig's component `device` fields
+    against `connected_devices` and reports which are `present`/`missing`.
+    It never raises on a missing device: a rig might be intentionally used
+    without one of its devices (e.g. imaging without a guide camera), and
+    anything that actually needs the missing device will fail naturally
+    when it tries to use it. Components without a `device` field (e.g.
+    `telescope`, `guideTelescope`) have nothing INDI-visible to check, so
+    they're excluded from both lists.
+    """
+    rig = get_rig(rig_id)
+    connected = set(connected_devices)
+    present = []
+    missing = []
+    for component in rig.components:
+        if component.device is None:
+            continue
+        if component.device in connected:
+            present.append(component.id)
+        else:
+            missing.append(component.id)
+    return {
+        "kind": "rigCheck",
+        "rigId": rig.id,
+        "ok": not missing,
+        "present": present,
+        "missing": missing,
+    }
 
 
 def _sort_key(score: float | None) -> float:

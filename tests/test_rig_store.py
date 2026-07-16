@@ -369,3 +369,64 @@ def test_suggest_rig_sorts_a_real_zero_score_ahead_of_a_none_score(tmp_path: Pat
     assert [s["rigId"] for s in suggestions] == ["minimal", "no-devices"]
     assert suggestions[0]["score"] == 0.0
     assert suggestions[1]["score"] is None
+
+
+def test_check_rig_reports_ok_when_all_devices_connected(tmp_path: Path) -> None:
+    (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
+    rig_store.load_rigs(tmp_path)
+
+    result = rig_store.check_rig("minimal", ["Telescope Simulator", "CCD Simulator"])
+
+    assert result == {
+        "kind": "rigCheck",
+        "rigId": "minimal",
+        "ok": True,
+        "present": ["mount-1", "camera-1"],
+        "missing": [],
+    }
+
+
+def test_check_rig_warns_rather_than_fails_on_missing_devices(tmp_path: Path) -> None:
+    (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
+    rig_store.load_rigs(tmp_path)
+
+    result = rig_store.check_rig("minimal", ["Telescope Simulator"])
+
+    assert result["ok"] is False
+    assert result["present"] == ["mount-1"]
+    assert result["missing"] == ["camera-1"]
+
+
+def test_check_rig_ignores_components_without_a_device(tmp_path: Path) -> None:
+    (tmp_path / "newtonian-8in.yaml").write_text(VALID_RIG_YAML)
+    rig_store.load_rigs(tmp_path)
+
+    result = rig_store.check_rig("newtonian-8in", [])
+
+    assert "main-scope" not in result["missing"]
+    assert "guide-scope" not in result["missing"]
+
+
+def test_check_rig_reports_ok_when_rig_has_no_device_components(tmp_path: Path) -> None:
+    (tmp_path / "no-devices.yaml").write_text(
+        'id: no-devices\nname: "No devices"\ncomponents:\n'
+        "  - role: telescope\n    id: main-scope\n    apertureMm: 203\n"
+    )
+    rig_store.load_rigs(tmp_path)
+
+    result = rig_store.check_rig("no-devices", [])
+
+    assert result == {
+        "kind": "rigCheck",
+        "rigId": "no-devices",
+        "ok": True,
+        "present": [],
+        "missing": [],
+    }
+
+
+def test_check_rig_rejects_unknown_id(tmp_path: Path) -> None:
+    rig_store.load_rigs(tmp_path)
+
+    with pytest.raises(ValueError, match="Unknown rig"):
+        rig_store.check_rig("does-not-exist", [])
