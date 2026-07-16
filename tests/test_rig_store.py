@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from indi_mcp import rig_store
 
@@ -195,6 +196,15 @@ def test_known_roles_covers_the_documented_important_roles() -> None:
 
 def test_load_rigs_skips_files_with_invalid_yaml(tmp_path: Path) -> None:
     (tmp_path / "broken.yaml").write_text("id: [unterminated")
+    (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
+
+    rigs = rig_store.load_rigs(tmp_path)
+
+    assert [rig.id for rig in rigs] == ["minimal"]
+
+
+def test_load_rigs_skips_a_yaml_named_directory(tmp_path: Path) -> None:
+    (tmp_path / "not-a-file.yaml").mkdir()
     (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
 
     rigs = rig_store.load_rigs(tmp_path)
@@ -574,3 +584,117 @@ def test_draft_rig_with_no_devices_returns_an_empty_draft() -> None:
     draft = rig_store.draft_rig([])
 
     assert draft == {"kind": "rigDraft", "components": [], "notes": []}
+
+
+def _minimal_rig(rig_id: str = "minimal") -> rig_store.Rig:
+    return rig_store.Rig(
+        id=rig_id,
+        name="Minimal rig",
+        components=[
+            rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
+            rig_store.Component(
+                role="camera",
+                id="camera-1",
+                device="CCD Simulator",
+                pixelsX=1000,
+                pixelsY=1000,
+                pixelSizeMicron=5.0,
+                bitDepth=16,
+            ),
+        ],
+    )
+
+
+def test_save_rig_writes_a_yaml_file_and_reloads_it(tmp_path: Path) -> None:
+    rig = _minimal_rig()
+
+    saved = rig_store.save_rig(rig, directory=tmp_path)
+
+    assert saved == rig
+    assert (tmp_path / "minimal.yaml").is_file()
+    assert rig_store.get_rig("minimal") == rig
+
+
+def test_save_rig_roundtrips_through_yaml(tmp_path: Path) -> None:
+    rig = rig_store.Rig(
+        id="newtonian-8in",
+        name="8in Newtonian",
+        components=[
+            rig_store.Component(
+                role="filterWheel",
+                id="filter-wheel-1",
+                device="Filter Wheel Simulator",
+                slots={1: "Luminance", 2: "Red"},
+            ),
+            rig_store.Component(role="telescope", id="main-scope", apertureMm=203.0),
+        ],
+    )
+
+    rig_store.save_rig(rig, directory=tmp_path)
+
+    reloaded = rig_store.Rig.model_validate(
+        yaml.safe_load((tmp_path / "newtonian-8in.yaml").read_text())
+    )
+    assert reloaded == rig
+
+
+def test_save_rig_rejects_overwriting_an_existing_file_by_default(tmp_path: Path) -> None:
+    rig_store.save_rig(_minimal_rig(), directory=tmp_path)
+
+    with pytest.raises(ValueError, match="already exists"):
+        rig_store.save_rig(_minimal_rig(), directory=tmp_path)
+
+
+def test_save_rig_allows_overwrite_when_explicitly_requested(tmp_path: Path) -> None:
+    rig_store.save_rig(_minimal_rig(), directory=tmp_path)
+    updated = rig_store.Rig(id="minimal", name="Renamed rig", components=[])
+
+    saved = rig_store.save_rig(updated, overwrite=True, directory=tmp_path)
+
+    assert saved.name == "Renamed rig"
+    assert rig_store.get_rig("minimal").name == "Renamed rig"
+
+
+def test_save_rig_creates_the_rigs_directory_if_missing(tmp_path: Path) -> None:
+    missing_dir = tmp_path / "does-not-exist-yet"
+
+    rig_store.save_rig(_minimal_rig(), directory=missing_dir)
+
+    assert (missing_dir / "minimal.yaml").is_file()
+
+
+@pytest.mark.parametrize("bad_id", ["", ".", "..", "a/b", "a\\b", "../escape"])
+def test_save_rig_rejects_ids_that_are_not_safe_filenames(tmp_path: Path, bad_id: str) -> None:
+    rig = rig_store.Rig(id=bad_id, name="Bad id", components=[])
+
+    with pytest.raises(ValueError, match="Invalid rig id"):
+        rig_store.save_rig(rig, directory=tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_save_rig_uses_the_default_rigs_directory_when_none_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(rig_store.RIGS_DIR_ENV, str(tmp_path))
+
+    rig_store.save_rig(_minimal_rig())
+
+    assert (tmp_path / "minimal.yaml").is_file()
+
+
+def test_save_rig_succeeds_despite_other_invalid_rig_files_in_the_directory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "broken.yaml").write_text("id: [unterminated")
+
+    saved = rig_store.save_rig(_minimal_rig(), directory=tmp_path)
+
+    assert saved == rig_store.get_rig("minimal")
+
+
+def test_save_rig_rejects_an_id_whose_file_path_is_already_a_directory(tmp_path: Path) -> None:
+    (tmp_path / "minimal.yaml").mkdir()
+
+    with pytest.raises(ValueError, match="is a directory"):
+        rig_store.save_rig(_minimal_rig(), directory=tmp_path)

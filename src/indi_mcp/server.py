@@ -1,5 +1,6 @@
 """The INDI MCP server instance and its entrypoint."""
 
+import asyncio
 import logging
 from typing import Literal
 
@@ -115,6 +116,19 @@ def list_rigs() -> list[RigSummary]:
 def get_rig(rig_id: str) -> Rig:
     """Return the full definition of the imaging rig identified by `rig_id`."""
     return rig_store.get_rig(rig_id)
+
+
+@mcp.tool()
+async def save_rig(rig: Rig, overwrite: bool = False) -> Rig:
+    """Save a rig definition — hand-authored, or completed from a `draft_rig` result.
+
+    Writes `rig` to `rigs/<rig.id>.yaml` and reloads it so it's immediately
+    available by `id` to `get_rig`/`suggest_rig`/`check_rig`. Refuses to
+    replace an existing rig file unless `overwrite` is set, since reusing an
+    `id` could otherwise silently destroy a previously saved rig. The actual
+    file I/O runs in a worker thread so it doesn't block the event loop.
+    """
+    return await asyncio.to_thread(rig_store.save_rig, rig, overwrite=overwrite)
 
 
 @mcp.tool()

@@ -81,3 +81,21 @@ async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family
     assert by_name["Unknown Device"]["ccdInfo"] is None
     assert by_name["Unknown Device"]["filterNames"] is None
     assert by_name["Unknown Device"]["focusRange"] is None
+
+
+async def test_save_rig_delegates_to_rig_store_with_the_overwrite_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(id="minimal", name="Minimal rig", components=[])
+    calls: list[tuple[rig_store.Rig, bool]] = []
+
+    def fake_save_rig(rig: rig_store.Rig, *, overwrite: bool = False) -> rig_store.Rig:
+        calls.append((rig, overwrite))
+        return rig
+
+    monkeypatch.setattr(rig_store, "save_rig", fake_save_rig)
+
+    result = await server.save_rig(rig, overwrite=True)
+
+    assert result == rig
+    assert calls == [(rig, True)]
