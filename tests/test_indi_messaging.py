@@ -1,4 +1,5 @@
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -137,6 +138,48 @@ async def test_start_messaging_connects_and_starts_streaming(mocks: Mocks) -> No
 
     mocks.client.asyncrun.assert_called_once()
     assert status == {"running": True, "host": "pi.local", "port": 7625}
+
+
+async def test_start_messaging_polls_until_connected(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(indi_messaging, "_STARTUP_POLL_INTERVAL", 0.001)
+    statuses: Iterator[indi_messaging.MessagingStatus] = iter(
+        [
+            {"running": False, "host": "pi.local", "port": 7625},
+            {"running": False, "host": "pi.local", "port": 7625},
+            {"running": True, "host": "pi.local", "port": 7625},
+        ]
+    )
+    calls = 0
+
+    async def fake_get_status() -> indi_messaging.MessagingStatus:
+        nonlocal calls
+        calls += 1
+        return next(statuses)
+
+    monkeypatch.setattr(indi_messaging, "get_status", fake_get_status)
+
+    status = await indi_messaging.start_messaging(host="pi.local", port=7625)
+
+    assert calls == 3
+    assert status == {"running": True, "host": "pi.local", "port": 7625}
+
+
+async def test_start_messaging_returns_not_running_if_poll_times_out(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(indi_messaging, "_STARTUP_POLL_TIMEOUT", 0.05)
+    monkeypatch.setattr(indi_messaging, "_STARTUP_POLL_INTERVAL", 0.01)
+
+    async def fake_get_status() -> indi_messaging.MessagingStatus:
+        return {"running": False, "host": "pi.local", "port": 7625}
+
+    monkeypatch.setattr(indi_messaging, "get_status", fake_get_status)
+
+    status = await indi_messaging.start_messaging(host="pi.local", port=7625)
+
+    assert status == {"running": False, "host": "pi.local", "port": 7625}
 
 
 async def test_start_messaging_stops_existing_connection_first(mocks: Mocks) -> None:
