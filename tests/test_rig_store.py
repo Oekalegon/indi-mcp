@@ -203,6 +203,15 @@ def test_load_rigs_skips_files_with_invalid_yaml(tmp_path: Path) -> None:
     assert [rig.id for rig in rigs] == ["minimal"]
 
 
+def test_load_rigs_skips_a_yaml_named_directory(tmp_path: Path) -> None:
+    (tmp_path / "not-a-file.yaml").mkdir()
+    (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
+
+    rigs = rig_store.load_rigs(tmp_path)
+
+    assert [rig.id for rig in rigs] == ["minimal"]
+
+
 def test_load_rigs_skips_files_that_fail_schema_validation(tmp_path: Path) -> None:
     (tmp_path / "missing-fields.yaml").write_text("id: incomplete\nname: Incomplete rig\n")
     (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
@@ -672,3 +681,20 @@ def test_save_rig_uses_the_default_rigs_directory_when_none_given(
     rig_store.save_rig(_minimal_rig())
 
     assert (tmp_path / "minimal.yaml").is_file()
+
+
+def test_save_rig_succeeds_despite_other_invalid_rig_files_in_the_directory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "broken.yaml").write_text("id: [unterminated")
+
+    saved = rig_store.save_rig(_minimal_rig(), directory=tmp_path)
+
+    assert saved == rig_store.get_rig("minimal")
+
+
+def test_save_rig_rejects_an_id_whose_file_path_is_already_a_directory(tmp_path: Path) -> None:
+    (tmp_path / "minimal.yaml").mkdir()
+
+    with pytest.raises(ValueError, match="is a directory"):
+        rig_store.save_rig(_minimal_rig(), directory=tmp_path)
