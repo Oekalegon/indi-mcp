@@ -9,15 +9,19 @@ id: newtonian-8in
 name: 8" Newtonian imaging rig
 components:
   - role: mount
+    id: mount-1
     device: "Telescope Simulator"
   - role: telescope
+    id: main-scope
     apertureMm: 203
     focalLengthMm: 1000
   - role: focuser
+    id: focuser-1
     device: "Focuser Simulator"
     minPosition: 0
     maxPosition: 50000
   - role: filterWheel
+    id: filter-wheel-1
     device: "Filter Wheel Simulator"
     slots:
       1: Luminance
@@ -25,11 +29,12 @@ components:
       3: Green
       4: Blue
   - role: rotator
+    id: rotator-1
     device: "Rotator Simulator"
   - role: camera
+    id: "SN12345"
     make: ZWO
     model: ASI2600MM Pro
-    id: "SN12345"
     device: "ZWO CCD ASI2600MM Pro"
     cooled: true
     pixelsX: 6248
@@ -37,9 +42,11 @@ components:
     pixelSizeMicron: 3.76
     bitDepth: 16
   - role: guideTelescope
+    id: guide-scope
     apertureMm: 60
     focalLengthMm: 240
   - role: guideCamera
+    id: "SN67890"
     device: "ZWO CCD ASI120MM Mini"
     cooled: false
     pixelsX: 1280
@@ -47,14 +54,19 @@ components:
     pixelSizeMicron: 3.75
     bitDepth: 12
   - role: powerHub
+    id: power-hub-1
     device: "Pegasus PPBA"
   - role: observatoryControl
+    id: dome-1
     device: "Dome Simulator"
   - role: flatScreen
+    id: flat-screen-1
     device: "Flat Panel Simulator"
   - role: dewHeater
+    id: dew-heater-a
     device: "Pegasus PPBA:Dew A"
   - role: dewHeater
+    id: dew-heater-b
     device: "Pegasus PPBA:Dew B"
 """
 
@@ -63,8 +75,10 @@ id: minimal
 name: Minimal rig
 components:
   - role: mount
+    id: mount-1
     device: "Telescope Simulator"
   - role: camera
+    id: camera-1
     device: "CCD Simulator"
     pixelsX: 1000
     pixelsY: 1000
@@ -157,7 +171,8 @@ def test_load_rigs_allows_an_empty_component_list(tmp_path: Path) -> None:
 
 def test_load_rigs_accepts_unanticipated_component_roles(tmp_path: Path) -> None:
     (tmp_path / "minimal.yaml").write_text(
-        MINIMAL_RIG_YAML + '  - role: allSkyCamera\n    device: "All Sky Simulator"\n'
+        MINIMAL_RIG_YAML
+        + '  - role: allSkyCamera\n    id: allsky-1\n    device: "All Sky Simulator"\n'
     )
 
     rigs = rig_store.load_rigs(tmp_path)
@@ -198,7 +213,30 @@ def test_load_rigs_skips_files_that_fail_schema_validation(tmp_path: Path) -> No
 
 def test_load_rigs_skips_files_with_a_component_missing_its_role(tmp_path: Path) -> None:
     (tmp_path / "no-role.yaml").write_text(
-        'id: no-role\nname: "No role"\ncomponents:\n  - device: "Telescope Simulator"\n'
+        'id: no-role\nname: "No role"\ncomponents:\n  - id: c1\n    device: "Telescope Simulator"\n'
+    )
+    (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
+
+    rigs = rig_store.load_rigs(tmp_path)
+
+    assert [rig.id for rig in rigs] == ["minimal"]
+
+
+def test_load_rigs_skips_files_with_a_component_missing_its_id(tmp_path: Path) -> None:
+    (tmp_path / "no-id.yaml").write_text(
+        'id: no-id\nname: "No id"\ncomponents:\n'
+        '  - role: mount\n    device: "Telescope Simulator"\n'
+    )
+    (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
+
+    rigs = rig_store.load_rigs(tmp_path)
+
+    assert [rig.id for rig in rigs] == ["minimal"]
+
+
+def test_load_rigs_skips_files_with_duplicate_component_ids(tmp_path: Path) -> None:
+    (tmp_path / "duplicate-ids.yaml").write_text(
+        MINIMAL_RIG_YAML + '  - role: dewHeater\n    id: camera-1\n    device: "Dew Heater"\n'
     )
     (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
 

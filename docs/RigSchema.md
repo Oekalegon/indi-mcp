@@ -30,15 +30,19 @@ id: newtonian-8in
 name: 8" Newtonian imaging rig
 components:
   - role: mount
+    id: mount-1
     device: "Telescope Simulator"
   - role: telescope
+    id: main-scope
     apertureMm: 203
     focalLengthMm: 1000
   - role: focuser
+    id: focuser-1
     device: "Focuser Simulator"
     minPosition: 0
     maxPosition: 50000
   - role: filterWheel
+    id: filter-wheel-1
     device: "Filter Wheel Simulator"
     slots:
       1: Luminance
@@ -49,11 +53,12 @@ components:
       6: OIII
       7: SII
   - role: rotator
+    id: rotator-1
     device: "Rotator Simulator"
   - role: camera
+    id: "SN12345"
     make: ZWO
     model: ASI2600MM Pro
-    id: "SN12345"
     device: "ZWO CCD ASI2600MM Pro"
     cooled: true
     pixelsX: 6248
@@ -61,12 +66,13 @@ components:
     pixelSizeMicron: 3.76
     bitDepth: 16
   - role: guideTelescope
+    id: guide-scope
     apertureMm: 60
     focalLengthMm: 240
   - role: guideCamera
+    id: "SN67890"
     make: ZWO
     model: ASI120MM Mini
-    id: "SN67890"
     device: "ZWO CCD ASI120MM Mini"
     cooled: false
     pixelsX: 1280
@@ -74,14 +80,19 @@ components:
     pixelSizeMicron: 3.75
     bitDepth: 12
   - role: powerHub
+    id: power-hub-1
     device: "Pegasus PPBA"
   - role: observatoryControl
+    id: dome-1
     device: "Dome Simulator"
   - role: flatScreen
+    id: flat-screen-1
     device: "Flat Panel Simulator"
   - role: dewHeater
+    id: dew-heater-a
     device: "Pegasus PPBA:Dew A"
   - role: dewHeater
+    id: dew-heater-b
     device: "Pegasus PPBA:Dew B"
 ```
 
@@ -95,18 +106,18 @@ components:
 
 ## Component fields
 
-Every component has a `role`; the rest of its fields depend on what that role needs. The
-schema doesn't enforce which fields go with which role (e.g. it won't reject a `telescope` that
-also has a `device`) — this is deliberately loose, matching the "flat list" simplicity above.
-The tables below group roles by imaging train / guiding train / other purely to make this
-reference easier to read — again, not a grouping that exists in the YAML itself.
+Every component has a `role` and an `id`; the rest of its fields depend on what that role
+needs. The schema doesn't enforce which fields go with which role (e.g. it won't reject a
+`telescope` that also has a `device`) — this is deliberately loose, matching the "flat list"
+simplicity above. The tables below group roles by imaging train / guiding train / other purely
+to make this reference easier to read — again, not a grouping that exists in the YAML itself.
 
-| Field | Type | Description |
-|---|---|---|
-| `role` | string | What this component is. One of the known roles — `"mount"`, `"telescope"`, `"guideTelescope"`, `"camera"`, `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`, `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"` — or any other string, for a component type this schema's authors haven't thought of yet. Not required to be unique within a rig: a rig commonly has more than one component sharing a role (e.g. several independently-controlled dew heater channels). |
-| `make` | string | The manufacturer (e.g. `"ZWO"`). Optional, and independent of `role` — useful once rigs get cross-referenced against a device library rather than each rig repeating full specs. |
-| `model` | string | The product model (e.g. `"ASI2600MM Pro"`). |
-| `id` | string | Identifies the specific physical unit — a serial number, or any label the operator chooses. Matters once a rig has two components of the same `make`/`model` (e.g. two identical guide cameras) and something downstream needs to tell them apart, such as picking the matching master dark for a given camera's frames. |
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `role` | string | yes | What this component is. One of the known roles — `"mount"`, `"telescope"`, `"guideTelescope"`, `"camera"`, `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`, `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"` — or any other string, for a component type this schema's authors haven't thought of yet. Not required to be unique within a rig: a rig commonly has more than one component sharing a role (e.g. several independently-controlled dew heater channels). |
+| `id` | string | yes | Identifies this specific physical component — a serial number, or any label the operator chooses (e.g. `"mount-1"`, `"main-scope"`). Required, and unique within the rig (a rig with two components sharing an `id` fails to load), because `role` alone can't tell apart two components sharing it — e.g. two identical guide cameras, or several dew heater channels — and something downstream needs a way to, such as picking the matching master dark for a given camera's frames. |
+| `make` | string | no | The manufacturer (e.g. `"ZWO"`). Independent of `role` — useful once rigs get cross-referenced against a device library rather than each rig repeating full specs. |
+| `model` | string | no | The product model (e.g. `"ASI2600MM Pro"`). |
 
 #### Mount
 

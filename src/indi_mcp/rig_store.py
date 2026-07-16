@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Literal, TypedDict
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -94,24 +94,27 @@ class _StrictModel(BaseModel):
 class Component(_StrictModel):
     """One piece of rig equipment.
 
-    All fields besides `role` are optional since which ones are meaningful
-    depends on the role: a `"telescope"` has `apertureMm`/`focalLengthMm`
-    but no `device` (it isn't a driver); a `"camera"` has `device` plus
-    pixel geometry; a `"powerHub"` has just `device`.
+    `role` and `id` are the only required fields; the rest are optional
+    since which ones are meaningful depends on the role: a `"telescope"`
+    has `apertureMm`/`focalLengthMm` but no `device` (it isn't a driver);
+    a `"camera"` has `device` plus pixel geometry; a `"powerHub"` has just
+    `device`.
 
-    `make`/`model` identify the product (e.g. `"ZWO"`/`"ASI2600MM Pro"`),
-    useful once rigs are cross-referenced against a device library rather
-    than each repeating full specs. `id` identifies the specific physical
-    unit — a serial number, or any label the operator chooses — needed once
-    a rig has two components of the same make/model (e.g. two of the same
-    camera model) and something downstream needs to tell them apart, such
-    as picking the matching master dark for a given camera's frames.
+    `id` is a stable handle for this specific component within the rig — a
+    serial number, or any label the operator chooses — required (and unique
+    within the rig, see `Rig`) rather than left to `role` alone, since a rig
+    commonly has more than one component sharing a role (e.g. two identical
+    guide cameras, or several dew heater channels) and something downstream
+    needs a way to tell them apart — e.g. picking the matching master dark
+    for a given camera's frames. `make`/`model` identify the product (e.g.
+    `"ZWO"`/`"ASI2600MM Pro"`), useful once rigs are cross-referenced
+    against a device library rather than each repeating full specs.
     """
 
     role: Role
+    id: str
     make: str | None = None
     model: str | None = None
-    id: str | None = None
     device: str | None = None
     apertureMm: float | None = None
     focalLengthMm: float | None = None
@@ -131,6 +134,15 @@ class Rig(_StrictModel):
     id: str
     name: str
     components: list[Component]
+
+    @model_validator(mode="after")
+    def _check_component_ids_are_unique(self) -> "Rig":
+        seen: set[str] = set()
+        for component in self.components:
+            if component.id in seen:
+                raise ValueError(f"duplicate component id {component.id!r} within this rig")
+            seen.add(component.id)
+        return self
 
 
 class RigSummary(TypedDict):

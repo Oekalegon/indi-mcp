@@ -354,15 +354,19 @@ id: newtonian-8in
 name: 8" Newtonian imaging rig
 components:
   - role: mount
+    id: mount-1
     device: "Telescope Simulator"
   - role: telescope
+    id: main-scope
     apertureMm: 203
     focalLengthMm: 1000
   - role: focuser
+    id: focuser-1
     device: "Focuser Simulator"
     minPosition: 0
     maxPosition: 50000
   - role: filterWheel
+    id: filter-wheel-1
     device: "Filter Wheel Simulator"
     slots:
       1: Luminance
@@ -373,11 +377,12 @@ components:
       6: OIII
       7: SII
   - role: rotator
+    id: rotator-1
     device: "Rotator Simulator"
   - role: camera
+    id: "SN12345"
     make: ZWO
     model: ASI2600MM Pro
-    id: "SN12345"
     device: "ZWO CCD ASI2600MM Pro"
     cooled: true
     pixelsX: 6248
@@ -385,12 +390,13 @@ components:
     pixelSizeMicron: 3.76
     bitDepth: 16
   - role: guideTelescope
+    id: guide-scope
     apertureMm: 60
     focalLengthMm: 240
   - role: guideCamera
+    id: "SN67890"
     make: ZWO
     model: ASI120MM Mini
-    id: "SN67890"
     device: "ZWO CCD ASI120MM Mini"
     cooled: false
     pixelsX: 1280
@@ -398,14 +404,19 @@ components:
     pixelSizeMicron: 3.75
     bitDepth: 12
   - role: powerHub
+    id: power-hub-1
     device: "Pegasus PPBA"
   - role: observatoryControl
+    id: dome-1
     device: "Dome Simulator"
   - role: flatScreen
+    id: flat-screen-1
     device: "Flat Panel Simulator"
   - role: dewHeater
+    id: dew-heater-a
     device: "Pegasus PPBA:Dew A"
   - role: dewHeater
+    id: dew-heater-b
     device: "Pegasus PPBA:Dew B"
 ```
 
@@ -419,22 +430,23 @@ to declare "this is what's mounted this session," which is all `suggest_rig`/`ch
 Structure can be reintroduced later once real rig files show what's actually worth splitting
 out.
 
-Each entry has a `role` — one of a known set (`mount`, `telescope`, `guideTelescope`, `camera`,
+Each entry has a `role` and an `id` (both required), plus whichever other fields are meaningful
+for that role. `role` is one of a known set (`mount`, `telescope`, `guideTelescope`, `camera`,
 `guideCamera`, `focuser`, `filterWheel`, `rotator`, `powerHub`, `observatoryControl`,
 `flatScreen`, `dewHeater`) or any other string, so a rig can still declare a component type this
-schema's authors haven't thought of without a schema change — plus whichever fields are
-meaningful for that role. A `role: telescope` (or `guideTelescope`) entry has
-`apertureMm`/`focalLengthMm` and no `device`, since optics aren't a driver. A `role: camera` (or
-`guideCamera`) entry has `device` plus pixel geometry. A `role: powerHub`/`dewHeater`/etc. entry
-has just `device`. `role` values aren't required to be unique — a rig commonly has more than one
-device sharing a role (e.g. several independently-controlled dew heater channels).
+schema's authors haven't thought of without a schema change. `role` values aren't required to be
+unique — a rig commonly has more than one component sharing a role (e.g. several
+independently-controlled dew heater channels or two identical guide cameras) — so `id` is what
+actually identifies *this specific component*: a serial number, or any label the operator
+chooses, unique within the rig (a rig with two components sharing an `id` fails to load).
+Something downstream needs a way to tell same-role components apart — e.g. picking the matching
+master dark for a given camera's frames — and `role` alone can't do that.
 
-Any component can also carry `make`/`model` (e.g. `"ZWO"`/`"ASI2600MM Pro"`) — independent of
-`role`, and useful once rigs are cross-referenced against a device library rather than each rig
-repeating full specs — and `id`, which identifies the *specific physical unit* (a serial number,
-or any label the operator chooses). `id` matters once a rig has two components of the same
-`make`/`model` — e.g. two identical guide cameras — and something downstream needs to tell them
-apart, such as picking the matching master dark for a given camera's frames.
+A `role: telescope` (or `guideTelescope`) entry has `apertureMm`/`focalLengthMm` and no `device`,
+since optics aren't a driver. A `role: camera` (or `guideCamera`) entry has `device` plus pixel
+geometry. A `role: powerHub`/`dewHeater`/etc. entry has just `device`. Any component can also
+carry `make`/`model` (e.g. `"ZWO"`/`"ASI2600MM Pro"`) — independent of `role`, and useful once
+rigs are cross-referenced against a device library rather than each rig repeating full specs.
 
 **The YAML definition is authoritative; live INDI properties are advisory.** Where a field overlaps with something INDI reports (camera pixel size/count/bit depth), the server can cross-check the connected device's live properties against the configured rig and flag a mismatch — but it never overrides the declared config, since INDI can't confirm the parts of the rig it has no visibility into (aperture, focal length, imaging vs. guiding role).
 
