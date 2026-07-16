@@ -228,7 +228,7 @@ def get_property_range(device: str, name: str, member: str) -> tuple[float, floa
     member_obj = vector.data[member]
     try:
         return float(member_obj.min), float(member_obj.max)
-    except (TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError):
         return None
 
 

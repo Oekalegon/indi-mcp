@@ -521,6 +521,7 @@ def test_draft_rig_drafts_a_filter_wheel_with_slots_from_filter_name() -> None:
             slots={1: "Luminance", 2: "Red"},
         )
     ]
+    assert draft["notes"] == []
 
 
 def test_draft_rig_drafts_a_filter_wheel_with_no_filter_name_yet() -> None:
@@ -533,6 +534,7 @@ def test_draft_rig_drafts_a_filter_wheel_with_no_filter_name_yet() -> None:
             role="filterWheel", id="Filter Wheel Simulator", device="Filter Wheel Simulator"
         )
     ]
+    assert draft["notes"] == []
 
 
 def test_draft_rig_drafts_a_focuser_with_its_position_range() -> None:
@@ -549,6 +551,7 @@ def test_draft_rig_drafts_a_focuser_with_its_position_range() -> None:
             maxPosition=50000,
         )
     ]
+    assert draft["notes"] == []
 
 
 def test_draft_rig_drafts_a_mount() -> None:
@@ -557,6 +560,7 @@ def test_draft_rig_drafts_a_mount() -> None:
     assert draft["components"] == [
         rig_store.Component(role="mount", id="Telescope Simulator", device="Telescope Simulator")
     ]
+    assert draft["notes"] == []
 
 
 def test_draft_rig_ignores_devices_with_no_recognized_family() -> None:

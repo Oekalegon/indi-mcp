@@ -354,7 +354,7 @@ def draft_rig(devices: Iterable[DraftDeviceInfo]) -> RigDraft:
     components: list[Component] = []
     notes: list[str] = []
     for device in devices:
-        role = _FAMILY_TO_ROLE.get(device["family"] or "")
+        role = _FAMILY_TO_ROLE.get(device["family"])
         if role is None:
             continue
         if role == "camera" and not single_camera:
@@ -378,34 +378,48 @@ def draft_rig(devices: Iterable[DraftDeviceInfo]) -> RigDraft:
 
 def _draft_component(role: Role, device: DraftDeviceInfo) -> Component:
     """Build one draft `Component` for `device`, filling in whatever `role`-specific data it has."""
-    fields: dict[str, object] = {}
     if role in ("camera", "guideCamera"):
-        fields.update(_ccd_info_fields(device["ccdInfo"]))
-    elif role == "filterWheel":
+        pixels_x, pixels_y, pixel_size, bit_depth = _ccd_info_fields(device["ccdInfo"])
+        return Component(
+            role=role,
+            id=device["name"],
+            device=device["name"],
+            pixelsX=pixels_x,
+            pixelsY=pixels_y,
+            pixelSizeMicron=pixel_size,
+            bitDepth=bit_depth,
+        )
+    if role == "filterWheel":
         slots = _filter_slots(device["filterNames"])
-        if slots:
-            fields["slots"] = slots
-    elif role == "focuser" and device["focusRange"] is not None:
+        return Component(role=role, id=device["name"], device=device["name"], slots=slots or None)
+    if role == "focuser" and device["focusRange"] is not None:
         min_position, max_position = device["focusRange"]
-        fields["minPosition"] = int(min_position)
-        fields["maxPosition"] = int(max_position)
-    return Component(role=role, id=device["name"], device=device["name"], **fields)
+        return Component(
+            role=role,
+            id=device["name"],
+            device=device["name"],
+            minPosition=int(min_position),
+            maxPosition=int(max_position),
+        )
+    return Component(role=role, id=device["name"], device=device["name"])
 
 
-def _ccd_info_fields(ccd_info: dict[str, str] | None) -> dict[str, object]:
-    """Map a `CCD_INFO` property's member values to `Component`'s pixel-geometry fields."""
+def _ccd_info_fields(
+    ccd_info: dict[str, str] | None,
+) -> tuple[int | None, int | None, float | None, int | None]:
+    """Map a `CCD_INFO` property's members to (pixelsX, pixelsY, pixelSizeMicron, bitDepth)."""
     if not ccd_info:
-        return {}
-    fields: dict[str, object] = {}
-    if (pixels_x := _parse_number(ccd_info.get("CCD_MAX_X"))) is not None:
-        fields["pixelsX"] = int(pixels_x)
-    if (pixels_y := _parse_number(ccd_info.get("CCD_MAX_Y"))) is not None:
-        fields["pixelsY"] = int(pixels_y)
-    if (pixel_size := _parse_number(ccd_info.get("CCD_PIXEL_SIZE"))) is not None:
-        fields["pixelSizeMicron"] = pixel_size
-    if (bit_depth := _parse_number(ccd_info.get("CCD_BITSPERPIXEL"))) is not None:
-        fields["bitDepth"] = int(bit_depth)
-    return fields
+        return None, None, None, None
+    pixels_x = _parse_number(ccd_info.get("CCD_MAX_X"))
+    pixels_y = _parse_number(ccd_info.get("CCD_MAX_Y"))
+    pixel_size = _parse_number(ccd_info.get("CCD_PIXEL_SIZE"))
+    bit_depth = _parse_number(ccd_info.get("CCD_BITSPERPIXEL"))
+    return (
+        int(pixels_x) if pixels_x is not None else None,
+        int(pixels_y) if pixels_y is not None else None,
+        pixel_size,
+        int(bit_depth) if bit_depth is not None else None,
+    )
 
 
 def _filter_slots(filter_names: dict[str, str] | None) -> dict[int, str]:
