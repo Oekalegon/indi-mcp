@@ -16,6 +16,12 @@ optical tube assemblies, or mounts — see
 [Design.md](Design.md#imaging-rig-metadata) for why that's deferred. Each component has a
 `role` (free-form, not a fixed enum) plus whichever of the fields below are meaningful for it.
 
+This document still talks about the **imaging train** (`telescope`, `focuser`, `filterWheel`,
+`rotator`, `camera`) and **guiding train** (`guideTelescope`, `guideCamera`) as a way to group
+and discuss related roles — that's just descriptive language, not YAML structure. There is no
+`imagingTrain`/`guidingTrain` key; every component, regardless of which train it conceptually
+belongs to, is just another entry in the one flat `components` list.
+
 ## Example
 
 ```yaml
@@ -85,19 +91,46 @@ components:
 Every component has a `role`; the rest of its fields depend on what that role needs. The
 schema doesn't enforce which fields go with which role (e.g. it won't reject a `telescope` that
 also has a `device`) — this is deliberately loose, matching the "flat list" simplicity above.
+The tables below group roles by imaging train / guiding train / other purely to make this
+reference easier to read — again, not a grouping that exists in the YAML itself.
 
-| Field | Type | Applies to (typical) | Description |
+| Field | Type | Description |
+|---|---|---|
+| `role` | string | A free-form label for what this component is (e.g. `"mount"`, `"telescope"`, `"guideTelescope"`, `"camera"`, `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`, `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"`). Not a fixed enum — a rig can use a role this schema's authors never anticipated, so a new component type never requires a schema change. Not required to be unique within a rig: a rig commonly has more than one component sharing a role (e.g. several independently-controlled dew heater channels), and `guideTelescope`/`guideCamera` are just conventional role names for a separate guiding setup — not a formally distinct concept from `telescope`/`camera`. |
+
+#### Mount
+
+| Field | Type | Description |
+|---|---|---|
+| `device` | string | The INDI device name for the mount driver. |
+
+#### Imaging train (`telescope`, `focuser`, `filterWheel`, `rotator`, `camera`)
+
+| Field | Type | Applies to | Description |
 |---|---|---|---|
-| `role` | string | all | A free-form label for what this component is (e.g. `"mount"`, `"telescope"`, `"guideTelescope"`, `"camera"`, `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`, `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"`). Not a fixed enum — a rig can use a role this schema's authors never anticipated, so a new component type never requires a schema change. Not required to be unique within a rig: a rig commonly has more than one component sharing a role (e.g. several independently-controlled dew heater channels), and `guideTelescope`/`guideCamera` are just conventional role names for a separate guiding setup — not a formally distinct concept from `telescope`/`camera`. |
-| `device` | string | mount, camera, guideCamera, focuser, filterWheel, rotator, and anything else with an INDI driver | The INDI device name for that component's driver. Omitted for components with no driver of their own (e.g. `telescope` optics). |
-| `apertureMm` | number | telescope, guideTelescope | Aperture, in millimeters. |
-| `focalLengthMm` | number | telescope, guideTelescope | Focal length, in millimeters. |
-| `cooled` | boolean | camera, guideCamera | Whether the camera has active sensor cooling. |
-| `pixelsX` / `pixelsY` | integer | camera, guideCamera | Sensor resolution. |
-| `pixelSizeMicron` | number | camera, guideCamera | Pixel pitch, in microns. |
-| `bitDepth` | integer | camera, guideCamera | ADC bit depth (e.g. `16`). |
-| `minPosition` / `maxPosition` | integer | focuser | The focuser's travel range, in its native position units. |
-| `slots` | map of integer → string | filterWheel | Filter name per slot position (1-indexed, matching the filter wheel's own numbering). Omit or leave incomplete for slots that aren't in use or aren't yet decided. |
+| `device` | string | `focuser`, `filterWheel`, `rotator`, `camera` | The INDI device name for that component's driver. Omitted for `telescope` (no driver of its own). |
+| `apertureMm` | number | `telescope` | Aperture, in millimeters. |
+| `focalLengthMm` | number | `telescope` | Focal length, in millimeters. |
+| `minPosition` / `maxPosition` | integer | `focuser` | The focuser's travel range, in its native position units. |
+| `slots` | map of integer → string | `filterWheel` | Filter name per slot position (1-indexed, matching the filter wheel's own numbering). Omit or leave incomplete for slots that aren't in use or aren't yet decided. |
+| `cooled` | boolean | `camera` | Whether the camera has active sensor cooling. |
+| `pixelsX` / `pixelsY` | integer | `camera` | Sensor resolution. |
+| `pixelSizeMicron` | number | `camera` | Pixel pitch, in microns. |
+| `bitDepth` | integer | `camera` | ADC bit depth (e.g. `16`). |
+
+#### Guiding train (`guideTelescope`, `guideCamera`)
+
+Same fields as their imaging-train counterparts (`telescope`/`camera` above) — `guideTelescope`
+takes `apertureMm`/`focalLengthMm`, `guideCamera` takes `device`/`cooled`/`pixelsX`/`pixelsY`/
+`pixelSizeMicron`/`bitDepth`. A guide setup is usually just these two roles, with no
+`focuser`/`filterWheel`/`rotator` counterpart, but nothing stops a rig from declaring one if it
+has a motorized guide focuser or similar.
+
+#### Other equipment (`powerHub`, `observatoryControl`, `flatScreen`, `dewHeater`, ...)
+
+| Field | Type | Description |
+|---|---|---|
+| `device` | string | The INDI device name for that component's driver. |
 
 ## Design notes
 
