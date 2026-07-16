@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 from typing import TypedDict
 
+import psutil
 from indiweb.driver import DeviceDriver, DriverCollection
 
 from indi_mcp import indi_server
@@ -93,6 +94,46 @@ async def get_driver_catalog() -> list[DriverInfo]:
     ]
 
 
+def _running_driver_binaries() -> set[str]:
+    """Basenames of the binaries `indiserver` currently has running as driver children."""
+    binaries: set[str] = set()
+    for proc in indi_server.get_driver_processes():
+        try:
+            exe = proc.exe() or proc.name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        binaries.add(os.path.basename(exe))
+    return binaries
+
+
+def _reconcile_running_drivers() -> dict[str, DeviceDriver]:
+    """Sync the in-memory running-driver registry against `indiserver`'s actual children.
+
+    The registry (`indi_server._server`) is only populated by `start_driver`/`stop_driver`
+    calls made within the current process, so it starts out empty after an MCP server
+    restart even though `indiserver` and any drivers it already started are detached and
+    keep running. This reconciles the registry against the real OS process tree so reads
+    (and the running-driver check in `stop_driver`) reflect reality regardless of restarts.
+    """
+    running_binaries = _running_driver_binaries()
+    registry = indi_server._server.get_running_drivers()
+    catalog_by_binary = {os.path.basename(d.binary): d for d in _get_catalog().drivers}
+
+    for binary in running_binaries:
+        driver = catalog_by_binary.get(binary)
+        if driver is not None and driver.label not in registry:
+            registry[driver.label] = driver
+
+    for label in [
+        label
+        for label, driver in registry.items()
+        if os.path.basename(driver.binary) not in running_binaries
+    ]:
+        del registry[label]
+
+    return registry
+
+
 async def start_driver(label: str) -> DriverStatus:
     """Start the INDI driver identified by its catalog label (e.g. "CCD Simulator")."""
     driver = await asyncio.to_thread(_find_driver, label)
@@ -103,7 +144,8 @@ async def start_driver(label: str) -> DriverStatus:
 
 async def stop_driver(label: str) -> DriverStatus:
     """Stop the running INDI driver identified by its catalog label."""
-    if label not in indi_server._server.get_running_drivers():
+    running = await asyncio.to_thread(_reconcile_running_drivers)
+    if label not in running:
         raise ValueError(f"Driver not running: {label!r}")
     driver = await asyncio.to_thread(_find_driver, label)
     logger.info("Stopping driver: %s", label)
@@ -113,5 +155,5 @@ async def stop_driver(label: str) -> DriverStatus:
 
 async def list_running_drivers() -> list[DriverStatus]:
     """List all currently running INDI drivers."""
-    running = await asyncio.to_thread(indi_server._server.get_running_drivers)
+    running = await asyncio.to_thread(_reconcile_running_drivers)
     return [{"label": label, "running": True} for label in running]

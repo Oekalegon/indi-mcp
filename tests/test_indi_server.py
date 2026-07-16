@@ -106,3 +106,35 @@ async def test_get_status_reports_running_state(mocks: Mocks) -> None:
     status = await indi_server.get_status()
 
     assert status == {"running": False, "port": indi_server.INDI_PORT}
+
+
+def _make_indiserver_process(port: int, children: list[MagicMock]) -> MagicMock:
+    proc = MagicMock()
+    proc.info = {"name": "indiserver", "cmdline": ["indiserver", "-p", str(port)]}
+    proc.children.return_value = children
+    return proc
+
+
+def test_get_driver_processes_returns_children_of_matching_indiserver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver_proc = MagicMock()
+    server_proc = _make_indiserver_process(indi_server.INDI_PORT, [driver_proc])
+    other_server_proc = _make_indiserver_process(7625, [MagicMock()])
+    monkeypatch.setattr(
+        indi_server.psutil,
+        "process_iter",
+        lambda _fields: [other_server_proc, server_proc],
+    )
+
+    processes = indi_server.get_driver_processes(indi_server.INDI_PORT)
+
+    assert processes == [driver_proc]
+
+
+def test_get_driver_processes_returns_empty_when_no_indiserver_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(indi_server.psutil, "process_iter", lambda _fields: [])
+
+    assert indi_server.get_driver_processes(indi_server.INDI_PORT) == []

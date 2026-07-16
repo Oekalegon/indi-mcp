@@ -29,6 +29,7 @@ def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
     server = MagicMock()
     server.get_running_drivers.return_value = {}
     monkeypatch.setattr(indi_server, "_server", server)
+    monkeypatch.setattr(indi_server, "get_driver_processes", lambda: [])
 
     catalog = MagicMock()
     catalog.drivers = [_make_driver("CCD Simulator")]
@@ -37,6 +38,12 @@ def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
     monkeypatch.setattr(indi_driver, "_get_catalog", lambda: catalog)
 
     return Mocks(server=server, catalog=catalog)
+
+
+def _make_process(exe: str) -> MagicMock:
+    proc = MagicMock()
+    proc.exe.return_value = exe
+    return proc
 
 
 async def test_get_driver_catalog_lists_known_drivers(
@@ -110,10 +117,15 @@ async def test_start_driver_rejects_unknown_label(mocks: Mocks) -> None:
     mocks.server.start_driver.assert_not_called()
 
 
-async def test_stop_driver_stops_running_driver(mocks: Mocks) -> None:
+async def test_stop_driver_stops_running_driver(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
     driver = _make_driver("CCD Simulator")
     mocks.catalog.by_label.return_value = driver
     mocks.server.get_running_drivers.return_value = {"CCD Simulator": driver}
+    monkeypatch.setattr(
+        indi_server, "get_driver_processes", lambda: [_make_process("indi_ccd_simulator")]
+    )
 
     status = await indi_driver.stop_driver("CCD Simulator")
 
@@ -130,10 +142,46 @@ async def test_stop_driver_rejects_driver_that_is_not_running(mocks: Mocks) -> N
     mocks.server.stop_driver.assert_not_called()
 
 
-async def test_list_running_drivers_reports_currently_running_drivers(mocks: Mocks) -> None:
+async def test_list_running_drivers_reports_currently_running_drivers(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
     driver = _make_driver("CCD Simulator")
     mocks.server.get_running_drivers.return_value = {"CCD Simulator": driver}
+    monkeypatch.setattr(
+        indi_server, "get_driver_processes", lambda: [_make_process("indi_ccd_simulator")]
+    )
 
     running = await indi_driver.list_running_drivers()
 
     assert running == [{"label": "CCD Simulator", "running": True}]
+
+
+async def test_list_running_drivers_reflects_processes_after_server_restart(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-memory registry starts empty after an MCP server restart, but the
+    driver process (started before the restart) survives, so it should still
+    be reported as running once reconciled against the process tree."""
+    mocks.server.get_running_drivers.return_value = {}
+    monkeypatch.setattr(
+        indi_server, "get_driver_processes", lambda: [_make_process("indi_ccd_simulator")]
+    )
+
+    running = await indi_driver.list_running_drivers()
+
+    assert running == [{"label": "CCD Simulator", "running": True}]
+
+
+async def test_list_running_drivers_drops_stale_registry_entries(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the registry believes a driver is running but its process is gone
+    (e.g. it crashed or was killed outside the MCP server), it shouldn't be
+    reported as running."""
+    driver = _make_driver("CCD Simulator")
+    mocks.server.get_running_drivers.return_value = {"CCD Simulator": driver}
+    monkeypatch.setattr(indi_server, "get_driver_processes", lambda: [])
+
+    running = await indi_driver.list_running_drivers()
+
+    assert running == []
