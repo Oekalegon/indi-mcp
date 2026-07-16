@@ -1,52 +1,48 @@
 from pathlib import Path
 
 import pytest
-import yaml
-from pydantic import ValidationError
 
 from indi_mcp import rig_store
 
 VALID_RIG_YAML = """
 id: newtonian-8in
 name: 8" Newtonian imaging rig
-mount:
-  device: "Telescope Simulator"
-imagingTrain:
-  telescope:
+components:
+  - role: mount
+    device: "Telescope Simulator"
+  - role: telescope
     apertureMm: 203
     focalLengthMm: 1000
-  focuser:
+  - role: focuser
     device: "Focuser Simulator"
     minPosition: 0
     maxPosition: 50000
-  filterWheel:
+  - role: filterWheel
     device: "Filter Wheel Simulator"
     slots:
       1: Luminance
       2: Red
       3: Green
       4: Blue
-  rotator:
+  - role: rotator
     device: "Rotator Simulator"
-  camera:
+  - role: camera
     device: "ZWO CCD ASI2600MM Pro"
     cooled: true
     pixelsX: 6248
     pixelsY: 4176
     pixelSizeMicron: 3.76
     bitDepth: 16
-guidingTrain:
-  telescope:
+  - role: guideTelescope
     apertureMm: 60
     focalLengthMm: 240
-  camera:
+  - role: guideCamera
     device: "ZWO CCD ASI120MM Mini"
     cooled: false
     pixelsX: 1280
     pixelsY: 960
     pixelSizeMicron: 3.75
     bitDepth: 12
-devices:
   - role: powerHub
     device: "Pegasus PPBA"
   - role: observatoryControl
@@ -61,43 +57,16 @@ devices:
 
 MINIMAL_RIG_YAML = """
 id: minimal
-name: Minimal rig (no guide train)
-mount:
-  device: "Telescope Simulator"
-imagingTrain:
-  telescope:
-    apertureMm: 100
-    focalLengthMm: 500
-  camera:
+name: Minimal rig
+components:
+  - role: mount
+    device: "Telescope Simulator"
+  - role: camera
     device: "CCD Simulator"
     pixelsX: 1000
     pixelsY: 1000
     pixelSizeMicron: 5.0
     bitDepth: 16
-"""
-
-OAG_RIG_YAML = """
-id: oag-rig
-name: Off-axis guided rig
-mount:
-  device: "Telescope Simulator"
-imagingTrain:
-  telescope:
-    apertureMm: 200
-    focalLengthMm: 800
-  camera:
-    device: "CCD Simulator"
-    pixelsX: 4000
-    pixelsY: 3000
-    pixelSizeMicron: 3.8
-    bitDepth: 16
-  offAxisGuider:
-    camera:
-      device: "Guide Camera Simulator"
-      pixelsX: 1280
-      pixelsY: 960
-      pixelSizeMicron: 3.75
-      bitDepth: 12
 """
 
 
@@ -121,85 +90,54 @@ def test_load_rigs_parses_valid_rig_file(tmp_path: Path) -> None:
     assert len(rigs) == 1
     rig = rigs[0]
     assert rig.id == "newtonian-8in"
-    assert rig.mount.device == "Telescope Simulator"
-    assert rig.imagingTrain.telescope.apertureMm == 203
-    assert rig.imagingTrain.focuser is not None
-    assert rig.imagingTrain.focuser.maxPosition == 50000
-    assert rig.imagingTrain.filterWheel is not None
-    assert rig.imagingTrain.filterWheel.slots[2] == "Red"
-    assert rig.imagingTrain.rotator is not None
-    assert rig.imagingTrain.rotator.device == "Rotator Simulator"
-    assert rig.imagingTrain.camera.device == "ZWO CCD ASI2600MM Pro"
-    assert rig.imagingTrain.offAxisGuider is None
-    assert rig.guidingTrain is not None
-    assert rig.guidingTrain.telescope.focalLengthMm == 240
-    assert rig.guidingTrain.camera.bitDepth == 12
-    assert rig.guidingTrain.focuser is None
-    assert [(d.role, d.device) for d in rig.devices] == [
-        ("powerHub", "Pegasus PPBA"),
-        ("observatoryControl", "Dome Simulator"),
-        ("flatScreen", "Flat Panel Simulator"),
-        ("dewHeater", "Pegasus PPBA:Dew A"),
-        ("dewHeater", "Pegasus PPBA:Dew B"),
-    ]
+
+    by_role = {c.role: c for c in rig.components if c.role != "dewHeater"}
+    assert by_role["mount"].device == "Telescope Simulator"
+    assert by_role["telescope"].apertureMm == 203
+    assert by_role["telescope"].device is None
+    assert by_role["focuser"].maxPosition == 50000
+    assert by_role["filterWheel"].slots == {1: "Luminance", 2: "Red", 3: "Green", 4: "Blue"}
+    assert by_role["rotator"].device == "Rotator Simulator"
+    assert by_role["camera"].device == "ZWO CCD ASI2600MM Pro"
+    assert by_role["camera"].bitDepth == 16
+    assert by_role["guideTelescope"].focalLengthMm == 240
+    assert by_role["guideCamera"].bitDepth == 12
+    assert by_role["powerHub"].device == "Pegasus PPBA"
+    assert by_role["observatoryControl"].device == "Dome Simulator"
+    assert by_role["flatScreen"].device == "Flat Panel Simulator"
+
+    dew_heaters = [c.device for c in rig.components if c.role == "dewHeater"]
+    assert dew_heaters == ["Pegasus PPBA:Dew A", "Pegasus PPBA:Dew B"]
 
 
-def test_load_rigs_allows_omitting_optional_fields(tmp_path: Path) -> None:
+def test_load_rigs_allows_a_minimal_component_list(tmp_path: Path) -> None:
     (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
 
     rigs = rig_store.load_rigs(tmp_path)
 
     assert len(rigs) == 1
-    rig = rigs[0]
-    assert rig.imagingTrain.focuser is None
-    assert rig.imagingTrain.filterWheel is None
-    assert rig.imagingTrain.rotator is None
-    assert rig.imagingTrain.offAxisGuider is None
-    assert rig.guidingTrain is None
-    assert rig.devices == []
+    assert [c.role for c in rigs[0].components] == ["mount", "camera"]
 
 
-def test_load_rigs_parses_off_axis_guider(tmp_path: Path) -> None:
-    (tmp_path / "oag-rig.yaml").write_text(OAG_RIG_YAML)
+def test_load_rigs_allows_an_empty_component_list(tmp_path: Path) -> None:
+    (tmp_path / "empty.yaml").write_text('id: empty\nname: "Empty rig"\ncomponents: []\n')
 
     rigs = rig_store.load_rigs(tmp_path)
 
     assert len(rigs) == 1
-    rig = rigs[0]
-    assert rig.imagingTrain.offAxisGuider is not None
-    assert rig.imagingTrain.offAxisGuider.camera.device == "Guide Camera Simulator"
-    assert rig.guidingTrain is None
+    assert rigs[0].components == []
 
 
-def test_rig_rejects_both_off_axis_guider_and_guiding_train(tmp_path: Path) -> None:
-    combined = OAG_RIG_YAML + (
-        "guidingTrain:\n"
-        "  telescope:\n"
-        "    apertureMm: 60\n"
-        "    focalLengthMm: 240\n"
-        "  camera:\n"
-        '    device: "ZWO CCD ASI120MM Mini"\n'
-        "    pixelsX: 1280\n"
-        "    pixelsY: 960\n"
-        "    pixelSizeMicron: 3.75\n"
-        "    bitDepth: 12\n"
-    )
-
-    with pytest.raises(ValidationError, match="mutually exclusive"):
-        rig_store.Rig.model_validate(yaml.safe_load(combined))
-
-
-def test_load_rigs_accepts_unanticipated_device_roles(tmp_path: Path) -> None:
+def test_load_rigs_accepts_unanticipated_component_roles(tmp_path: Path) -> None:
     (tmp_path / "minimal.yaml").write_text(
-        MINIMAL_RIG_YAML + '\ndevices:\n  - role: allSkyCamera\n    device: "All Sky Simulator"\n'
+        MINIMAL_RIG_YAML + '  - role: allSkyCamera\n    device: "All Sky Simulator"\n'
     )
 
     rigs = rig_store.load_rigs(tmp_path)
 
     assert len(rigs) == 1
-    assert rigs[0].devices == [
-        rig_store.AuxiliaryDevice(role="allSkyCamera", device="All Sky Simulator")
-    ]
+    roles = [c.role for c in rigs[0].components]
+    assert "allSkyCamera" in roles
 
 
 def test_load_rigs_skips_files_with_invalid_yaml(tmp_path: Path) -> None:
@@ -220,22 +158,10 @@ def test_load_rigs_skips_files_that_fail_schema_validation(tmp_path: Path) -> No
     assert [rig.id for rig in rigs] == ["minimal"]
 
 
-def test_load_rigs_skips_files_with_both_guiding_train_and_off_axis_guider(
-    tmp_path: Path,
-) -> None:
-    combined = OAG_RIG_YAML + (
-        "guidingTrain:\n"
-        "  telescope:\n"
-        "    apertureMm: 60\n"
-        "    focalLengthMm: 240\n"
-        "  camera:\n"
-        '    device: "ZWO CCD ASI120MM Mini"\n'
-        "    pixelsX: 1280\n"
-        "    pixelsY: 960\n"
-        "    pixelSizeMicron: 3.75\n"
-        "    bitDepth: 12\n"
+def test_load_rigs_skips_files_with_a_component_missing_its_role(tmp_path: Path) -> None:
+    (tmp_path / "no-role.yaml").write_text(
+        'id: no-role\nname: "No role"\ncomponents:\n  - device: "Telescope Simulator"\n'
     )
-    (tmp_path / "combined.yaml").write_text(combined)
     (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
 
     rigs = rig_store.load_rigs(tmp_path)
@@ -258,14 +184,14 @@ def test_load_rigs_keeps_first_definition_on_duplicate_id(tmp_path: Path) -> Non
     rigs = rig_store.load_rigs(tmp_path)
 
     assert len(rigs) == 1
-    assert rigs[0].name == "Minimal rig (no guide train)"
+    assert rigs[0].name == "Minimal rig"
 
 
 def test_list_rigs_reports_id_and_name_only(tmp_path: Path) -> None:
     (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
     rig_store.load_rigs(tmp_path)
 
-    assert rig_store.list_rigs() == [{"id": "minimal", "name": "Minimal rig (no guide train)"}]
+    assert rig_store.list_rigs() == [{"id": "minimal", "name": "Minimal rig"}]
 
 
 def test_get_rig_returns_loaded_rig(tmp_path: Path) -> None:

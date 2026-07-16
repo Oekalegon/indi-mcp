@@ -1,13 +1,22 @@
 """Loading and querying imaging rig definitions.
 
-Rig definitions describe the physical imaging setup (mount, imaging train,
-optional guiding train) that INDI itself has no protocol representation for.
-They are YAML documents under a rigs directory (one file per rig, see
-`docs/RigSchema.md`), not SQLite rows, since this is low-volume
-human-curated configuration rather than write-heavy operational data. Like
-the scripting layer, files are parsed with `yaml.safe_load` and validated
-against a schema, since they may be authored on the Client Computer and
-uploaded.
+Rig definitions describe the physical imaging setup — mount, telescope(s),
+camera(s), focuser, filter wheel, rotator, and other equipment — that INDI
+itself has no protocol representation for. They are YAML documents under a
+rigs directory (one file per rig, see `docs/RigSchema.md`), not SQLite rows,
+since this is low-volume human-curated configuration rather than
+write-heavy operational data. Like the scripting layer, files are parsed
+with `yaml.safe_load` and validated against a schema, since they may be
+authored on the Client Computer and uploaded.
+
+A rig is a flat list of components rather than a nested structure of
+imaging/guiding trains and optical tube assemblies. Real setups can swap
+imaging trains between telescopes and telescopes between mounts, so a
+faithful model of those relationships would need separate stores for
+trains, OTAs, mounts, and observatories, cross-referencing each other. That
+is deferred as unnecessary complexity for now; a flat list per rig is
+enough to declare "this is what's mounted this session" and to cross-check
+it against connected INDI devices (see `suggest_rig`/`check_rig`).
 """
 
 import logging
@@ -16,22 +25,14 @@ from pathlib import Path
 from typing import TypedDict
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "AuxiliaryDevice",
-    "Camera",
-    "Device",
-    "Filterwheel",
-    "Focuser",
-    "ImagingTrain",
-    "OffAxisGuider",
-    "OpticalTrain",
+    "Component",
     "Rig",
     "RigSummary",
-    "TelescopeOptics",
     "get_rig",
     "list_rigs",
     "load_rigs",
@@ -47,85 +48,35 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class TelescopeOptics(_StrictModel):
-    """Aperture/focal length of one optical train. Not a driver, so no `device` field."""
+class Component(_StrictModel):
+    """One piece of rig equipment.
 
-    apertureMm: float
-    focalLengthMm: float
+    `role` is a free-form label (e.g. `"mount"`, `"telescope"`, `"camera"`,
+    `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`,
+    `"powerHub"`, `"dewHeater"`, ...) rather than a fixed enum, so a rig can
+    declare a component type this schema's authors never anticipated
+    without requiring a schema change. `role` values aren't required to be
+    unique within a rig — e.g. a rig commonly has more than one
+    independently-controlled dew heater channel.
 
-
-class Device(_StrictModel):
-    """A rig component that is just an INDI device name, with no extra config."""
-
-    device: str
-
-
-class Focuser(_StrictModel):
-    device: str
-    minPosition: int
-    maxPosition: int
-
-
-class Filterwheel(_StrictModel):
-    device: str
-    slots: dict[int, str] = {}
-
-
-class Camera(_StrictModel):
-    device: str
-    cooled: bool = False
-    pixelsX: int
-    pixelsY: int
-    pixelSizeMicron: float
-    bitDepth: int
-
-
-class OffAxisGuider(_StrictModel):
-    """A guide camera picked off the imaging train's own light path via a prism.
-
-    An alternative to a separate `guidingTrain`: rather than a second scope
-    with its own optics, the guide camera shares the imaging train's
-    telescope. Mutually exclusive with `guidingTrain` (see `Rig`).
-    """
-
-    camera: Camera
-
-
-class OpticalTrain(_StrictModel):
-    """One optical path from telescope to camera: the imaging train, or a separate guiding train.
-
-    `focuser`/`filterWheel`/`rotator` are optional here because a guiding
-    train usually only has a camera (most guide scopes are manual-focus,
-    with no filter wheel or field rotator), but any of them can occur on
-    either train.
-    """
-
-    telescope: TelescopeOptics
-    camera: Camera
-    focuser: Focuser | None = None
-    filterWheel: Filterwheel | None = None
-    rotator: Device | None = None
-
-
-class ImagingTrain(OpticalTrain):
-    """The main imaging train, which may also carry an off-axis guider."""
-
-    offAxisGuider: OffAxisGuider | None = None
-
-
-class AuxiliaryDevice(_StrictModel):
-    """An additional INDI device that doesn't need config beyond its name and role.
-
-    `role` is a free-form label (e.g. `"powerHub"`, `"observatoryControl"`,
-    `"flatScreen"`, `"dewHeater"`) rather than a fixed enum, so a rig can
-    declare a device type this schema doesn't have a dedicated field for yet
-    without requiring a schema change. Roles that don't need per-role config
-    (unlike e.g. `focuser`'s position range) fit here; give a component its
-    own typed field instead once it needs more than a device name.
+    All fields besides `role` are optional since which ones are meaningful
+    depends on the role: a `"telescope"` has `apertureMm`/`focalLengthMm`
+    but no `device` (it isn't a driver); a `"camera"` has `device` plus
+    pixel geometry; a `"powerHub"` has just `device`.
     """
 
     role: str
-    device: str
+    device: str | None = None
+    apertureMm: float | None = None
+    focalLengthMm: float | None = None
+    cooled: bool | None = None
+    pixelsX: int | None = None
+    pixelsY: int | None = None
+    pixelSizeMicron: float | None = None
+    bitDepth: int | None = None
+    minPosition: int | None = None
+    maxPosition: int | None = None
+    slots: dict[int, str] | None = None
 
 
 class Rig(_StrictModel):
@@ -133,19 +84,7 @@ class Rig(_StrictModel):
 
     id: str
     name: str
-    mount: Device
-    imagingTrain: ImagingTrain
-    guidingTrain: OpticalTrain | None = None
-    devices: list[AuxiliaryDevice] = []
-
-    @model_validator(mode="after")
-    def _check_guiding_method_is_unambiguous(self) -> "Rig":
-        if self.guidingTrain is not None and self.imagingTrain.offAxisGuider is not None:
-            raise ValueError(
-                "a rig can't declare both `guidingTrain` and `imagingTrain.offAxisGuider` "
-                "— guiding via a separate scope and via an off-axis guider are mutually exclusive"
-            )
-        return self
+    components: list[Component]
 
 
 class RigSummary(TypedDict):
