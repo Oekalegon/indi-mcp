@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 from typing import TypedDict
 
+import psutil
 from indiweb.driver import DeviceDriver, DriverCollection
 
 from indi_mcp import indi_server
@@ -93,6 +94,74 @@ async def get_driver_catalog() -> list[DriverInfo]:
     ]
 
 
+def _running_driver_labels() -> set[str]:
+    """Labels of drivers `indiserver` currently has running as local children.
+
+    `indiweb.IndiServer.start_driver` always passes `-n "<label>"` on the command line for a
+    locally-spawned driver (it's only skipped for remote/MDPD drivers, which don't spawn a
+    local process at all — see `_is_locally_observable`). So a running process's own cmdline
+    is an authoritative, collision-free way to identify which label it is: unlike the driver
+    binary, which multiple catalog entries can share (e.g. templated/MDPD-style XML), the
+    label passed via `-n` is unique per running instance.
+    """
+    labels: set[str] = set()
+    for proc in indi_server.get_driver_processes():
+        try:
+            cmdline = proc.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        for i, arg in enumerate(cmdline):
+            if arg == "-n" and i + 1 < len(cmdline):
+                labels.add(cmdline[i + 1])
+                break
+    return labels
+
+
+def _is_locally_observable(driver: DeviceDriver) -> bool:
+    """Whether `driver` spawns a local `indiserver` child process we can detect via psutil.
+
+    Remote drivers (binary contains "@") run on another host, and MDPD drivers share a
+    single process across multiple catalog entries — neither case can be reliably confirmed
+    or ruled out via the local process tree, so reconciliation leaves them alone and trusts
+    whatever `start_driver`/`stop_driver` already recorded for them.
+    """
+    return "@" not in driver.binary and not driver.mdpd
+
+
+def _reconcile_running_drivers() -> dict[str, DeviceDriver]:
+    """Sync the in-memory running-driver registry against `indiserver`'s actual children.
+
+    The registry (`indi_server._server`) is only populated by `start_driver`/`stop_driver`
+    calls made within the current process, so it starts out empty after an MCP server
+    restart even though `indiserver` and any drivers it already started are detached and
+    keep running. This reconciles the registry against the real OS process tree so reads
+    (and the running-driver check in `stop_driver`) reflect reality regardless of restarts.
+
+    Remote and MDPD drivers are excluded from reconciliation (see `_is_locally_observable`):
+    they don't correspond 1:1 with a local child process, so we'd otherwise incorrectly drop
+    them from the registry the moment they're read back after being started.
+    """
+    running_labels = _running_driver_labels()
+    registry = indi_server._server.get_running_drivers()
+    catalog = _get_catalog()
+
+    for label in running_labels:
+        if label in registry:
+            continue
+        driver = catalog.by_label(label)
+        if driver is not None and _is_locally_observable(driver):
+            registry[label] = driver
+
+    for label in [
+        label
+        for label, driver in registry.items()
+        if _is_locally_observable(driver) and label not in running_labels
+    ]:
+        del registry[label]
+
+    return registry
+
+
 async def start_driver(label: str) -> DriverStatus:
     """Start the INDI driver identified by its catalog label (e.g. "CCD Simulator")."""
     driver = await asyncio.to_thread(_find_driver, label)
@@ -103,7 +172,8 @@ async def start_driver(label: str) -> DriverStatus:
 
 async def stop_driver(label: str) -> DriverStatus:
     """Stop the running INDI driver identified by its catalog label."""
-    if label not in indi_server._server.get_running_drivers():
+    running = await asyncio.to_thread(_reconcile_running_drivers)
+    if label not in running:
         raise ValueError(f"Driver not running: {label!r}")
     driver = await asyncio.to_thread(_find_driver, label)
     logger.info("Stopping driver: %s", label)
@@ -113,5 +183,5 @@ async def stop_driver(label: str) -> DriverStatus:
 
 async def list_running_drivers() -> list[DriverStatus]:
     """List all currently running INDI drivers."""
-    running = await asyncio.to_thread(indi_server._server.get_running_drivers)
+    running = await asyncio.to_thread(_reconcile_running_drivers)
     return [{"label": label, "running": True} for label in running]

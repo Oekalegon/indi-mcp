@@ -15,6 +15,7 @@ import threading
 from subprocess import call
 from typing import TypedDict
 
+import psutil
 from indiweb.async_system_command import AsyncSystemCommand
 from indiweb.indi_server import INDI_FIFO, INDI_PORT
 from indiweb.indi_server import IndiServer as _IndiServer
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "INDI_PORT",
     "IndiServerStatus",
+    "get_driver_processes",
     "get_status",
     "restart_server",
     "start_server",
@@ -94,6 +96,37 @@ async def get_status() -> IndiServerStatus:
     """Report whether `indiserver` is running, and on which port."""
     running = await asyncio.to_thread(_server.is_running, _current_port)
     return {"running": running, "port": _current_port}
+
+
+def _find_server_process(port: int) -> psutil.Process | None:
+    try:
+        for proc in psutil.process_iter(["name", "cmdline"]):
+            if proc.info["name"] != "indiserver":
+                continue
+            cmdline = proc.info["cmdline"] or []
+            for i, arg in enumerate(cmdline):
+                if arg == "-p" and i + 1 < len(cmdline) and cmdline[i + 1] == str(port):
+                    return proc
+    except (psutil.Error, ValueError, IndexError):
+        logger.warning("Error scanning for indiserver process", exc_info=True)
+    return None
+
+
+def get_driver_processes(port: int | None = None) -> list[psutil.Process]:
+    """List the driver processes `indiserver` has spawned as its children.
+
+    Drivers are detached (`setsid`) and survive an MCP server restart along with
+    `indiserver` itself, but the in-memory running-driver registry does not. This
+    lets callers reconcile that registry against reality by looking at the OS
+    process tree instead.
+    """
+    server_proc = _find_server_process(port if port is not None else _current_port)
+    if server_proc is None:
+        return []
+    try:
+        return server_proc.children()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
 
 
 async def _wait_until_running() -> IndiServerStatus:
