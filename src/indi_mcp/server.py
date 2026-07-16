@@ -5,10 +5,11 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from indi_mcp import indi_driver, indi_messaging, indi_server
+from indi_mcp import indi_driver, indi_messaging, indi_server, rig_store
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
+from indi_mcp.rig_store import Rig, RigSummary
 
 logger = logging.getLogger(__name__)
 
@@ -104,12 +105,25 @@ async def send_indi_property(device: str, name: str, elements: dict[str, str]) -
     return await indi_messaging.send_property(device, name, elements)
 
 
+@mcp.tool()
+def list_rigs() -> list[RigSummary]:
+    """List the id/name of every configured imaging rig (see `docs/RigSchema.md`)."""
+    return rig_store.list_rigs()
+
+
+@mcp.tool()
+def get_rig(rig_id: str) -> Rig:
+    """Return the full definition of the imaging rig identified by `rig_id`."""
+    return rig_store.get_rig(rig_id)
+
+
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
     """Start serving the MCP server over the given transport.
 
     `host`/`port` only apply to the `sse` and `streamable-http` transports.
     """
     logging.basicConfig(level=logging.INFO)
+    rig_store.load_rigs()
     if transport != "stdio":
         mcp.settings.host = host
         mcp.settings.port = port
