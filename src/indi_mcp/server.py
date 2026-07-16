@@ -118,6 +118,18 @@ def get_rig(rig_id: str) -> Rig:
 
 
 @mcp.tool()
+def save_rig(rig: Rig, overwrite: bool = False) -> Rig:
+    """Save a rig definition — hand-authored, or completed from a `draft_rig` result.
+
+    Writes `rig` to `rigs/<rig.id>.yaml` and reloads it so it's immediately
+    available by `id` to `get_rig`/`suggest_rig`/`check_rig`. Refuses to
+    replace an existing rig file unless `overwrite` is set, since reusing an
+    `id` could otherwise silently destroy a previously saved rig.
+    """
+    return rig_store.save_rig(rig, overwrite=overwrite)
+
+
+@mcp.tool()
 def suggest_rig() -> list[RigSuggestion]:
     """Propose which configured rig is likely mounted, by matching connected INDI devices.
 

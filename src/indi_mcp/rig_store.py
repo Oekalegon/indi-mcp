@@ -45,6 +45,7 @@ __all__ = [
     "get_rig",
     "list_rigs",
     "load_rigs",
+    "save_rig",
     "suggest_rig",
 ]
 
@@ -269,6 +270,36 @@ def get_rig(rig_id: str) -> Rig:
     if rig is None:
         raise ValueError(f"Unknown rig: {rig_id!r}")
     return rig
+
+
+def save_rig(rig: Rig, *, overwrite: bool = False, directory: Path | None = None) -> Rig:
+    """Write `rig` to `<directory>/<rig.id>.yaml` and reload it into memory.
+
+    `rig` is already a validated `Rig` (pydantic validation happens when
+    it's constructed, whether hand-assembled from a `draft_rig` result or
+    supplied directly by the caller), so this only needs to worry about the
+    filesystem: it refuses to replace an existing `<rig.id>.yaml` unless
+    `overwrite` is set, since reusing an `id` could otherwise silently
+    destroy a previously saved rig with no warning — this is the operator's
+    explicit save action, never something the server does on its own (see
+    "No silent auto-selection" in `docs/RigSchema.md`). Reloads every rig in
+    `directory` afterwards (see `load_rigs`) so the saved rig is immediately
+    available by `id` to `get_rig`/`suggest_rig`/`check_rig`.
+    """
+    if not rig.id or rig.id in (".", "..") or "/" in rig.id or "\\" in rig.id:
+        raise ValueError(f"Invalid rig id for a filename: {rig.id!r}")
+    directory = directory if directory is not None else _rigs_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{rig.id}.yaml"
+    if path.exists() and not overwrite:
+        raise ValueError(
+            f"A rig file already exists for id {rig.id!r} ({path}); "
+            "pass overwrite=True to replace it."
+        )
+    path.write_text(yaml.safe_dump(rig.model_dump(exclude_none=True), sort_keys=False))
+    logger.info("Saved rig %r to %s", rig.id, path)
+    load_rigs(directory)
+    return get_rig(rig.id)
 
 
 def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
