@@ -9,7 +9,7 @@ from indi_mcp import indi_driver, indi_messaging, indi_server, rig_store
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
-from indi_mcp.rig_store import Rig, RigSuggestion, RigSummary
+from indi_mcp.rig_store import Rig, RigCheck, RigSuggestion, RigSummary
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,16 @@ def suggest_rig() -> list[RigSuggestion]:
     operator or client to choose from.
     """
     return rig_store.suggest_rig(indi_messaging.list_devices())
+
+
+@mcp.tool()
+def check_rig(rig_id: str) -> RigCheck:
+    """Warn on any of the given rig's devices that aren't currently connected.
+
+    This is a warning, not a hard failure: a rig might be intentionally
+    used without one of its devices (e.g. imaging without a guide camera).
+    """
+    return rig_store.check_rig(rig_id, indi_messaging.list_devices())
 
 
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
