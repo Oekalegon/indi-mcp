@@ -27,6 +27,9 @@ components:
   - role: rotator
     device: "Rotator Simulator"
   - role: camera
+    make: ZWO
+    model: ASI2600MM Pro
+    id: "SN12345"
     device: "ZWO CCD ASI2600MM Pro"
     cooled: true
     pixelsX: 6248
@@ -100,6 +103,9 @@ def test_load_rigs_parses_valid_rig_file(tmp_path: Path) -> None:
     assert by_role["rotator"].device == "Rotator Simulator"
     assert by_role["camera"].device == "ZWO CCD ASI2600MM Pro"
     assert by_role["camera"].bitDepth == 16
+    assert by_role["camera"].make == "ZWO"
+    assert by_role["camera"].model == "ASI2600MM Pro"
+    assert by_role["camera"].id == "SN12345"
     assert by_role["guideTelescope"].focalLengthMm == 240
     assert by_role["guideCamera"].bitDepth == 12
     assert by_role["powerHub"].device == "Pegasus PPBA"
@@ -117,6 +123,27 @@ def test_load_rigs_allows_a_minimal_component_list(tmp_path: Path) -> None:
 
     assert len(rigs) == 1
     assert [c.role for c in rigs[0].components] == ["mount", "camera"]
+
+
+def test_load_rigs_distinguishes_two_identical_cameras_by_id(tmp_path: Path) -> None:
+    (tmp_path / "two-cameras.yaml").write_text(
+        MINIMAL_RIG_YAML + "  - role: guideCamera\n"
+        "    make: ZWO\n"
+        "    model: ASI120MM Mini\n"
+        '    id: "SN-A"\n'
+        '    device: "ZWO CCD ASI120MM Mini #1"\n'
+        "  - role: guideCamera\n"
+        "    make: ZWO\n"
+        "    model: ASI120MM Mini\n"
+        '    id: "SN-B"\n'
+        '    device: "ZWO CCD ASI120MM Mini #2"\n'
+    )
+
+    rigs = rig_store.load_rigs(tmp_path)
+
+    guide_cameras = [c for c in rigs[0].components if c.role == "guideCamera"]
+    assert [c.id for c in guide_cameras] == ["SN-A", "SN-B"]
+    assert {c.model for c in guide_cameras} == {"ASI120MM Mini"}
 
 
 def test_load_rigs_allows_an_empty_component_list(tmp_path: Path) -> None:

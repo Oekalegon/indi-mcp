@@ -375,6 +375,9 @@ components:
   - role: rotator
     device: "Rotator Simulator"
   - role: camera
+    make: ZWO
+    model: ASI2600MM Pro
+    id: "SN12345"
     device: "ZWO CCD ASI2600MM Pro"
     cooled: true
     pixelsX: 6248
@@ -385,6 +388,9 @@ components:
     apertureMm: 60
     focalLengthMm: 240
   - role: guideCamera
+    make: ZWO
+    model: ASI120MM Mini
+    id: "SN67890"
     device: "ZWO CCD ASI120MM Mini"
     cooled: false
     pixelsX: 1280
@@ -422,6 +428,13 @@ meaningful for that role. A `role: telescope` (or `guideTelescope`) entry has
 `guideCamera`) entry has `device` plus pixel geometry. A `role: powerHub`/`dewHeater`/etc. entry
 has just `device`. `role` values aren't required to be unique — a rig commonly has more than one
 device sharing a role (e.g. several independently-controlled dew heater channels).
+
+Any component can also carry `make`/`model` (e.g. `"ZWO"`/`"ASI2600MM Pro"`) — independent of
+`role`, and useful once rigs are cross-referenced against a device library rather than each rig
+repeating full specs — and `id`, which identifies the *specific physical unit* (a serial number,
+or any label the operator chooses). `id` matters once a rig has two components of the same
+`make`/`model` — e.g. two identical guide cameras — and something downstream needs to tell them
+apart, such as picking the matching master dark for a given camera's frames.
 
 **The YAML definition is authoritative; live INDI properties are advisory.** Where a field overlaps with something INDI reports (camera pixel size/count/bit depth), the server can cross-check the connected device's live properties against the configured rig and flag a mismatch — but it never overrides the declared config, since INDI can't confirm the parts of the rig it has no visibility into (aperture, focal length, imaging vs. guiding role).
 

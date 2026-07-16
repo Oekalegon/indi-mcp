@@ -98,9 +98,20 @@ class Component(_StrictModel):
     depends on the role: a `"telescope"` has `apertureMm`/`focalLengthMm`
     but no `device` (it isn't a driver); a `"camera"` has `device` plus
     pixel geometry; a `"powerHub"` has just `device`.
+
+    `make`/`model` identify the product (e.g. `"ZWO"`/`"ASI2600MM Pro"`),
+    useful once rigs are cross-referenced against a device library rather
+    than each repeating full specs. `id` identifies the specific physical
+    unit — a serial number, or any label the operator chooses — needed once
+    a rig has two components of the same make/model (e.g. two of the same
+    camera model) and something downstream needs to tell them apart, such
+    as picking the matching master dark for a given camera's frames.
     """
 
     role: Role
+    make: str | None = None
+    model: str | None = None
+    id: str | None = None
     device: str | None = None
     apertureMm: float | None = None
     focalLengthMm: float | None = None

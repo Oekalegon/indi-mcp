@@ -14,7 +14,8 @@ aborting the whole load, and unknown fields are rejected.
 A rig is a **flat list of components**, not a nested structure of imaging/guiding trains,
 optical tube assemblies, or mounts — see
 [Design.md](Design.md#imaging-rig-metadata) for why that's deferred. Each component has a
-`role` (free-form, not a fixed enum) plus whichever of the fields below are meaningful for it.
+`role` (one of a known set, or any other string) plus whichever of the fields below are
+meaningful for it.
 
 This document still talks about the **imaging train** (`telescope`, `focuser`, `filterWheel`,
 `rotator`, `camera`) and **guiding train** (`guideTelescope`, `guideCamera`) as a way to group
@@ -50,6 +51,9 @@ components:
   - role: rotator
     device: "Rotator Simulator"
   - role: camera
+    make: ZWO
+    model: ASI2600MM Pro
+    id: "SN12345"
     device: "ZWO CCD ASI2600MM Pro"
     cooled: true
     pixelsX: 6248
@@ -60,6 +64,9 @@ components:
     apertureMm: 60
     focalLengthMm: 240
   - role: guideCamera
+    make: ZWO
+    model: ASI120MM Mini
+    id: "SN67890"
     device: "ZWO CCD ASI120MM Mini"
     cooled: false
     pixelsX: 1280
@@ -97,6 +104,9 @@ reference easier to read — again, not a grouping that exists in the YAML itsel
 | Field | Type | Description |
 |---|---|---|
 | `role` | string | What this component is. One of the known roles — `"mount"`, `"telescope"`, `"guideTelescope"`, `"camera"`, `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`, `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"` — or any other string, for a component type this schema's authors haven't thought of yet. Not required to be unique within a rig: a rig commonly has more than one component sharing a role (e.g. several independently-controlled dew heater channels). |
+| `make` | string | The manufacturer (e.g. `"ZWO"`). Optional, and independent of `role` — useful once rigs get cross-referenced against a device library rather than each rig repeating full specs. |
+| `model` | string | The product model (e.g. `"ASI2600MM Pro"`). |
+| `id` | string | Identifies the specific physical unit — a serial number, or any label the operator chooses. Matters once a rig has two components of the same `make`/`model` (e.g. two identical guide cameras) and something downstream needs to tell them apart, such as picking the matching master dark for a given camera's frames. |
 
 #### Mount
 
