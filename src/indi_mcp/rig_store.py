@@ -248,15 +248,7 @@ def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
     connected = set(connected_devices)
     suggestions: list[RigSuggestion] = []
     for rig in _rigs.values():
-        matched = []
-        missing = []
-        for component in rig.components:
-            if component.device is None:
-                continue
-            if component.device in connected:
-                matched.append(component.id)
-            else:
-                missing.append(component.id)
+        matched, missing = _match_devices(rig, connected)
         total = len(matched) + len(missing)
         score = len(matched) / total if total else None
         suggestions.append(
@@ -287,7 +279,23 @@ def check_rig(rig_id: str, connected_devices: Iterable[str]) -> RigCheck:
     they're excluded from both lists.
     """
     rig = get_rig(rig_id)
-    connected = set(connected_devices)
+    present, missing = _match_devices(rig, set(connected_devices))
+    return {
+        "kind": "rigCheck",
+        "rigId": rig.id,
+        "ok": not missing,
+        "present": present,
+        "missing": missing,
+    }
+
+
+def _match_devices(rig: Rig, connected: set[str]) -> tuple[list[str], list[str]]:
+    """Split `rig`'s device-bearing components into (present, missing) component ids.
+
+    Components without a `device` field (e.g. `telescope`, `guideTelescope`)
+    have nothing INDI-visible to check them against, so they're excluded
+    from both lists.
+    """
     present = []
     missing = []
     for component in rig.components:
@@ -297,13 +305,7 @@ def check_rig(rig_id: str, connected_devices: Iterable[str]) -> RigCheck:
             present.append(component.id)
         else:
             missing.append(component.id)
-    return {
-        "kind": "rigCheck",
-        "rigId": rig.id,
-        "ok": not missing,
-        "present": present,
-        "missing": missing,
-    }
+    return present, missing
 
 
 def _sort_key(score: float | None) -> float:
