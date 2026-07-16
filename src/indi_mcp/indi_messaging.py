@@ -50,6 +50,9 @@ __all__ = [
 
 _MAX_BUFFERED_EVENTS = 200
 
+_STARTUP_POLL_TIMEOUT = 2.0
+_STARTUP_POLL_INTERVAL = 0.1
+
 _DEF_VECTOR_TYPES: dict[type, str] = {
     defSwitchVector: "switch",
     defTextVector: "text",
@@ -169,7 +172,7 @@ async def start_messaging(host: str = "localhost", port: int = INDI_PORT) -> Mes
     _client = _MessagingClient(host, port, _buffer)
     _host, _port = host, port
     _task = asyncio.create_task(_client.asyncrun())
-    return await get_status()
+    return await _wait_until_connected()
 
 
 async def stop_messaging() -> MessagingStatus:
@@ -187,6 +190,23 @@ async def stop_messaging() -> MessagingStatus:
 async def get_status() -> MessagingStatus:
     """Report whether the INDI messaging stream is running, and its host/port."""
     return {"running": _client is not None and _client.connected, "host": _host, "port": _port}
+
+
+async def _wait_until_connected() -> MessagingStatus:
+    """Poll `get_status` until the client reports connected or the timeout elapses.
+
+    Right after `start_messaging` launches the client's background task, its
+    TCP connection to `indiserver` is still completing asynchronously, so
+    `_client.connected` can briefly report `False` even though the
+    connection is about to succeed.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _STARTUP_POLL_TIMEOUT
+    status = await get_status()
+    while not status["running"] and loop.time() < deadline:
+        await asyncio.sleep(_STARTUP_POLL_INTERVAL)
+        status = await get_status()
+    return status
 
 
 def list_devices() -> list[str]:
