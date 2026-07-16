@@ -454,15 +454,15 @@ rigs are cross-referenced against a device library rather than each rig repeatin
 
 ### Checking that a rig's devices are present
 
-Once a rig is selected (for a script run, or explicitly via a `check_rig` tool), the server checks every component with a `device` field against the INDI devices currently connected to `indiserver`, and **warns rather than blocks** on any that are missing:
+Once a rig is selected (for a script run, or explicitly via a `check_rig` tool), the server checks every component with a `device` field against the INDI devices currently connected to `indiserver`, and **warns rather than blocks** on any that are missing. `present`/`missing` report each component's `id` (not its `role`), since a rig can have more than one component sharing a role:
 
 ```json
 {
   "kind": "rigCheck",
   "rigId": "newtonian-8in",
   "ok": false,
-  "missing": ["guideCamera"],
-  "present": ["mount", "focuser", "filterWheel", "camera"]
+  "missing": ["SN67890"],
+  "present": ["mount-1", "focuser-1", "filter-wheel-1", "SN12345"]
 }
 ```
 
