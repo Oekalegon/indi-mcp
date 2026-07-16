@@ -41,9 +41,10 @@ def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
     return Mocks(server=server, catalog=catalog)
 
 
-def _make_process(exe: str) -> MagicMock:
+def _make_process(label: str, binary: str = "indi_ccd_simulator") -> MagicMock:
+    """A psutil.Process-like mock for a driver started with `-n "<label>"`."""
     proc = MagicMock()
-    proc.exe.return_value = exe
+    proc.cmdline.return_value = [binary, "-n", label]
     return proc
 
 
@@ -125,7 +126,7 @@ async def test_stop_driver_stops_running_driver(
     mocks.catalog.by_label.return_value = driver
     mocks.server.get_running_drivers.return_value = {"CCD Simulator": driver}
     monkeypatch.setattr(
-        indi_server, "get_driver_processes", lambda: [_make_process("indi_ccd_simulator")]
+        indi_server, "get_driver_processes", lambda: [_make_process("CCD Simulator")]
     )
 
     status = await indi_driver.stop_driver("CCD Simulator")
@@ -149,7 +150,7 @@ async def test_list_running_drivers_reports_currently_running_drivers(
     driver = _make_driver("CCD Simulator")
     mocks.server.get_running_drivers.return_value = {"CCD Simulator": driver}
     monkeypatch.setattr(
-        indi_server, "get_driver_processes", lambda: [_make_process("indi_ccd_simulator")]
+        indi_server, "get_driver_processes", lambda: [_make_process("CCD Simulator")]
     )
 
     running = await indi_driver.list_running_drivers()
@@ -163,14 +164,39 @@ async def test_list_running_drivers_reflects_processes_after_server_restart(
     """The in-memory registry starts empty after an MCP server restart, but the
     driver process (started before the restart) survives, so it should still
     be reported as running once reconciled against the process tree."""
+    driver = _make_driver("CCD Simulator")
+    mocks.catalog.drivers = [driver]
+    mocks.catalog.by_label.return_value = driver
     mocks.server.get_running_drivers.return_value = {}
     monkeypatch.setattr(
-        indi_server, "get_driver_processes", lambda: [_make_process("indi_ccd_simulator")]
+        indi_server, "get_driver_processes", lambda: [_make_process("CCD Simulator")]
     )
 
     running = await indi_driver.list_running_drivers()
 
     assert running == [{"label": "CCD Simulator", "running": True}]
+
+
+async def test_list_running_drivers_disambiguates_shared_binary_by_label(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two catalog drivers can share a binary (e.g. templated/MDPD-style XML). The
+    running process's `-n` label -- not the binary -- must decide which one is running,
+    so a shared binary doesn't cause the wrong driver to be reported as running."""
+    driver_a = _make_driver("Device A", binary="indi_shared_driver")
+    driver_b = _make_driver("Device B", binary="indi_shared_driver")
+    mocks.catalog.drivers = [driver_a, driver_b]
+    mocks.catalog.by_label.side_effect = {"Device A": driver_a, "Device B": driver_b}.get
+    mocks.server.get_running_drivers.return_value = {}
+    monkeypatch.setattr(
+        indi_server,
+        "get_driver_processes",
+        lambda: [_make_process("Device B", binary="indi_shared_driver")],
+    )
+
+    running = await indi_driver.list_running_drivers()
+
+    assert running == [{"label": "Device B", "running": True}]
 
 
 async def test_list_running_drivers_drops_stale_registry_entries(

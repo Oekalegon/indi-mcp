@@ -94,16 +94,27 @@ async def get_driver_catalog() -> list[DriverInfo]:
     ]
 
 
-def _running_driver_binaries() -> set[str]:
-    """Basenames of the binaries `indiserver` currently has running as driver children."""
-    binaries: set[str] = set()
+def _running_driver_labels() -> set[str]:
+    """Labels of drivers `indiserver` currently has running as local children.
+
+    `indiweb.IndiServer.start_driver` always passes `-n "<label>"` on the command line for a
+    locally-spawned driver (it's only skipped for remote/MDPD drivers, which don't spawn a
+    local process at all — see `_is_locally_observable`). So a running process's own cmdline
+    is an authoritative, collision-free way to identify which label it is: unlike the driver
+    binary, which multiple catalog entries can share (e.g. templated/MDPD-style XML), the
+    label passed via `-n` is unique per running instance.
+    """
+    labels: set[str] = set()
     for proc in indi_server.get_driver_processes():
         try:
-            exe = proc.exe() or proc.name()
+            cmdline = proc.cmdline()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-        binaries.add(os.path.basename(exe))
-    return binaries
+        for i, arg in enumerate(cmdline):
+            if arg == "-n" and i + 1 < len(cmdline):
+                labels.add(cmdline[i + 1])
+                break
+    return labels
 
 
 def _is_locally_observable(driver: DeviceDriver) -> bool:
@@ -111,8 +122,8 @@ def _is_locally_observable(driver: DeviceDriver) -> bool:
 
     Remote drivers (binary contains "@") run on another host, and MDPD drivers share a
     single process across multiple catalog entries — neither case can be reliably confirmed
-    or ruled out by matching local process binaries, so reconciliation leaves them alone and
-    trusts whatever `start_driver`/`stop_driver` already recorded for them.
+    or ruled out via the local process tree, so reconciliation leaves them alone and trusts
+    whatever `start_driver`/`stop_driver` already recorded for them.
     """
     return "@" not in driver.binary and not driver.mdpd
 
@@ -130,22 +141,21 @@ def _reconcile_running_drivers() -> dict[str, DeviceDriver]:
     they don't correspond 1:1 with a local child process, so we'd otherwise incorrectly drop
     them from the registry the moment they're read back after being started.
     """
-    running_binaries = _running_driver_binaries()
+    running_labels = _running_driver_labels()
     registry = indi_server._server.get_running_drivers()
-    catalog_by_binary = {
-        os.path.basename(d.binary): d for d in _get_catalog().drivers if _is_locally_observable(d)
-    }
+    catalog = _get_catalog()
 
-    for binary in running_binaries:
-        driver = catalog_by_binary.get(binary)
-        if driver is not None and driver.label not in registry:
-            registry[driver.label] = driver
+    for label in running_labels:
+        if label in registry:
+            continue
+        driver = catalog.by_label(label)
+        if driver is not None and _is_locally_observable(driver):
+            registry[label] = driver
 
     for label in [
         label
         for label, driver in registry.items()
-        if _is_locally_observable(driver)
-        and os.path.basename(driver.binary) not in running_binaries
+        if _is_locally_observable(driver) and label not in running_labels
     ]:
         del registry[label]
 
