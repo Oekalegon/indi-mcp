@@ -140,6 +140,17 @@ def test_load_rigs_accepts_unanticipated_component_roles(tmp_path: Path) -> None
     assert "allSkyCamera" in roles
 
 
+def test_known_roles_covers_the_documented_important_roles() -> None:
+    assert set(rig_store.KNOWN_ROLES) >= {
+        "mount",
+        "camera",
+        "guideCamera",
+        "focuser",
+        "filterWheel",
+        "rotator",
+    }
+
+
 def test_load_rigs_skips_files_with_invalid_yaml(tmp_path: Path) -> None:
     (tmp_path / "broken.yaml").write_text("id: [unterminated")
     (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)

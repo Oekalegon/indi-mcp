@@ -413,9 +413,11 @@ to declare "this is what's mounted this session," which is all `suggest_rig`/`ch
 Structure can be reintroduced later once real rig files show what's actually worth splitting
 out.
 
-Each entry has a `role` — a free-form label (not a fixed enum), so a rig can declare a
-component type this schema's authors never anticipated without a schema change — plus whichever
-fields are meaningful for that role. A `role: telescope` (or `guideTelescope`) entry has
+Each entry has a `role` — one of a known set (`mount`, `telescope`, `guideTelescope`, `camera`,
+`guideCamera`, `focuser`, `filterWheel`, `rotator`, `powerHub`, `observatoryControl`,
+`flatScreen`, `dewHeater`) or any other string, so a rig can still declare a component type this
+schema's authors haven't thought of without a schema change — plus whichever fields are
+meaningful for that role. A `role: telescope` (or `guideTelescope`) entry has
 `apertureMm`/`focalLengthMm` and no `device`, since optics aren't a driver. A `role: camera` (or
 `guideCamera`) entry has `device` plus pixel geometry. A `role: powerHub`/`dewHeater`/etc. entry
 has just `device`. `role` values aren't required to be unique — a rig commonly has more than one

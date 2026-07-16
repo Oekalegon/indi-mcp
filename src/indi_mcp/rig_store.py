@@ -22,7 +22,7 @@ it against connected INDI devices (see `suggest_rig`/`check_rig`).
 import logging
 import os
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -31,8 +31,10 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "Component",
+    "KNOWN_ROLES",
     "Rig",
     "RigSummary",
+    "Role",
     "get_rig",
     "list_rigs",
     "load_rigs",
@@ -40,6 +42,47 @@ __all__ = [
 
 RIGS_DIR_ENV = "INDI_MCP_RIGS_DIR"
 _DEFAULT_RIGS_DIR = Path("rigs")
+
+KNOWN_ROLES = (
+    "mount",
+    "telescope",
+    "guideTelescope",
+    "camera",
+    "guideCamera",
+    "focuser",
+    "filterWheel",
+    "rotator",
+    "powerHub",
+    "observatoryControl",
+    "flatScreen",
+    "dewHeater",
+)
+"""Roles this schema's authors have thought of. Kept in sync with `Role` below."""
+
+Role = (
+    Literal[
+        "mount",
+        "telescope",
+        "guideTelescope",
+        "camera",
+        "guideCamera",
+        "focuser",
+        "filterWheel",
+        "rotator",
+        "powerHub",
+        "observatoryControl",
+        "flatScreen",
+        "dewHeater",
+    ]
+    | str
+)
+"""A component's role: one of `KNOWN_ROLES`, or any other string.
+
+Validating against the `Literal` first gives known roles IDE
+autocomplete/typo protection, while the trailing `| str` still accepts a
+role this schema has no dedicated name for, so a new component type never
+requires a schema change.
+"""
 
 
 class _StrictModel(BaseModel):
@@ -51,21 +94,13 @@ class _StrictModel(BaseModel):
 class Component(_StrictModel):
     """One piece of rig equipment.
 
-    `role` is a free-form label (e.g. `"mount"`, `"telescope"`, `"camera"`,
-    `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`,
-    `"powerHub"`, `"dewHeater"`, ...) rather than a fixed enum, so a rig can
-    declare a component type this schema's authors never anticipated
-    without requiring a schema change. `role` values aren't required to be
-    unique within a rig — e.g. a rig commonly has more than one
-    independently-controlled dew heater channel.
-
     All fields besides `role` are optional since which ones are meaningful
     depends on the role: a `"telescope"` has `apertureMm`/`focalLengthMm`
     but no `device` (it isn't a driver); a `"camera"` has `device` plus
     pixel geometry; a `"powerHub"` has just `device`.
     """
 
-    role: str
+    role: Role
     device: str | None = None
     apertureMm: float | None = None
     focalLengthMm: float | None = None

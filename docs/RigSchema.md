@@ -96,7 +96,7 @@ reference easier to read — again, not a grouping that exists in the YAML itsel
 
 | Field | Type | Description |
 |---|---|---|
-| `role` | string | A free-form label for what this component is (e.g. `"mount"`, `"telescope"`, `"guideTelescope"`, `"camera"`, `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`, `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"`). Not a fixed enum — a rig can use a role this schema's authors never anticipated, so a new component type never requires a schema change. Not required to be unique within a rig: a rig commonly has more than one component sharing a role (e.g. several independently-controlled dew heater channels), and `guideTelescope`/`guideCamera` are just conventional role names for a separate guiding setup — not a formally distinct concept from `telescope`/`camera`. |
+| `role` | string | What this component is. One of the known roles — `"mount"`, `"telescope"`, `"guideTelescope"`, `"camera"`, `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`, `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"` — or any other string, for a component type this schema's authors haven't thought of yet. Not required to be unique within a rig: a rig commonly has more than one component sharing a role (e.g. several independently-controlled dew heater channels). |
 
 #### Mount
 
