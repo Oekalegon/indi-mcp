@@ -39,6 +39,7 @@ __all__ = [
     "IndiEvent",
     "MessagingStatus",
     "get_status",
+    "list_devices",
     "list_messages",
     "send_property",
     "start_messaging",
@@ -184,6 +185,12 @@ async def stop_messaging() -> MessagingStatus:
 async def get_status() -> MessagingStatus:
     """Report whether the INDI messaging stream is running, and its host/port."""
     return {"running": _client is not None and _client.connected, "host": _host, "port": _port}
+
+
+def list_devices() -> list[str]:
+    """List the INDI device names currently known to the messaging client."""
+    client = _require_client()
+    return list(client.data.keys())
 
 
 def list_messages(device: str | None = None, limit: int = 50) -> list[IndiEvent]:

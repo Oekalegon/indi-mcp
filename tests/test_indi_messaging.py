@@ -233,6 +233,18 @@ async def test_send_property_sends_new_vector_and_records_event(mocks: Mocks) ->
     assert indi_messaging.list_messages()[0] == event
 
 
+async def test_list_devices_rejects_when_not_started() -> None:
+    with pytest.raises(RuntimeError, match="not started"):
+        indi_messaging.list_devices()
+
+
+async def test_list_devices_returns_known_device_names(mocks: Mocks) -> None:
+    mocks.client.data = {"CCD Simulator": MagicMock(), "Telescope Simulator": MagicMock()}
+    await indi_messaging.start_messaging()
+
+    assert indi_messaging.list_devices() == ["CCD Simulator", "Telescope Simulator"]
+
+
 async def test_messaging_client_buffers_recognised_events() -> None:
     buf: deque = deque(maxlen=10)
     client = _MessagingClient.__new__(_MessagingClient)

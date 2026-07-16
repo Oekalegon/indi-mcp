@@ -9,7 +9,7 @@ from indi_mcp import indi_driver, indi_messaging, indi_server, rig_store
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
-from indi_mcp.rig_store import Rig, RigSummary
+from indi_mcp.rig_store import Rig, RigSuggestion, RigSummary
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,16 @@ def list_rigs() -> list[RigSummary]:
 def get_rig(rig_id: str) -> Rig:
     """Return the full definition of the imaging rig identified by `rig_id`."""
     return rig_store.get_rig(rig_id)
+
+
+@mcp.tool()
+def suggest_rig() -> list[RigSuggestion]:
+    """Propose which configured rig is likely mounted, by matching connected INDI devices.
+
+    Never auto-selects a rig; candidates are sorted best match first for the
+    operator or client to choose from.
+    """
+    return rig_store.suggest_rig(indi_messaging.list_devices())
 
 
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:

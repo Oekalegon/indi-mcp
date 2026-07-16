@@ -21,6 +21,7 @@ it against connected INDI devices (see `suggest_rig`/`check_rig`).
 
 import logging
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -33,11 +34,13 @@ __all__ = [
     "Component",
     "KNOWN_ROLES",
     "Rig",
+    "RigSuggestion",
     "RigSummary",
     "Role",
     "get_rig",
     "list_rigs",
     "load_rigs",
+    "suggest_rig",
 ]
 
 RIGS_DIR_ENV = "INDI_MCP_RIGS_DIR"
@@ -152,6 +155,17 @@ class RigSummary(TypedDict):
     name: str
 
 
+class RigSuggestion(TypedDict):
+    """How well a configured rig matches the currently connected INDI devices."""
+
+    kind: str
+    rigId: str
+    rigName: str
+    score: float
+    matched: list[str]
+    missing: list[str]
+
+
 _rigs: dict[str, Rig] = {}
 
 
@@ -202,3 +216,42 @@ def get_rig(rig_id: str) -> Rig:
     if rig is None:
         raise ValueError(f"Unknown rig: {rig_id!r}")
     return rig
+
+
+def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
+    """Propose which loaded rig is likely mounted, by matching connected INDI device names.
+
+    Cross-checks each rig's component `device` fields against
+    `connected_devices` (from the INDI messaging layer) and scores how many
+    match. This never selects a rig for use — it only proposes candidates,
+    sorted best match first, for the operator or client to choose from (see
+    "No silent auto-selection" in `docs/RigSchema.md`). Components without a
+    `device` field (e.g. `telescope`, `guideTelescope`) have nothing
+    INDI-visible to check them against, so they're excluded from the score.
+    """
+    connected = set(connected_devices)
+    suggestions: list[RigSuggestion] = []
+    for rig in _rigs.values():
+        matched = []
+        missing = []
+        for component in rig.components:
+            if component.device is None:
+                continue
+            if component.device in connected:
+                matched.append(component.id)
+            else:
+                missing.append(component.id)
+        total = len(matched) + len(missing)
+        score = len(matched) / total if total else 0.0
+        suggestions.append(
+            {
+                "kind": "rigSuggestion",
+                "rigId": rig.id,
+                "rigName": rig.name,
+                "score": score,
+                "matched": matched,
+                "missing": missing,
+            }
+        )
+    suggestions.sort(key=lambda suggestion: suggestion["score"], reverse=True)
+    return suggestions

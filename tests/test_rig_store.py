@@ -284,3 +284,73 @@ def test_get_rig_rejects_unknown_id(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unknown rig"):
         rig_store.get_rig("does-not-exist")
+
+
+def test_suggest_rig_scores_full_match_highest(tmp_path: Path) -> None:
+    (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
+    rig_store.load_rigs(tmp_path)
+
+    suggestions = rig_store.suggest_rig(["Telescope Simulator", "CCD Simulator"])
+
+    assert suggestions == [
+        {
+            "kind": "rigSuggestion",
+            "rigId": "minimal",
+            "rigName": "Minimal rig",
+            "score": 1.0,
+            "matched": ["mount-1", "camera-1"],
+            "missing": [],
+        }
+    ]
+
+
+def test_suggest_rig_reports_missing_devices(tmp_path: Path) -> None:
+    (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
+    rig_store.load_rigs(tmp_path)
+
+    suggestions = rig_store.suggest_rig(["Telescope Simulator"])
+
+    assert suggestions[0]["score"] == 0.5
+    assert suggestions[0]["matched"] == ["mount-1"]
+    assert suggestions[0]["missing"] == ["camera-1"]
+
+
+def test_suggest_rig_ignores_components_without_a_device(tmp_path: Path) -> None:
+    (tmp_path / "newtonian-8in.yaml").write_text(VALID_RIG_YAML)
+    rig_store.load_rigs(tmp_path)
+
+    suggestions = rig_store.suggest_rig([])
+
+    assert "main-scope" not in suggestions[0]["missing"]
+    assert "guide-scope" not in suggestions[0]["missing"]
+
+
+def test_suggest_rig_sorts_best_match_first(tmp_path: Path) -> None:
+    (tmp_path / "a-minimal.yaml").write_text(MINIMAL_RIG_YAML)
+    (tmp_path / "b-newtonian.yaml").write_text(VALID_RIG_YAML)
+    rig_store.load_rigs(tmp_path)
+
+    suggestions = rig_store.suggest_rig(["Telescope Simulator", "CCD Simulator"])
+
+    assert [s["rigId"] for s in suggestions] == ["minimal", "newtonian-8in"]
+
+
+def test_suggest_rig_scores_rig_with_no_device_components_as_zero(tmp_path: Path) -> None:
+    (tmp_path / "no-devices.yaml").write_text(
+        'id: no-devices\nname: "No devices"\ncomponents:\n'
+        "  - role: telescope\n    id: main-scope\n    apertureMm: 203\n"
+    )
+    rig_store.load_rigs(tmp_path)
+
+    suggestions = rig_store.suggest_rig(["Telescope Simulator"])
+
+    assert suggestions == [
+        {
+            "kind": "rigSuggestion",
+            "rigId": "no-devices",
+            "rigName": "No devices",
+            "score": 0.0,
+            "matched": [],
+            "missing": [],
+        }
+    ]
