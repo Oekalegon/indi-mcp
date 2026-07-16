@@ -15,6 +15,7 @@ def _make_driver(
     driver.version = "1.0"
     driver.family = "CCDs"
     driver.binary = binary
+    driver.mdpd = False
     return driver
 
 
@@ -185,3 +186,35 @@ async def test_list_running_drivers_drops_stale_registry_entries(
     running = await indi_driver.list_running_drivers()
 
     assert running == []
+
+
+async def test_list_running_drivers_keeps_remote_driver_with_no_local_process(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A remote driver (binary contains "@") runs on another host, so indiserver
+    never forks a local process for it. Reconciliation must not purge it from the
+    registry just because no matching local process is found."""
+    remote_driver = _make_driver("Remote Mount", binary="indi_lx200@192.168.1.50")
+    mocks.catalog.drivers = [remote_driver]
+    mocks.server.get_running_drivers.return_value = {"Remote Mount": remote_driver}
+    monkeypatch.setattr(indi_server, "get_driver_processes", lambda: [])
+
+    running = await indi_driver.list_running_drivers()
+
+    assert running == [{"label": "Remote Mount", "running": True}]
+
+
+async def test_list_running_drivers_keeps_mdpd_driver_with_no_local_process_match(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An MDPD driver shares one process across multiple catalog entries, so it
+    can't be reliably matched by binary alone. Reconciliation must not purge it."""
+    mdpd_driver = _make_driver("MDPD Device")
+    mdpd_driver.mdpd = True
+    mocks.catalog.drivers = [mdpd_driver]
+    mocks.server.get_running_drivers.return_value = {"MDPD Device": mdpd_driver}
+    monkeypatch.setattr(indi_server, "get_driver_processes", lambda: [])
+
+    running = await indi_driver.list_running_drivers()
+
+    assert running == [{"label": "MDPD Device", "running": True}]

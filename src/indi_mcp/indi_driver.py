@@ -106,6 +106,17 @@ def _running_driver_binaries() -> set[str]:
     return binaries
 
 
+def _is_locally_observable(driver: DeviceDriver) -> bool:
+    """Whether `driver` spawns a local `indiserver` child process we can detect via psutil.
+
+    Remote drivers (binary contains "@") run on another host, and MDPD drivers share a
+    single process across multiple catalog entries — neither case can be reliably confirmed
+    or ruled out by matching local process binaries, so reconciliation leaves them alone and
+    trusts whatever `start_driver`/`stop_driver` already recorded for them.
+    """
+    return "@" not in driver.binary and not driver.mdpd
+
+
 def _reconcile_running_drivers() -> dict[str, DeviceDriver]:
     """Sync the in-memory running-driver registry against `indiserver`'s actual children.
 
@@ -114,10 +125,16 @@ def _reconcile_running_drivers() -> dict[str, DeviceDriver]:
     restart even though `indiserver` and any drivers it already started are detached and
     keep running. This reconciles the registry against the real OS process tree so reads
     (and the running-driver check in `stop_driver`) reflect reality regardless of restarts.
+
+    Remote and MDPD drivers are excluded from reconciliation (see `_is_locally_observable`):
+    they don't correspond 1:1 with a local child process, so we'd otherwise incorrectly drop
+    them from the registry the moment they're read back after being started.
     """
     running_binaries = _running_driver_binaries()
     registry = indi_server._server.get_running_drivers()
-    catalog_by_binary = {os.path.basename(d.binary): d for d in _get_catalog().drivers}
+    catalog_by_binary = {
+        os.path.basename(d.binary): d for d in _get_catalog().drivers if _is_locally_observable(d)
+    }
 
     for binary in running_binaries:
         driver = catalog_by_binary.get(binary)
@@ -127,7 +144,8 @@ def _reconcile_running_drivers() -> dict[str, DeviceDriver]:
     for label in [
         label
         for label, driver in registry.items()
-        if os.path.basename(driver.binary) not in running_binaries
+        if _is_locally_observable(driver)
+        and os.path.basename(driver.binary) not in running_binaries
     ]:
         del registry[label]
 
