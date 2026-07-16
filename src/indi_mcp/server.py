@@ -9,7 +9,7 @@ from indi_mcp import indi_driver, indi_messaging, indi_server, rig_store
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
-from indi_mcp.rig_store import Rig, RigCheck, RigSuggestion, RigSummary
+from indi_mcp.rig_store import DraftDeviceInfo, Rig, RigCheck, RigDraft, RigSuggestion, RigSummary
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +135,45 @@ def check_rig(rig_id: str) -> RigCheck:
     used without one of its devices (e.g. imaging without a guide camera).
     """
     return rig_store.check_rig(rig_id, indi_messaging.list_devices())
+
+
+@mcp.tool()
+async def draft_rig() -> RigDraft:
+    """Pre-fill a draft rig skeleton from currently connected INDI devices.
+
+    Combines each device's driver family (camera/filter wheel/focuser/mount)
+    with whatever live properties it exposes (CCD_INFO, FILTER_NAME, focuser
+    range) into a starting point. Never auto-finalizes a rig: fields INDI
+    can't supply and any ambiguous role assignments are left for the
+    operator to complete and save themselves.
+    """
+    devices: list[DraftDeviceInfo] = []
+    for name in indi_messaging.list_devices():
+        family = await indi_driver.classify_device(name)
+        devices.append(
+            {
+                "name": name,
+                "family": family,
+                "ccdInfo": (
+                    indi_messaging.get_property_values(name, "CCD_INFO")
+                    if family == "CCDs"
+                    else None
+                ),
+                "filterNames": (
+                    indi_messaging.get_property_values(name, "FILTER_NAME")
+                    if family == "Filter Wheels"
+                    else None
+                ),
+                "focusRange": (
+                    indi_messaging.get_property_range(
+                        name, "ABS_FOCUS_POSITION", "FOCUS_ABSOLUTE_POSITION"
+                    )
+                    if family == "Focusers"
+                    else None
+                ),
+            }
+        )
+    return rig_store.draft_rig(devices)
 
 
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:

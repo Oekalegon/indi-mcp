@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "IndiEvent",
     "MessagingStatus",
+    "get_property_range",
+    "get_property_values",
     "get_status",
     "list_devices",
     "list_messages",
@@ -191,6 +193,43 @@ def list_devices() -> list[str]:
     """List the INDI device names currently known to the messaging client."""
     client = _require_client()
     return list(client.data.keys())
+
+
+def get_property_values(device: str, name: str) -> dict[str, str] | None:
+    """Return the current member values of `device`'s property `name`.
+
+    `None` if the device isn't connected or hasn't (yet) defined that
+    property, rather than raising — a missing property is routine (e.g. a
+    camera that hasn't reported `CCD_INFO` yet), not an error condition, and
+    callers like `draft_rig` want to treat it as "nothing to prefill from".
+    """
+    client = _require_client()
+    device_obj = client.data.get(device)
+    if device_obj is None:
+        return None
+    vector = device_obj.data.get(name)
+    if vector is None:
+        return None
+    return {member_name: vector[member_name] for member_name in vector.data}
+
+
+def get_property_range(device: str, name: str, member: str) -> tuple[float, float] | None:
+    """Return the (min, max) range of numeric property `device`.`name`'s `member`.
+
+    `None` if the device, property, or member isn't currently defined.
+    """
+    client = _require_client()
+    device_obj = client.data.get(device)
+    if device_obj is None:
+        return None
+    vector = device_obj.data.get(name)
+    if vector is None or member not in vector.data:
+        return None
+    member_obj = vector.data[member]
+    try:
+        return float(member_obj.min), float(member_obj.max)
+    except (TypeError, ValueError):
+        return None
 
 
 def list_messages(device: str | None = None, limit: int = 50) -> list[IndiEvent]:

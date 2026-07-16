@@ -17,6 +17,29 @@ from indi_mcp.indi_messaging import (
 )
 
 
+class _FakeMember:
+    """A minimal stand-in for indipyclient's `NumberMember`/`TextMember`/etc."""
+
+    def __init__(self, value: str, min_: str = "0", max_: str = "0") -> None:
+        self.membervalue = value
+        self.min = min_
+        self.max = max_
+
+
+class _FakeVector:
+    """A minimal stand-in for indipyclient's `Vector`.
+
+    `data` maps member name to member object (as the real `Vector` does);
+    `__getitem__` returns the member's value, matching `Vector.__getitem__`.
+    """
+
+    def __init__(self, members: dict[str, _FakeMember]) -> None:
+        self.data = members
+
+    def __getitem__(self, membername: str) -> str:
+        return self.data[membername].membervalue
+
+
 def _make_event(cls: type, **attrs: object) -> MagicMock:
     event = MagicMock(spec=cls)
     event.devicename = attrs.get("devicename", "CCD Simulator")
@@ -243,6 +266,61 @@ async def test_list_devices_returns_known_device_names(mocks: Mocks) -> None:
     await indi_messaging.start_messaging()
 
     assert indi_messaging.list_devices() == ["CCD Simulator", "Telescope Simulator"]
+
+
+async def test_get_property_values_returns_current_member_values(mocks: Mocks) -> None:
+    vector = _FakeVector({"CCD_MAX_X": _FakeMember("6248"), "CCD_MAX_Y": _FakeMember("4176")})
+    device = MagicMock()
+    device.data = {"CCD_INFO": vector}
+    mocks.client.data = {"CCD Simulator": device}
+    await indi_messaging.start_messaging()
+
+    values = indi_messaging.get_property_values("CCD Simulator", "CCD_INFO")
+
+    assert values == {"CCD_MAX_X": "6248", "CCD_MAX_Y": "4176"}
+
+
+async def test_get_property_values_returns_none_for_unknown_device(mocks: Mocks) -> None:
+    mocks.client.data = {}
+    await indi_messaging.start_messaging()
+
+    assert indi_messaging.get_property_values("Nonexistent", "CCD_INFO") is None
+
+
+async def test_get_property_values_returns_none_for_an_undefined_property(mocks: Mocks) -> None:
+    device = MagicMock()
+    device.data = {}
+    mocks.client.data = {"CCD Simulator": device}
+    await indi_messaging.start_messaging()
+
+    assert indi_messaging.get_property_values("CCD Simulator", "CCD_INFO") is None
+
+
+async def test_get_property_range_returns_the_members_min_and_max(mocks: Mocks) -> None:
+    vector = _FakeVector({"FOCUS_ABSOLUTE_POSITION": _FakeMember("100", min_="0", max_="50000")})
+    device = MagicMock()
+    device.data = {"ABS_FOCUS_POSITION": vector}
+    mocks.client.data = {"Focuser Simulator": device}
+    await indi_messaging.start_messaging()
+
+    focus_range = indi_messaging.get_property_range(
+        "Focuser Simulator", "ABS_FOCUS_POSITION", "FOCUS_ABSOLUTE_POSITION"
+    )
+
+    assert focus_range == (0.0, 50000.0)
+
+
+async def test_get_property_range_returns_none_for_an_undefined_member(mocks: Mocks) -> None:
+    device = MagicMock()
+    device.data = {"ABS_FOCUS_POSITION": _FakeVector({})}
+    mocks.client.data = {"Focuser Simulator": device}
+    await indi_messaging.start_messaging()
+
+    focus_range = indi_messaging.get_property_range(
+        "Focuser Simulator", "ABS_FOCUS_POSITION", "FOCUS_ABSOLUTE_POSITION"
+    )
+
+    assert focus_range is None
 
 
 async def test_messaging_client_buffers_recognised_events() -> None:
