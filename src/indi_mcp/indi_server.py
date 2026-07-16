@@ -99,13 +99,16 @@ async def get_status() -> IndiServerStatus:
 
 
 def _find_server_process(port: int) -> psutil.Process | None:
-    for proc in psutil.process_iter(["name", "cmdline"]):
-        if proc.info["name"] != "indiserver":
-            continue
-        cmdline = proc.info["cmdline"] or []
-        for i, arg in enumerate(cmdline):
-            if arg == "-p" and i + 1 < len(cmdline) and cmdline[i + 1] == str(port):
-                return proc
+    try:
+        for proc in psutil.process_iter(["name", "cmdline"]):
+            if proc.info["name"] != "indiserver":
+                continue
+            cmdline = proc.info["cmdline"] or []
+            for i, arg in enumerate(cmdline):
+                if arg == "-p" and i + 1 < len(cmdline) and cmdline[i + 1] == str(port):
+                    return proc
+    except (psutil.Error, ValueError, IndexError):
+        logger.warning("Error scanning for indiserver process", exc_info=True)
     return None
 
 
