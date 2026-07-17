@@ -39,6 +39,7 @@ __all__ = [
     "IndiEvent",
     "MessagingStatus",
     "get_property_range",
+    "get_property_state",
     "get_property_values",
     "get_status",
     "list_devices",
@@ -231,6 +232,23 @@ def get_property_values(device: str, name: str) -> dict[str, str] | None:
     if vector is None:
         return None
     return {member_name: vector[member_name] for member_name in vector.data}
+
+
+def get_property_state(device: str, name: str) -> str | None:
+    """Return the current vector `state` (`Idle`/`Ok`/`Busy`/`Alert`) of `device`'s property `name`.
+
+    `None` if the device isn't connected or hasn't (yet) defined that
+    property, matching `get_property_values`'s behavior — routine, not an
+    error condition.
+    """
+    client = _require_client()
+    device_obj = client.data.get(device)
+    if device_obj is None:
+        return None
+    vector = device_obj.data.get(name)
+    if vector is None:
+        return None
+    return vector.state
 
 
 def get_property_range(device: str, name: str, member: str) -> tuple[float, float] | None:

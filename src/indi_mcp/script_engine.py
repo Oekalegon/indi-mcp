@@ -1,0 +1,480 @@
+"""Executing a loaded `script_store.Script` against a resolved rig.
+
+This is the internal "given a script, a rig, and parameters, run it" engine
+(INDIMCP-7) — it sits below the MCP-facing layer. `run_script`/
+`get_script_status`/`cancel_script`/etc. as `@mcp.tool()`s, `runId`
+bookkeeping, and the `indi://scripts` event stream are INDIMCP-13/14,
+separate tickets that wrap `execute_script` below.
+
+Two things are deliberately incomplete here, both noted inline where they
+matter:
+
+* `capture_frame`/`slew` are **stubs** — they log and return without any
+  real INDI interaction. Real frame capture needs BLOB draining plus file/
+  SQLite storage (INDIMCP-10/11); `slew`'s `objectName` target needs
+  astropy (INDIMCP-29). Neither exists yet. This lets the fully-specified
+  primitives (`set_property`, `wait_for`, `run_script`, `repeat`, `if`) be
+  implemented and tested for real now.
+* Pause/cancel are supported as plain hooks (`asyncio.Event`s) an eventual
+  caller passes in — this engine has no `runId`/task-tracking concept of
+  its own; that's INDIMCP-13's job.
+"""
+
+import asyncio
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, TypedDict
+
+from indi_mcp import indi_messaging, rig_store, script_store
+from indi_mcp.script_store import (
+    CaptureFrameStep,
+    Condition,
+    ConditionOperator,
+    IfStep,
+    RepeatStep,
+    RunScriptStep,
+    Script,
+    SetPropertyStep,
+    SlewStep,
+    Step,
+    WaitForStep,
+)
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "ScriptCancelled",
+    "ScriptExecutionError",
+    "ScriptProgress",
+    "ScriptResult",
+    "ScriptValidationError",
+    "execute_script",
+]
+
+_WAIT_POLL_INTERVAL_SECONDS = 0.2
+_PAUSE_POLL_INTERVAL_SECONDS = 0.1
+
+
+class ScriptValidationError(Exception):
+    """Raised before execution starts: a role/rig problem that isn't a per-step failure."""
+
+
+class ScriptExecutionError(Exception):
+    """Raised when a step fails at runtime (`wait_for` timeout, `maxIterations` exceeded, ...)."""
+
+
+class ScriptCancelled(Exception):
+    """Raised when `cancel_event` is set while a script run is in progress."""
+
+
+class ScriptProgress(TypedDict):
+    """Reported via `on_progress` before each step executes."""
+
+    scriptId: str
+    stepsExecuted: int
+    message: str
+
+
+class ScriptResult(TypedDict):
+    """The outcome of a completed `execute_script` call.
+
+    Intentionally minimal: the real `scriptCompleted`-shaped result
+    (`framesCaptured`, `frames`, ...) has nothing real to report until
+    `capture_frame` is no longer a stub (INDIMCP-10/11).
+    """
+
+    scriptId: str
+    stepsExecuted: int
+
+
+@dataclass
+class _ExecutionContext:
+    """State shared, unchanged, across an entire run — including into nested `run_script` calls."""
+
+    role_to_device: dict[str, str]
+    cancel_event: asyncio.Event | None
+    pause_event: asyncio.Event | None
+    on_progress: Callable[[ScriptProgress], None] | None
+    steps_executed: int = field(default=0)
+
+
+async def execute_script(
+    script_id: str,
+    rig_id: str,
+    parameters: dict[str, Any],
+    *,
+    cancel_event: asyncio.Event | None = None,
+    pause_event: asyncio.Event | None = None,
+    on_progress: Callable[[ScriptProgress], None] | None = None,
+) -> ScriptResult:
+    """Run the script identified by `script_id` against the rig identified by `rig_id`.
+
+    Resolves every rig-component role referenced anywhere in the call tree
+    (this script, and every script it transitively calls via `run_script`)
+    to a device up front — a role with no matching component, a matching
+    component with no `device`, or a role matching more than one
+    device-bearing component all raise `ScriptValidationError` before any
+    step runs (see `docs/ScriptSchema.md#resolving-roles-to-devices`). Also
+    warns (logs) about any resolved device not currently connected,
+    mirroring `check_rig`'s "warn rather than fail" behavior, so a run
+    against a rig with a missing device surfaces early rather than failing
+    confusingly mid-script.
+
+    `cancel_event`/`pause_event` are checked between steps throughout the
+    whole run, including inside nested `run_script` calls (cancellation
+    cascades) and `repeat` iterations; `pause_event` is only honored while
+    the currently-executing (sub-)script's `pausable` is true (dynamic
+    pausability — see `docs/Design.md#composing-scripts`).
+    """
+    script = script_store.get_script(script_id)
+    rig = rig_store.get_rig(rig_id)
+    roles = _collect_roles(script)
+    role_to_device = _resolve_role_to_device(rig, roles)
+    _warn_on_missing_devices(rig_id, role_to_device)
+    resolved_params = _resolve_parameters(script, parameters)
+
+    ctx = _ExecutionContext(
+        role_to_device=role_to_device,
+        cancel_event=cancel_event,
+        pause_event=pause_event,
+        on_progress=on_progress,
+    )
+    await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
+    return {"scriptId": script.id, "stepsExecuted": ctx.steps_executed}
+
+
+def _collect_roles(script: Script, _visited: set[str] | None = None) -> set[str]:
+    """Every role referenced by `script`'s own steps, plus every script it calls transitively."""
+    visited = _visited if _visited is not None else set()
+    if script.id in visited:
+        return set()
+    visited.add(script.id)
+    roles = set(script_store.referenced_roles(script))
+    for call in _run_script_calls(script.steps):
+        callee = script_store.get_script(call.script)
+        roles |= _collect_roles(callee, visited)
+    return roles
+
+
+def _run_script_calls(steps: list[Step]) -> list[RunScriptStep]:
+    calls: list[RunScriptStep] = []
+    for step in steps:
+        if isinstance(step, RunScriptStep):
+            calls.append(step)
+        elif isinstance(step, RepeatStep):
+            calls.extend(_run_script_calls(step.steps))
+        elif isinstance(step, IfStep):
+            calls.extend(_run_script_calls(step.then))
+            calls.extend(_run_script_calls(step.else_))
+    return calls
+
+
+def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, str]:
+    """Resolve every role in `roles` to exactly one device-bearing rig component.
+
+    A role with no matching component, or matching only components with no
+    `device` (e.g. a `telescope`, which has no INDI device of its own), is a
+    validation error, per `docs/ScriptSchema.md#resolving-roles-to-devices`.
+    A role matching *more than one* device-bearing component is also
+    treated as an error here — the schema doc only disambiguates same-role
+    rig components by `id`, not by a script's generic role reference, so
+    resolving to more than one device is ambiguous rather than a case to
+    silently pick one from.
+    """
+    role_to_device: dict[str, str] = {}
+    for role in roles:
+        matches = [
+            (component, component.device)
+            for component in rig.components
+            if component.role == role and component.device is not None
+        ]
+        if not matches:
+            raise ScriptValidationError(
+                f"role {role!r} has no INDI device in rig {rig.id!r} "
+                "(no matching component, or the matching component has no device)"
+            )
+        if len(matches) > 1:
+            ids = ", ".join(component.id for component, _ in matches)
+            raise ScriptValidationError(
+                f"role {role!r} is ambiguous in rig {rig.id!r}: matches components {ids}"
+            )
+        _, device = matches[0]
+        role_to_device[role] = device
+    return role_to_device
+
+
+def _warn_on_missing_devices(rig_id: str, role_to_device: dict[str, str]) -> None:
+    check = rig_store.check_rig(rig_id, indi_messaging.list_devices())
+    if not check["ok"]:
+        logger.warning(
+            "Rig %r has missing device(s) before running script: %s", rig_id, check["missing"]
+        )
+
+
+def _resolve_parameters(script: Script, supplied: dict[str, Any]) -> dict[str, Any]:
+    """Fill `script`'s declared parameters from `supplied`: apply defaults, check required."""
+    unknown = set(supplied) - set(script.parameters)
+    if unknown:
+        raise ScriptValidationError(
+            f"script {script.id!r} was called with undeclared parameter(s) {sorted(unknown)}"
+        )
+    resolved: dict[str, Any] = {}
+    for name, parameter in script.parameters.items():
+        if name in supplied:
+            resolved[name] = supplied[name]
+        elif parameter.required:
+            raise ScriptValidationError(
+                f"script {script.id!r} is missing required parameter {name!r}"
+            )
+        else:
+            resolved[name] = parameter.default
+    return resolved
+
+
+def _substitute(value: Any, params: dict[str, Any]) -> Any:
+    """Replace a `"{{ name }}"` field value with `params[name]`; anything else is unchanged."""
+    if isinstance(value, str):
+        match = script_store.PARAMETER_REFERENCE.match(value)
+        if match:
+            return params[match.group(1)]
+    return value
+
+
+def _resolve_device(role: str, ctx: _ExecutionContext) -> str:
+    device = ctx.role_to_device.get(role)
+    if device is None:  # pragma: no cover - roles are pre-resolved in execute_script
+        raise ScriptValidationError(f"role {role!r} has no resolved device for this run")
+    return device
+
+
+async def _check_cancelled(ctx: _ExecutionContext) -> None:
+    if ctx.cancel_event is not None and ctx.cancel_event.is_set():
+        raise ScriptCancelled("script run was cancelled")
+
+
+async def _wait_while_paused(ctx: _ExecutionContext, pausable: bool) -> None:
+    """Block while `pause_event` is set, but only for a (sub-)script that declares `pausable`.
+
+    A non-pausable sub-script (e.g. mid-slew) ignores a pending pause
+    request until control returns to a pausable one — dynamic pausability,
+    see `docs/Design.md#composing-scripts`.
+    """
+    if not pausable or ctx.pause_event is None:
+        return
+    while ctx.pause_event.is_set():
+        await _check_cancelled(ctx)
+        await asyncio.sleep(_PAUSE_POLL_INTERVAL_SECONDS)
+
+
+def _report_progress(ctx: _ExecutionContext, script_id: str, step: Step) -> None:
+    if ctx.on_progress is None:
+        return
+    ctx.on_progress(
+        {
+            "scriptId": script_id,
+            "stepsExecuted": ctx.steps_executed,
+            "message": step.description or type(step).__name__,
+        }
+    )
+
+
+async def _execute_steps(
+    steps: list[Step],
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    for step in steps:
+        await _run_one_step(step, ctx, params, script_id, pausable)
+
+
+async def _run_one_step(
+    step: Step,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    await _check_cancelled(ctx)
+    await _wait_while_paused(ctx, pausable)
+    ctx.steps_executed += 1
+    _report_progress(ctx, script_id, step)
+
+    if isinstance(step, SetPropertyStep):
+        await _execute_set_property(step, ctx, params)
+    elif isinstance(step, WaitForStep):
+        await _execute_wait_for(step, ctx, params)
+    elif isinstance(step, CaptureFrameStep):
+        await _execute_capture_frame_stub(step, ctx, params)
+    elif isinstance(step, SlewStep):
+        await _execute_slew_stub(step, ctx, params)
+    elif isinstance(step, RunScriptStep):
+        await _execute_run_script(step, ctx, params)
+    elif isinstance(step, RepeatStep):
+        await _execute_repeat(step, ctx, params, script_id, pausable)
+    elif isinstance(step, IfStep):
+        await _execute_if(step, ctx, params, script_id, pausable)
+
+
+async def _execute_set_property(
+    step: SetPropertyStep, ctx: _ExecutionContext, params: dict[str, Any]
+) -> None:
+    device = _resolve_device(step.role, ctx)
+    elements = {name: str(_substitute(value, params)) for name, value in step.elements.items()}
+    await indi_messaging.send_property(device, step.property, elements)
+
+
+async def _execute_wait_for(
+    step: WaitForStep, ctx: _ExecutionContext, params: dict[str, Any]
+) -> None:
+    timeout = float(_substitute(step.timeoutSeconds, params))
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        await _check_cancelled(ctx)
+        if _evaluate_condition(step.condition, ctx, params):
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            raise ScriptExecutionError(
+                f"wait_for timed out after {timeout}s waiting on {step.condition.property}"
+            )
+        await asyncio.sleep(_WAIT_POLL_INTERVAL_SECONDS)
+
+
+async def _execute_run_script(
+    step: RunScriptStep, ctx: _ExecutionContext, params: dict[str, Any]
+) -> None:
+    callee = script_store.get_script(step.script)
+    call_args = {name: _substitute(value, params) for name, value in step.parameters.items()}
+    resolved_params = _resolve_parameters(callee, call_args)
+    await _execute_steps(callee.steps, ctx, resolved_params, callee.id, callee.pausable)
+
+
+async def _execute_repeat(
+    step: RepeatStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    if step.count is not None:
+        for iteration in range(1, step.count + 1):
+            await _run_repeat_iteration(step.steps, ctx, params, script_id, pausable, iteration)
+        return
+
+    assert step.until is not None and step.maxIterations is not None
+    for iteration in range(1, step.maxIterations + 1):
+        await _run_repeat_iteration(step.steps, ctx, params, script_id, pausable, iteration)
+        if _evaluate_condition(step.until, ctx, params):
+            return
+    raise ScriptExecutionError(
+        f"repeat exceeded maxIterations ({step.maxIterations}) without meeting its until condition"
+    )
+
+
+async def _run_repeat_iteration(
+    steps: list[Step],
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+    iteration: int,
+) -> None:
+    for step in steps:
+        if step.every is not None and iteration % step.every != 0:
+            continue
+        await _run_one_step(step, ctx, params, script_id, pausable)
+
+
+async def _execute_if(
+    step: IfStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    branch = step.then if _evaluate_condition(step.condition, ctx, params) else step.else_
+    await _execute_steps(branch, ctx, params, script_id, pausable)
+
+
+async def _execute_capture_frame_stub(
+    step: CaptureFrameStep, ctx: _ExecutionContext, params: dict[str, Any]
+) -> None:
+    """Stub: log the intended capture; no real INDI interaction yet.
+
+    Real frame capture — setting `CCD_FRAME_TYPE`/`CCD_EXPOSURE`, waiting
+    through the `Busy`->`Ok` transition, draining the BLOB, and writing
+    frame + SQLite metadata — is INDIMCP-10/11, not built yet.
+    """
+    device = _resolve_device(step.role, ctx)
+    exposure = _substitute(step.exposureSeconds, params)
+    logger.info(
+        "capture_frame stub: device=%s exposureSeconds=%s frameType=%s "
+        "(no real capture yet, see INDIMCP-10/11)",
+        device,
+        exposure,
+        step.frameType,
+    )
+
+
+async def _execute_slew_stub(
+    step: SlewStep, ctx: _ExecutionContext, params: dict[str, Any]
+) -> None:
+    """Stub: log the intended slew; no real INDI interaction yet.
+
+    Real slewing (setting `EQUATORIAL_EOD_COORD` and waiting through the
+    `Busy`->`Ok` transition) and `objectName` resolution (astropy,
+    INDIMCP-29) aren't built yet.
+    """
+    device = _resolve_device(step.role, ctx)
+    logger.info(
+        "slew stub: device=%s target=%s (no real slew yet, see INDIMCP-29)", device, step.target
+    )
+
+
+def _evaluate_condition(
+    condition: Condition, ctx: _ExecutionContext, params: dict[str, Any]
+) -> bool:
+    device = _resolve_device(condition.role, ctx)
+    target = _substitute(condition.value, params)
+    if condition.element is None:
+        actual = indi_messaging.get_property_state(device, condition.property)
+    else:
+        values = indi_messaging.get_property_values(device, condition.property)
+        actual = values.get(condition.element) if values is not None else None
+    return _compare(actual, condition.operator, target)
+
+
+def _compare(actual: str | None, operator: ConditionOperator, target: Any) -> bool:
+    if actual is None:
+        return False
+    if operator in ("equals", "notEquals"):
+        if isinstance(target, bool):
+            equal = actual == ("On" if target else "Off")
+        else:
+            actual_num, target_num = _try_float(actual), _try_float(target)
+            if actual_num is not None and target_num is not None:
+                equal = actual_num == target_num
+            else:
+                equal = actual == str(target)
+        return equal if operator == "equals" else not equal
+
+    actual_num, target_num = _try_float(actual), _try_float(target)
+    if actual_num is None or target_num is None:
+        raise ScriptExecutionError(
+            f"{operator!r} requires a numeric comparison, got {actual!r} vs {target!r}"
+        )
+    return {
+        "greaterThan": actual_num > target_num,
+        "lessThan": actual_num < target_num,
+        "greaterThanOrEqual": actual_num >= target_num,
+        "lessThanOrEqual": actual_num <= target_num,
+    }[operator]
+
+
+def _try_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
