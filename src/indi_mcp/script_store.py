@@ -263,7 +263,20 @@ def _iter_steps(steps: list[Step]) -> "list[Step]":
 
 
 def _iter_string_fields(value: Any) -> "list[str]":
-    """Collect every string value in a step's own fields (not nested step lists)."""
+    """Collect every string value in a step's own fields (not nested step lists).
+
+    Deliberately broader than the specific fields `script_engine._substitute`
+    actually resolves at runtime (`elements` values, `condition.value`,
+    `run_script.parameters`, `exposureSeconds`/`timeoutSeconds`/...) — this
+    walks *every* string field of every step, including structural ones like
+    `role`/`property`/`script` that are never substituted. That's
+    intentional: it's cheap and safe to over-validate here (a `role` or
+    `property` name coincidentally shaped like `"{{ name }}"` is vanishingly
+    unlikely), and it means this check never needs to be kept in sync,
+    field-by-field, with whichever fields the engine currently substitutes —
+    a future field the engine starts substituting is already covered
+    without a script_store change.
+    """
     if isinstance(value, str):
         return [value]
     if isinstance(value, BaseModel):

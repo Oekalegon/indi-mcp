@@ -290,7 +290,11 @@ def _count_one_step(step: Step, scripts: dict[str, Script]) -> int | None:
     if isinstance(step, RepeatStep):
         if step.until is not None:
             return None
-        assert step.count is not None
+        if step.count is None:  # pragma: no cover - schema validation guarantees one is set
+            raise ScriptExecutionError(
+                f"repeat step {step!r} has neither count nor until; "
+                "schema validation should have rejected this"
+            )
         body = _count_steps_list(step.steps, scripts)
         return None if body is None else 1 + body * step.count
     if isinstance(step, IfStep):
@@ -517,7 +521,11 @@ async def _execute_repeat(
             await _run_repeat_iteration(step.steps, ctx, params, script_id, pausable, iteration)
         return
 
-    assert step.until is not None and step.maxIterations is not None
+    if step.until is None or step.maxIterations is None:  # pragma: no cover - see above
+        raise ScriptExecutionError(
+            f"repeat step {step!r} has neither count nor until, or is missing maxIterations; "
+            "schema validation should have rejected this"
+        )
     for iteration in range(1, step.maxIterations + 1):
         await _run_repeat_iteration(step.steps, ctx, params, script_id, pausable, iteration)
         if _evaluate_condition(step.until, ctx, params):

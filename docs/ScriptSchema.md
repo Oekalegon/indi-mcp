@@ -252,6 +252,13 @@ role with no matching component in the selected rig, or matching a component wit
 (e.g. a `telescope` component, which has no INDI device of its own), is a validation error at
 run start, not a per-step runtime failure.
 
+**A role must resolve to exactly one device-bearing component.** Unlike a rig, which allows
+more than one component to share a role (disambiguated by `id` — e.g. two independently
+addressed dew heater channels), a script's role reference has no `id` to disambiguate with: it
+names only the role. If the selected rig has more than one device-bearing component for a role
+a script references, that's also a validation error at run start (the same tier as a missing
+role), rather than the engine silently picking one.
+
 A nested `run_script` step (see "Script composition" below) does **not** repeat `rigId` — every
 script in a single run, top-level and nested, resolves roles against the one rig selected when
 the run started.
