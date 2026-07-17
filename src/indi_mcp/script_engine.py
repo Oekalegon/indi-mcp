@@ -69,11 +69,20 @@ class ScriptCancelled(Exception):
 
 
 class ScriptProgress(TypedDict):
-    """Reported via `on_progress` before each step executes."""
+    """Reported via `on_progress` before each step executes.
+
+    `totalSteps` is `None` whenever it can't be known exactly rather than a
+    number that only looks exact — see `_count_total_steps`. `message` is
+    the step's own `description` verbatim, so it's honestly `None` when the
+    script author didn't write one; the engine doesn't synthesize a
+    fallback (e.g. the step's class name) into what's meant to be
+    human-authored text — a caller wanting a fallback supplies its own.
+    """
 
     scriptId: str
     stepsExecuted: int
-    message: str
+    totalSteps: int | None
+    message: str | None
 
 
 class ScriptResult(TypedDict):
@@ -96,6 +105,7 @@ class _ExecutionContext:
     cancel_event: asyncio.Event | None
     pause_event: asyncio.Event | None
     on_progress: Callable[[ScriptProgress], None] | None
+    total_steps: int | None
     steps_executed: int = field(default=0)
 
 
@@ -139,6 +149,7 @@ async def execute_script(
         cancel_event=cancel_event,
         pause_event=pause_event,
         on_progress=on_progress,
+        total_steps=_count_total_steps(script),
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
     return {"scriptId": script.id, "stepsExecuted": ctx.steps_executed}
@@ -168,6 +179,65 @@ def _run_script_calls(steps: list[Step]) -> list[RunScriptStep]:
             calls.extend(_run_script_calls(step.then))
             calls.extend(_run_script_calls(step.else_))
     return calls
+
+
+def _count_total_steps(script: Script) -> int | None:
+    """The exact number of steps a run of `script` will dispatch, or `None` if that isn't knowable.
+
+    Walks the whole call tree (this script, plus every script it calls via
+    `run_script`, transitively — safe to recurse without cycle-tracking
+    here, since `script_store.load_scripts` already rejects any `run_script`
+    call cycle at load time) counting one per dispatched step — matching
+    `stepsExecuted`'s own accounting, including container steps like
+    `repeat`/`run_script` counting themselves. Deliberately not
+    cycle-tracked as a "visited" set the way `_collect_roles` is: a script
+    called twice (two separate `run_script` steps naming the same callee)
+    must be counted twice, not skipped the second time.
+
+    This is only ever exact or `None`, never an estimate presented as if it
+    were exact:
+
+    * a `repeat.until` loop's iteration count depends on live INDI state,
+      so any script containing one anywhere in reach makes the whole total
+      unknown (`None`) — reporting `maxIterations` as if it were the real
+      total would look like a progress bar that never finishes, since a
+      script normally satisfies `until` well before the cap.
+    * an `if` step's `then`/`else` branches are only chosen at runtime; if
+      they have different step counts, the total is likewise unknown. If
+      they happen to match, the count is unambiguous regardless of which
+      branch actually runs.
+    """
+    return _count_steps_list(script.steps)
+
+
+def _count_steps_list(steps: list[Step]) -> int | None:
+    total = 0
+    for step in steps:
+        count = _count_one_step(step)
+        if count is None:
+            return None
+        total += count
+    return total
+
+
+def _count_one_step(step: Step) -> int | None:
+    if isinstance(step, RepeatStep):
+        if step.until is not None:
+            return None
+        assert step.count is not None
+        body = _count_steps_list(step.steps)
+        return None if body is None else 1 + body * step.count
+    if isinstance(step, IfStep):
+        then_count = _count_steps_list(step.then)
+        else_count = _count_steps_list(step.else_)
+        if then_count is None or else_count is None or then_count != else_count:
+            return None
+        return 1 + then_count
+    if isinstance(step, RunScriptStep):
+        callee = script_store.get_script(step.script)
+        callee_total = _count_total_steps(callee)
+        return None if callee_total is None else 1 + callee_total
+    return 1
 
 
 def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, str]:
@@ -274,7 +344,8 @@ def _report_progress(ctx: _ExecutionContext, script_id: str, step: Step) -> None
         {
             "scriptId": script_id,
             "stepsExecuted": ctx.steps_executed,
-            "message": step.description or type(step).__name__,
+            "totalSteps": ctx.total_steps,
+            "message": step.description,
         }
     )
 

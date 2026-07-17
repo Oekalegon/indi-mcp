@@ -463,6 +463,155 @@ async def test_execute_script_reports_progress_for_each_step(
 
     assert [p["message"] for p in progress] == ["first", "second"]
     assert [p["stepsExecuted"] for p in progress] == [1, 2]
+    assert [p["totalSteps"] for p in progress] == [2, 2]
+
+
+async def test_execute_script_progress_message_is_none_without_a_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("undescribed", steps=[_set_property("camera", "CCD_EXPOSURE", {"X": "1"})])
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("undescribed", "test-rig", {}, on_progress=progress.append)
+
+    assert progress[0]["message"] is None
+
+
+async def test_execute_script_total_steps_counts_a_fixed_count_repeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "repeat-count",
+        steps=[
+            {
+                "step": "repeat",
+                "count": 3,
+                "steps": [_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+            }
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("repeat-count", "test-rig", {}, on_progress=progress.append)
+
+    # 1 (the repeat step itself) + 3 * 1 (its body, once per iteration)
+    assert progress[0]["totalSteps"] == 4
+
+
+async def test_execute_script_total_steps_is_none_when_a_repeat_until_is_in_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "repeat-until",
+        steps=[
+            {
+                "step": "repeat",
+                "until": {
+                    "role": "camera",
+                    "property": "CCD_TEMPERATURE",
+                    "operator": "equals",
+                    "value": "Ok",
+                },
+                "maxIterations": 10,
+                "steps": [_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+            }
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("repeat-until", "test-rig", {}, on_progress=progress.append)
+
+    assert progress[0]["totalSteps"] is None
+
+
+async def test_execute_script_total_steps_counts_through_run_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "callee",
+        steps=[_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+    )
+    _script(
+        "caller",
+        steps=[{"step": "run_script", "script": "callee"}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("caller", "test-rig", {}, on_progress=progress.append)
+
+    # 1 (run_script step) + 1 (the callee's own set_property step)
+    assert progress[0]["totalSteps"] == 2
+
+
+async def test_execute_script_total_steps_is_none_when_if_branches_have_different_lengths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "conditional",
+        steps=[
+            {
+                "step": "if",
+                "condition": {
+                    "role": "camera",
+                    "property": "CONNECTION",
+                    "operator": "equals",
+                    "value": "On",
+                },
+                "then": [_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+                "else": [
+                    _set_property("camera", "CCD_EXPOSURE", {"X": "1"}),
+                    _set_property("camera", "CCD_EXPOSURE", {"X": "2"}),
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "On")
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("conditional", "test-rig", {}, on_progress=progress.append)
+
+    assert progress[0]["totalSteps"] is None
+
+
+async def test_execute_script_total_steps_is_exact_when_if_branches_match_in_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "conditional",
+        steps=[
+            {
+                "step": "if",
+                "condition": {
+                    "role": "camera",
+                    "property": "CONNECTION",
+                    "operator": "equals",
+                    "value": "On",
+                },
+                "then": [_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+                "else": [_set_property("camera", "CCD_EXPOSURE", {"X": "2"})],
+            }
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "On")
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("conditional", "test-rig", {}, on_progress=progress.append)
+
+    # 1 (the if step itself) + 1 (whichever single-step branch runs)
+    assert progress[0]["totalSteps"] == 2
 
 
 async def test_execute_script_cancel_event_stops_a_run_mid_script(
@@ -556,7 +705,7 @@ async def test_run_one_step_rejects_a_step_type_with_no_registered_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = script_engine._ExecutionContext(
-        role_to_device={}, cancel_event=None, pause_event=None, on_progress=None
+        role_to_device={}, cancel_event=None, pause_event=None, on_progress=None, total_steps=None
     )
 
     class _UnregisteredStep:
