@@ -92,6 +92,8 @@ def test_to_indi_event_converts_def_vector_to_property_definition() -> None:
         "elements": {"CONNECT": "On", "DISCONNECT": "Off"},
         "timestamp": "2026-07-15T00:00:00+00:00",
     }
+    assert indi_event is not None
+    assert indi_event["state"] is indi_messaging.PropertyState.OK
 
 
 def test_to_indi_event_converts_set_vector_to_property_update() -> None:
@@ -347,7 +349,25 @@ async def test_get_property_state_returns_current_vector_state(mocks: Mocks) -> 
     mocks.client.data = {"CCD Simulator": device}
     await indi_messaging.start_messaging()
 
-    assert indi_messaging.get_property_state("CCD Simulator", "CCD_EXPOSURE") == "Busy"
+    state = indi_messaging.get_property_state("CCD Simulator", "CCD_EXPOSURE")
+
+    assert state == "Busy"
+    assert state is indi_messaging.PropertyState.BUSY
+
+
+async def test_get_property_state_falls_back_to_the_raw_string_for_an_unknown_state(
+    mocks: Mocks,
+) -> None:
+    vector = _FakeVector({"CCD_EXPOSURE_VALUE": _FakeMember("5.0")}, state="SomethingNew")
+    device = MagicMock()
+    device.data = {"CCD_EXPOSURE": vector}
+    mocks.client.data = {"CCD Simulator": device}
+    await indi_messaging.start_messaging()
+
+    state = indi_messaging.get_property_state("CCD Simulator", "CCD_EXPOSURE")
+
+    assert state == "SomethingNew"
+    assert not isinstance(state, indi_messaging.PropertyState)
 
 
 async def test_get_property_state_returns_none_for_unknown_device(mocks: Mocks) -> None:

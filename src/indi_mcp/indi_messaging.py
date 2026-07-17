@@ -13,6 +13,7 @@ import contextlib
 import logging
 from collections import deque
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, TypedDict
 
 from indipyclient import (
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "IndiEvent",
     "MessagingStatus",
+    "PropertyState",
     "get_property_range",
     "get_property_state",
     "get_property_values",
@@ -77,6 +79,31 @@ _VECTORTYPE_TO_TYPE = {
 }
 
 
+class PropertyState(StrEnum):
+    """An INDI property vector's own state, distinct from any of its element values."""
+
+    IDLE = "Idle"
+    OK = "Ok"
+    BUSY = "Busy"
+    ALERT = "Alert"
+
+
+def _coerce_property_state(raw: str | None) -> "PropertyState | str | None":
+    """Coerce a raw INDI state string to `PropertyState` when it's one of the four known values.
+
+    Falls back to the raw string unchanged for anything else, rather than
+    raising: the wire value is the actual source of truth, not this enum,
+    so an unfamiliar value (a future INDI addition, a quirky driver) is
+    passed through rather than treated as an error.
+    """
+    if raw is None:
+        return None
+    try:
+        return PropertyState(raw)
+    except ValueError:
+        return raw
+
+
 class IndiEvent(TypedDict):
     """A single INDI protocol event, in a `kind`/`type`-tagged envelope."""
 
@@ -84,7 +111,7 @@ class IndiEvent(TypedDict):
     type: str | None
     device: str | None
     name: str | None
-    state: str | None
+    state: PropertyState | str | None
     message: str | None
     elements: dict[str, str] | None
     timestamp: str
@@ -130,7 +157,7 @@ def _to_indi_event(event: Any) -> IndiEvent | None:
         "type": type_name,
         "device": event.devicename,
         "name": event.vectorname,
-        "state": getattr(event, "state", None),
+        "state": _coerce_property_state(getattr(event, "state", None)),
         "message": getattr(event, "message", None) or None,
         "elements": elements,
         "timestamp": event.timestamp.isoformat(),
@@ -234,12 +261,14 @@ def get_property_values(device: str, name: str) -> dict[str, str] | None:
     return {member_name: vector[member_name] for member_name in vector.data}
 
 
-def get_property_state(device: str, name: str) -> str | None:
+def get_property_state(device: str, name: str) -> PropertyState | str | None:
     """Return the current vector `state` (`Idle`/`Ok`/`Busy`/`Alert`) of `device`'s property `name`.
 
     `None` if the device isn't connected or hasn't (yet) defined that
     property, matching `get_property_values`'s behavior — routine, not an
-    error condition.
+    error condition. Returns a `PropertyState` for one of the four known
+    values; falls back to the raw string for anything else (see
+    `_coerce_property_state`).
     """
     client = _require_client()
     device_obj = client.data.get(device)
@@ -248,7 +277,7 @@ def get_property_state(device: str, name: str) -> str | None:
     vector = device_obj.data.get(name)
     if vector is None:
         return None
-    return vector.state
+    return _coerce_property_state(vector.state)
 
 
 def get_property_range(device: str, name: str, member: str) -> tuple[float, float] | None:

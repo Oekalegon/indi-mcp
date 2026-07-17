@@ -567,7 +567,9 @@ def _evaluate_condition(
     return _compare(actual, condition.operator, target)
 
 
-def _compare(actual: str | None, operator: ConditionOperator, target: Any) -> bool:
+def _compare(
+    actual: indi_messaging.PropertyState | str | None, operator: ConditionOperator, target: Any
+) -> bool:
     if actual is None:
         return False
     if operator in ("equals", "notEquals"):
