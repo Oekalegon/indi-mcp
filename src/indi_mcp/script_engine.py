@@ -9,12 +9,12 @@ separate tickets that wrap `execute_script` below.
 Two things are deliberately incomplete here, both noted inline where they
 matter:
 
-* `capture_frame`/`slew` are **stubs** — they log and return without any
+* `capture_frame` is still a **stub** — it logs and returns without any
   real INDI interaction. Real frame capture needs BLOB draining plus file/
-  SQLite storage (INDIMCP-10/11); `slew`'s `objectName` target needs
-  astropy (INDIMCP-29). Neither exists yet. This lets the fully-specified
-  primitives (`set_property`, `wait_for`, `run_script`, `repeat`, `if`) be
-  implemented and tested for real now.
+  SQLite storage (INDIMCP-10/11), which doesn't exist yet. `slew` is
+  implemented for a `raDec` target (INDIMCP-38); its `objectName` target
+  still raises `ScriptExecutionError` pending astropy-based name
+  resolution (INDIMCP-29).
 * Pause/cancel are supported as plain hooks (`asyncio.Event`s) an eventual
   caller passes in — this engine has no `runId`/task-tracking concept of
   its own; that's INDIMCP-13's job.
@@ -54,6 +54,15 @@ __all__ = [
 
 _WAIT_POLL_INTERVAL_SECONDS = 0.2
 _PAUSE_POLL_INTERVAL_SECONDS = 0.1
+_SLEW_TIMEOUT_SECONDS = 120.0
+"""How long a `slew` step waits for the mount's `EQUATORIAL_EOD_COORD` to reach `Ok`.
+
+Not a schema field (`docs/ScriptSchema.md`'s `slew` step has no
+`timeoutSeconds` of its own, unlike `wait_for`) — a slew's duration
+depends on the mount and how far it's moving, not something a script
+author tunes per call, so this is a generous fixed engine default rather
+than something exposed in the YAML.
+"""
 
 
 class ScriptValidationError(Exception):
@@ -496,6 +505,35 @@ async def _execute_wait_for(
         await asyncio.sleep(_WAIT_POLL_INTERVAL_SECONDS)
 
 
+async def _wait_for_property_state(
+    ctx: _ExecutionContext,
+    device: str,
+    property_name: str,
+    target_state: indi_messaging.PropertyState,
+    timeout_seconds: float,
+) -> None:
+    """Poll `device`'s `property_name` vector until it reaches `target_state`, or time out.
+
+    A lower-level cousin of `_execute_wait_for`: that one evaluates an
+    arbitrary script-authored `Condition` (any property/element/operator);
+    this one is for engine-implemented primitives (`slew` today, `capture_frame`
+    later) that need to wait for their own specific `Busy`->`Ok` transition,
+    with no `Condition` for a script author to write.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        await _check_cancelled(ctx)
+        state = indi_messaging.get_property_state(device, property_name)
+        if state == target_state:
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            raise ScriptExecutionError(
+                f"{property_name} on {device} did not reach {target_state} within "
+                f"{timeout_seconds}s (last state: {state})"
+            )
+        await asyncio.sleep(_WAIT_POLL_INTERVAL_SECONDS)
+
+
 async def _execute_run_script(
     step: RunScriptStep,
     ctx: _ExecutionContext,
@@ -584,30 +622,82 @@ async def _execute_capture_frame_stub(
     )
 
 
-async def _execute_slew_stub(
+async def _execute_slew(
     step: SlewStep,
     ctx: _ExecutionContext,
     params: dict[str, Any],
     script_id: str,
     pausable: bool,
 ) -> None:
-    """Stub: log the intended slew; no real INDI interaction yet.
+    """Slew the mount to `step.target` and wait through the `Busy`->`Ok` transition.
 
-    Real slewing (setting `EQUATORIAL_EOD_COORD` and waiting through the
-    `Busy`->`Ok` transition) and `objectName` resolution (astropy,
-    INDIMCP-29) aren't built yet.
+    Fails fast with `ScriptExecutionError` if the mount is currently parked
+    (see `_check_not_parked`) — never unparks it automatically.
+
+    Only `target.raDec` is implemented: sets `EQUATORIAL_EOD_COORD`'s `RA`/
+    `DEC` elements directly. `target.objectName` still needs astropy-based
+    name resolution (INDIMCP-29, not built yet) to turn a name like `"M101"`
+    into RA/Dec, so it raises `ScriptExecutionError` for now rather than
+    silently doing nothing — consistent with this module's exception
+    contract (`ScriptValidationError`/`ScriptExecutionError`/
+    `ScriptCancelled` only, never a bare `NotImplementedError` leaking out).
+
+    **No horizon/altitude awareness yet.** Neither the target nor the path
+    to it is checked against the horizon — two above-horizon endpoints
+    don't guarantee an above-horizon path (a GEM mount's axes typically
+    move independently, so a slew crossing the meridian can dip well below
+    either endpoint's altitude mid-motion). Tracked as INDIMCP-39 (simulate
+    the path, reroute around or reject a dip) and INDIMCP-40 (a continuous
+    watchdog that aborts motion if the mount is ever observed below
+    horizon, independent of how it got there).
     """
     device = _resolve_device(step.role, ctx)
-    logger.info(
-        "slew stub: device=%s target=%s (no real slew yet, see INDIMCP-29)", device, step.target
+    _check_not_parked(device)
+    if step.target.raDec is None:
+        raise ScriptExecutionError(
+            f"slew to objectName {step.target.objectName!r} is not yet supported "
+            "(needs astropy-based name resolution, see INDIMCP-29); use target.raDec instead"
+        )
+    ra = float(_substitute(step.target.raDec.ra, params))
+    dec = float(_substitute(step.target.raDec.dec, params))
+    await indi_messaging.send_property(
+        device, "EQUATORIAL_EOD_COORD", {"RA": str(ra), "DEC": str(dec)}
     )
+    await _wait_for_property_state(
+        ctx, device, "EQUATORIAL_EOD_COORD", indi_messaging.PropertyState.OK, _SLEW_TIMEOUT_SECONDS
+    )
+
+
+def _check_not_parked(device: str) -> None:
+    """Raise `ScriptExecutionError` if `device`'s mount is currently parked.
+
+    Most mount drivers reject (or simply ignore) a slew command while
+    parked, so without this check a slew against a parked mount would just
+    time out waiting for `EQUATORIAL_EOD_COORD`'s `Busy`->`Ok` transition,
+    with no indication of why. Checked *before* validating the target
+    (`raDec`/`objectName`), since being parked is a reason to fail
+    regardless of where the script wanted to slew to.
+
+    Not every mount driver exposes `TELESCOPE_PARK` (parking support is
+    optional) — a device that doesn't define it is treated as "not
+    parked" rather than an error. Unparking is left to the script (an
+    explicit `set_property` step against `TELESCOPE_PARK`, or a dedicated
+    `unpark` script called first) rather than done automatically here:
+    unparking moves the mount, so a script should ask for that explicitly
+    rather than get it as a side effect of `slew`.
+    """
+    values = indi_messaging.get_property_values(device, "TELESCOPE_PARK")
+    if values is not None and values.get("PARK") == "On":
+        raise ScriptExecutionError(
+            f"mount {device!r} is parked; unpark it (TELESCOPE_PARK) before slewing"
+        )
 
 
 STEP_HANDLERS: dict[type, StepHandler] = {
     SetPropertyStep: _execute_set_property,
     WaitForStep: _execute_wait_for,
     CaptureFrameStep: _execute_capture_frame_stub,
-    SlewStep: _execute_slew_stub,
+    SlewStep: _execute_slew,
     RunScriptStep: _execute_run_script,
     RepeatStep: _execute_repeat,
     IfStep: _execute_if,
