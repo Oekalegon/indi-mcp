@@ -420,9 +420,7 @@ def _first_library_check_failure(script: Script, scripts: dict[str, Script]) -> 
     return None
 
 
-def _check_call_arguments(
-    caller: Script, callee: Script, arguments: dict[str, Any]
-) -> str | None:
+def _check_call_arguments(caller: Script, callee: Script, arguments: dict[str, Any]) -> str | None:
     """Validate a `run_script` call's `arguments` against the callee's declared `parameters`."""
     unknown = set(arguments) - set(callee.parameters)
     if unknown:

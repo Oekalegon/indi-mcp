@@ -432,9 +432,7 @@ def test_load_scripts_detects_a_three_script_cycle(tmp_path: Path) -> None:
     (tmp_path / "c.yaml").write_text(
         'id: c\nname: "C"\npausable: false\nsteps:\n  - step: run_script\n    script: a\n'
     )
-    (tmp_path / "d.yaml").write_text(
-        'id: d\nname: "D"\npausable: false\nsteps: []\n'
-    )
+    (tmp_path / "d.yaml").write_text('id: d\nname: "D"\npausable: false\nsteps: []\n')
 
     scripts = script_store.load_scripts(tmp_path)
 
