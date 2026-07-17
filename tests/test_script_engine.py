@@ -101,6 +101,34 @@ async def test_execute_script_substitutes_parameter_references(
     )
 
 
+async def test_execute_script_raises_validation_error_for_unknown_script_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig()
+
+    with pytest.raises(script_engine.ScriptValidationError, match="Unknown script"):
+        await script_engine.execute_script("does-not-exist", "test-rig", {})
+
+
+async def test_execute_script_raises_validation_error_for_unknown_rig_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _script("cool")
+
+    with pytest.raises(script_engine.ScriptValidationError, match="Unknown rig"):
+        await script_engine.execute_script("cool", "does-not-exist", {})
+
+
+async def test_execute_script_raises_validation_error_for_run_script_to_a_since_removed_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig()
+    _script("caller", steps=[{"step": "run_script", "script": "does-not-exist"}])
+
+    with pytest.raises(script_engine.ScriptValidationError, match="Unknown script"):
+        await script_engine.execute_script("caller", "test-rig", {})
+
+
 async def test_execute_script_raises_on_missing_required_parameter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

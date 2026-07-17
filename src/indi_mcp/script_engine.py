@@ -150,8 +150,8 @@ async def execute_script(
     the currently-executing (sub-)script's `pausable` is true (dynamic
     pausability — see `docs/Design.md#composing-scripts`).
     """
-    script = script_store.get_script(script_id)
-    rig = rig_store.get_rig(rig_id)
+    script = _get_script(script_id)
+    rig = _get_rig(rig_id)
     scripts = _collect_reachable_scripts(script)
     roles = _collect_roles(scripts)
     role_to_device = _resolve_role_to_device(rig, roles)
@@ -168,6 +168,33 @@ async def execute_script(
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
     return {"scriptId": script.id, "stepsExecuted": ctx.steps_executed}
+
+
+def _get_script(script_id: str) -> Script:
+    """`script_store.get_script`, wrapped so an unknown id raises `ScriptValidationError`.
+
+    Every lookup this module does before/during a run — the top-level
+    script here, and each `run_script` callee walked by
+    `_collect_reachable_scripts` — goes through this, so a caller relying
+    on this module's documented exception contract (`ScriptValidationError`/
+    `ScriptExecutionError`/`ScriptCancelled`, never anything else) never
+    sees a bare `ValueError` leak from `script_store` instead.
+    """
+    try:
+        return script_store.get_script(script_id)
+    except ValueError as exc:
+        raise ScriptValidationError(str(exc)) from exc
+
+
+def _get_rig(rig_id: str) -> rig_store.Rig:
+    """`rig_store.get_rig`, wrapped so an unknown id raises `ScriptValidationError`.
+
+    See `_get_script` for why.
+    """
+    try:
+        return rig_store.get_rig(rig_id)
+    except ValueError as exc:
+        raise ScriptValidationError(str(exc)) from exc
 
 
 def _collect_reachable_scripts(
@@ -188,7 +215,7 @@ def _collect_reachable_scripts(
         return collected
     collected[script.id] = script
     for call in _run_script_calls(script.steps):
-        callee = script_store.get_script(call.script)
+        callee = _get_script(call.script)
         _collect_reachable_scripts(callee, collected)
     return collected
 
