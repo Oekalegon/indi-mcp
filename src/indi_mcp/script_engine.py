@@ -628,6 +628,22 @@ def _evaluate_condition(
         actual = indi_messaging.get_property_state(device, condition.property)
     else:
         values = indi_messaging.get_property_values(device, condition.property)
+        if values is not None and condition.element not in values:
+            # The property is defined but doesn't have this element — almost
+            # certainly a typo'd element name in the script, not the property
+            # "just hasn't reported yet" case get_property_values otherwise
+            # treats as routine. Left as a warning rather than a raised error
+            # since a property's element set can genuinely vary come and go
+            # by device/firmware; but a silent `None` here degrades to
+            # "condition never true" with no signal beyond an eventual,
+            # confusing wait_for timeout, so at least log it.
+            logger.warning(
+                "Condition references unknown element %r on %s.%s (has: %s)",
+                condition.element,
+                device,
+                condition.property,
+                sorted(values),
+            )
         actual = values.get(condition.element) if values is not None else None
     return _compare(actual, condition.operator, target)
 

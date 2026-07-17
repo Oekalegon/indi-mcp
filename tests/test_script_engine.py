@@ -258,6 +258,43 @@ async def test_execute_script_wait_for_compares_a_numeric_element(
     assert result["stepsExecuted"] == 1
 
 
+async def test_execute_script_wait_for_warns_on_a_typo_d_element_name(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "wait",
+        steps=[
+            {
+                "step": "wait_for",
+                "condition": {
+                    "role": "camera",
+                    "property": "CCD_TEMPERATURE",
+                    "element": "CCD_TEMPERATURE_VALU",  # typo'd, missing the trailing E
+                    "operator": "lessThanOrEqual",
+                    "value": -10,
+                },
+                "timeoutSeconds": 0.01,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"CCD_TEMPERATURE_VALUE": "-12.5"},
+    )
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with (
+        caplog.at_level("WARNING"),
+        pytest.raises(script_engine.ScriptExecutionError, match="timed out"),
+    ):
+        await script_engine.execute_script("wait", "test-rig", {})
+
+    assert any("unknown element" in record.message for record in caplog.records)
+    assert any("CCD_TEMPERATURE_VALU" in record.message for record in caplog.records)
+
+
 async def test_execute_script_if_runs_then_branch_when_condition_met(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
