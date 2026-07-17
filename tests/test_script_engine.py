@@ -487,7 +487,7 @@ async def test_execute_script_capture_frame_is_a_stub_with_no_indi_calls(
     assert result["stepsExecuted"] == 1
 
 
-async def test_execute_script_slew_is_a_stub_with_no_indi_calls(
+async def test_execute_script_slew_sets_ra_dec_and_waits_for_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
@@ -497,17 +497,85 @@ async def test_execute_script_slew_is_a_stub_with_no_indi_calls(
             {
                 "step": "slew",
                 "role": "mount",
-                "target": {"objectName": "M101"},
+                "target": {"raDec": {"ra": 10.5, "dec": -20.25}},
             }
         ],
     )
     send_property = AsyncMock()
     monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    states = iter(["Busy", "Busy", "Ok"])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: next(states))
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
 
     result = await script_engine.execute_script("slew", "test-rig", {})
 
-    send_property.assert_not_awaited()
+    send_property.assert_awaited_once_with(
+        "Telescope Simulator", "EQUATORIAL_EOD_COORD", {"RA": "10.5", "DEC": "-20.25"}
+    )
     assert result["stepsExecuted"] == 1
+
+
+async def test_execute_script_slew_substitutes_parameter_references_in_ra_dec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "slew",
+        parameters={
+            "ra": {"type": "number", "required": True},
+            "dec": {"type": "number", "required": True},
+        },
+        steps=[
+            {
+                "step": "slew",
+                "role": "mount",
+                "target": {"raDec": {"ra": "{{ ra }}", "dec": "{{ dec }}"}},
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("slew", "test-rig", {"ra": 5.0, "dec": 45.0})
+
+    send_property.assert_awaited_once_with(
+        "Telescope Simulator", "EQUATORIAL_EOD_COORD", {"RA": "5.0", "DEC": "45.0"}
+    )
+
+
+async def test_execute_script_slew_times_out_waiting_for_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "slew",
+        steps=[{"step": "slew", "role": "mount", "target": {"raDec": {"ra": 1.0, "dec": 2.0}}}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Busy")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(script_engine, "_SLEW_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="did not reach"):
+        await script_engine.execute_script("slew", "test-rig", {})
+
+
+async def test_execute_script_slew_object_name_raises_not_yet_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "slew",
+        steps=[{"step": "slew", "role": "mount", "target": {"objectName": "M101"}}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="objectName"):
+        await script_engine.execute_script("slew", "test-rig", {})
+
+    send_property.assert_not_awaited()
 
 
 async def test_execute_script_reports_progress_for_each_step(
