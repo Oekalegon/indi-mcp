@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from indi_mcp import indi_driver, indi_messaging, rig_store, server
+from indi_mcp import indi_driver, indi_messaging, observatory_store, rig_store, server
 
 
 async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family(
@@ -99,3 +99,25 @@ async def test_save_rig_delegates_to_rig_store_with_the_overwrite_flag(
 
     assert result == rig
     assert calls == [(rig, True)]
+
+
+async def test_save_observatory_delegates_to_observatory_store_with_the_overwrite_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observatory = observatory_store.Observatory(
+        id="minimal", name="Minimal site", latitudeDeg=0, longitudeDeg=0
+    )
+    calls: list[tuple[observatory_store.Observatory, bool]] = []
+
+    def fake_save_observatory(
+        observatory: observatory_store.Observatory, *, overwrite: bool = False
+    ) -> observatory_store.Observatory:
+        calls.append((observatory, overwrite))
+        return observatory
+
+    monkeypatch.setattr(observatory_store, "save_observatory", fake_save_observatory)
+
+    result = await server.save_observatory(observatory, overwrite=True)
+
+    assert result == observatory
+    assert calls == [(observatory, True)]
