@@ -478,3 +478,21 @@ The server can also help *build* a rig definition from whatever is currently con
 A `draft_rig` tool combines these into a pre-filled rig YAML skeleton: each detected camera becomes a `role: camera` component (or `guideCamera` if more than one is connected) with pixel/bit-depth fields filled from `CCD_INFO`, a detected filter wheel's `device` and — where `FILTER_NAME` is populated — its `slots` are pre-filled, a detected focuser's `device` (and range, if exposed) is filled in, and a detected mount's `device` is filled in. Fields INDI has no way to supply — `apertureMm`/`focalLengthMm`, and which camera is the *imaging* vs. *guiding* one when more than one is connected — are left as placeholders for the operator to complete. The result is a **draft**, reviewed by the operator, not an automatically-finalized rig — consistent with the YAML-is-authoritative, no-silent-auto-selection rule above.
 
 Once the operator has completed a draft (or written a rig by hand), a `save_rig` tool persists it: it writes the rig to `rigs/<id>.yaml` and reloads it into memory, so it becomes available by `id` to `get_rig`/`suggest_rig`/`check_rig` in the same call. This is still an explicit operator action, not something the server does on `draft_rig`'s behalf — `save_rig` refuses to replace an existing `<id>.yaml` unless the caller explicitly asks it to (`overwrite`), since reusing an `id` could otherwise silently destroy a previously saved rig.
+
+## Observatory location metadata
+
+Scripts (and, later, meridian-flip and multi-target scheduling logic — INDIMCP-32/33) also need to know **where** the equipment is set up: latitude, longitude, and elevation. This is a separate concern from the rig — a rig describes *what* is mounted, a location describes *where* it's mounted, and the same rig can be used from more than one site (a backyard setup occasionally taken to a dark-sky site). INDIMCP-29's astropy-based object-above-horizon check is the first concrete consumer: computing an object's altitude over a timespan needs an observer location, which INDI itself has no way to report (no protocol representation, and nothing to auto-detect it from).
+
+**Locations are YAML documents, not SQLite rows, and not part of the rig store** — the same reasoning as rig definitions above (low-volume, human-curated, changes rarely) applies, and keeping location separate from the rig store lets a script or tool call name a rig and a location independently rather than forcing every rig file to repeat or omit site data. Each location is one YAML file under an observatories directory (e.g. `observatories/*.yaml`), identified by a stable `id` that a script or tool call references via a `locationId` parameter — the same shape as `run_script`'s `rigId` (see [ScriptSchema.md § Resolving roles to devices](ScriptSchema.md#resolving-roles-to-devices)). See [ObservatorySchema.md](ObservatorySchema.md) for the full field-by-field schema.
+
+**Schema (sketch):**
+
+```yaml
+id: home-backyard
+name: Home backyard observatory
+latitudeDeg: 52.3676
+longitudeDeg: 4.9041
+elevationMeters: 4
+```
+
+**No auto-detection, unlike a rig's `suggest_rig`.** A rig at least has `device` fields a currently-connected INDI device can be matched against to *suggest* a likely candidate. A location has no INDI-visible signal at all to suggest from, so there is no `suggest_location` — the operator (or client) always names the location explicitly by `id`.
