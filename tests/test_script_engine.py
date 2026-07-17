@@ -17,11 +17,15 @@ def _reset_stores() -> None:
 def _mock_indi_messaging_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test drives `execute_script`, which always calls `list_devices`/`check_rig`.
 
-    Default to "nothing connected, rig is fine" so tests that only care
-    about step execution don't each need to stub this out themselves;
-    tests exercising the missing-device warning path override `check_rig`.
+    Default to "nothing connected, rig is fine, no property values defined"
+    so tests that only care about one specific bit of step execution don't
+    each need to stub all of this out themselves; tests exercising the
+    missing-device warning path override `check_rig`, and tests exercising
+    a specific property's values (e.g. `TELESCOPE_PARK`, a `wait_for`
+    condition's element) override `get_property_values`.
     """
     monkeypatch.setattr(indi_messaging, "list_devices", lambda: [])
+    monkeypatch.setattr(indi_messaging, "get_property_values", lambda device, name: None)
 
 
 def _rig(*components: rig_store.Component, rig_id: str = "test-rig") -> rig_store.Rig:
@@ -576,6 +580,68 @@ async def test_execute_script_slew_object_name_raises_not_yet_supported(
         await script_engine.execute_script("slew", "test-rig", {})
 
     send_property.assert_not_awaited()
+
+
+async def test_execute_script_slew_rejects_a_parked_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "slew",
+        steps=[{"step": "slew", "role": "mount", "target": {"raDec": {"ra": 1.0, "dec": 2.0}}}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"PARK": "On", "UNPARK": "Off"} if name == "TELESCOPE_PARK" else None,
+    )
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="parked"):
+        await script_engine.execute_script("slew", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_slew_proceeds_when_mount_is_unparked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "slew",
+        steps=[{"step": "slew", "role": "mount", "target": {"raDec": {"ra": 1.0, "dec": 2.0}}}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"PARK": "Off", "UNPARK": "On"} if name == "TELESCOPE_PARK" else None,
+    )
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("slew", "test-rig", {})
+
+    send_property.assert_awaited_once()
+
+
+async def test_execute_script_slew_proceeds_when_mount_has_no_park_property(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mount driver with no TELESCOPE_PARK support (park is optional) is treated as unparked."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "slew",
+        steps=[{"step": "slew", "role": "mount", "target": {"raDec": {"ra": 1.0, "dec": 2.0}}}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("slew", "test-rig", {})
+
+    send_property.assert_awaited_once()
 
 
 async def test_execute_script_reports_progress_for_each_step(

@@ -631,6 +631,9 @@ async def _execute_slew(
 ) -> None:
     """Slew the mount to `step.target` and wait through the `Busy`->`Ok` transition.
 
+    Fails fast with `ScriptExecutionError` if the mount is currently parked
+    (see `_check_not_parked`) — never unparks it automatically.
+
     Only `target.raDec` is implemented: sets `EQUATORIAL_EOD_COORD`'s `RA`/
     `DEC` elements directly. `target.objectName` still needs astropy-based
     name resolution (INDIMCP-29, not built yet) to turn a name like `"M101"`
@@ -640,6 +643,7 @@ async def _execute_slew(
     `ScriptCancelled` only, never a bare `NotImplementedError` leaking out).
     """
     device = _resolve_device(step.role, ctx)
+    _check_not_parked(device)
     if step.target.raDec is None:
         raise ScriptExecutionError(
             f"slew to objectName {step.target.objectName!r} is not yet supported "
@@ -653,6 +657,31 @@ async def _execute_slew(
     await _wait_for_property_state(
         ctx, device, "EQUATORIAL_EOD_COORD", indi_messaging.PropertyState.OK, _SLEW_TIMEOUT_SECONDS
     )
+
+
+def _check_not_parked(device: str) -> None:
+    """Raise `ScriptExecutionError` if `device`'s mount is currently parked.
+
+    Most mount drivers reject (or simply ignore) a slew command while
+    parked, so without this check a slew against a parked mount would just
+    time out waiting for `EQUATORIAL_EOD_COORD`'s `Busy`->`Ok` transition,
+    with no indication of why. Checked *before* validating the target
+    (`raDec`/`objectName`), since being parked is a reason to fail
+    regardless of where the script wanted to slew to.
+
+    Not every mount driver exposes `TELESCOPE_PARK` (parking support is
+    optional) — a device that doesn't define it is treated as "not
+    parked" rather than an error. Unparking is left to the script (an
+    explicit `set_property` step against `TELESCOPE_PARK`, or a dedicated
+    `unpark` script called first) rather than done automatically here,
+    consistent with this project's "no silent auto-actions on hardware"
+    convention already applied to rig/observatory selection.
+    """
+    values = indi_messaging.get_property_values(device, "TELESCOPE_PARK")
+    if values is not None and values.get("PARK") == "On":
+        raise ScriptExecutionError(
+            f"mount {device!r} is parked; unpark it (TELESCOPE_PARK) before slewing"
+        )
 
 
 STEP_HANDLERS: dict[type, StepHandler] = {
