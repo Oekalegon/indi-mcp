@@ -113,6 +113,40 @@ primitive's own fields below. Any step may also carry:
 | `description` | string | no | Human-readable label for this step, surfaced in `scriptProgress`'s `message`. |
 | `every` | integer | no | Only meaningful directly inside a `repeat` body: run this step only on every Nth iteration (1-indexed) — e.g. `every: 2` runs on iterations 2, 4, 6, .... Omit to run on every iteration. |
 
+### Execution model: generic vs. engine-implemented primitives
+
+The step vocabulary is closed rather than open-ended (unlike a rig component's `role`) because
+each primitive falls into one of two tiers, and this is a real constraint on what a script author
+can express in YAML alone — not just a stylistic choice:
+
+* **Generic primitives** — `set_property`, `wait_for`, `run_script`, `repeat`, `if` — have a
+  single, uniform execution-engine handler that works identically regardless of which device or
+  script it's pointed at. `set_property`/`wait_for` are thin wrappers over the messaging layer
+  (`send_property` / property polling, after `role` → `device` resolution); `run_script`/`repeat`/
+  `if` are pure control flow with no INDI interaction of their own. Nothing about these needs
+  device- or operation-specific code — the same handler serves every script.
+* **Engine-implemented primitives** — `capture_frame`, `slew` — each bundle a *sequence* of INDI
+  commands (and sometimes non-INDI work) that isn't reducible to a single `set_property`/
+  `wait_for` pair. `capture_frame`, for example, is really "set frame type, set exposure, wait
+  through the `Busy`→`Ok` transition, drain the BLOB, write it to frame storage, return metadata"
+  — several INDI commands plus a file write. `slew` similarly bundles "set target coordinates,
+  wait for the mount's `Busy`→`Ok` transition." Each of these has its own dedicated Python
+  function in the execution engine (INDIMCP-7); the YAML step only declares *what* should happen
+  (`role`, `exposureSeconds`, ...), never *how* — the handler owns the actual INDI command
+  sequence.
+
+This second tier is also where anything requiring computation beyond a raw property read has to
+live — e.g. a future `plate_solve` step (see [Design.md § Composing scripts](Design.md#composing-scripts)'s
+`plate_solve_until_precision` example, and INDIMCP-27) would need a handler that captures a
+frame, calls out to a solver, computes the angular separation from the target (spherical
+trigonometry — RA/Dec aren't comparable with a plain numeric `Condition`), and returns that
+result. **Adding a new capability like this means adding both a new step type to this schema and
+its handler in the execution engine — never something a script author can build unilaterally out
+of `set_property`/`wait_for`.** A corollary: `Condition` (below) can only check *live INDI
+property state*, not a computed value like a plate-solve separation — a script that needs to
+loop on a computed result needs that computation exposed as its own engine-implemented step
+first (out of scope for this schema revision; noted here so it isn't lost).
+
 #### `set_property`
 
 Sends a command to a device, without waiting for it to take effect — chain a `wait_for` step
@@ -255,6 +289,10 @@ resolve correctly and safely across the whole library:
   `operator`s are a closed enum; parameter substitution (`"{{ name }}"`) is plain value lookup,
   never code to evaluate. A script is declarative data, safe to author on the Client Computer and
   upload, consistent with [Design.md](Design.md#architecture-overview)'s scripting-layer intro.
+  This is also why the vocabulary is closed rather than extensible: every primitive beyond
+  `set_property`/`wait_for`/`run_script`/`repeat`/`if` needs a dedicated engine handler (see
+  "Execution model" under [Step primitives](#step-primitives)), so new capabilities are a schema
+  *and* engine change together, not something a script can invent on its own.
 * **No unbounded waits or loops.** `wait_for` always requires `timeoutSeconds`; `repeat`'s
   `until` form always requires `maxIterations`. A script can still fail slowly (a generous
   timeout), but never hang the run indefinitely.
