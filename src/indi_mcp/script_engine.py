@@ -528,8 +528,8 @@ async def _wait_for_property_state(
             return
         if asyncio.get_running_loop().time() >= deadline:
             raise ScriptExecutionError(
-                f"{property_name} on {device} did not reach {target_state!r} within "
-                f"{timeout_seconds}s (last state: {state!r})"
+                f"{property_name} on {device} did not reach {target_state} within "
+                f"{timeout_seconds}s (last state: {state})"
             )
         await asyncio.sleep(_WAIT_POLL_INTERVAL_SECONDS)
 
@@ -641,6 +641,15 @@ async def _execute_slew(
     silently doing nothing — consistent with this module's exception
     contract (`ScriptValidationError`/`ScriptExecutionError`/
     `ScriptCancelled` only, never a bare `NotImplementedError` leaking out).
+
+    **No horizon/altitude awareness yet.** Neither the target nor the path
+    to it is checked against the horizon — two above-horizon endpoints
+    don't guarantee an above-horizon path (a GEM mount's axes typically
+    move independently, so a slew crossing the meridian can dip well below
+    either endpoint's altitude mid-motion). Tracked as INDIMCP-39 (simulate
+    the path, reroute around or reject a dip) and INDIMCP-40 (a continuous
+    watchdog that aborts motion if the mount is ever observed below
+    horizon, independent of how it got there).
     """
     device = _resolve_device(step.role, ctx)
     _check_not_parked(device)
@@ -673,9 +682,9 @@ def _check_not_parked(device: str) -> None:
     optional) — a device that doesn't define it is treated as "not
     parked" rather than an error. Unparking is left to the script (an
     explicit `set_property` step against `TELESCOPE_PARK`, or a dedicated
-    `unpark` script called first) rather than done automatically here,
-    consistent with this project's "no silent auto-actions on hardware"
-    convention already applied to rig/observatory selection.
+    `unpark` script called first) rather than done automatically here:
+    unparking moves the mount, so a script should ask for that explicitly
+    rather than get it as a side effect of `slew`.
     """
     values = indi_messaging.get_property_values(device, "TELESCOPE_PARK")
     if values is not None and values.get("PARK") == "On":
