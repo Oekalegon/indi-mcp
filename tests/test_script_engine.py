@@ -705,7 +705,12 @@ async def test_run_one_step_rejects_a_step_type_with_no_registered_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = script_engine._ExecutionContext(
-        role_to_device={}, cancel_event=None, pause_event=None, on_progress=None, total_steps=None
+        role_to_device={},
+        cancel_event=None,
+        pause_event=None,
+        on_progress=None,
+        total_steps=None,
+        scripts={},
     )
 
     class _UnregisteredStep:
@@ -716,3 +721,43 @@ async def test_run_one_step_rejects_a_step_type_with_no_registered_handler(
         await script_engine._run_one_step(
             cast(script_store.Step, _UnregisteredStep()), ctx, {}, "script", False
         )
+
+
+async def test_execute_script_run_script_resolves_from_the_runs_own_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run_script callee resolves from the snapshot taken at run start, not the live store.
+
+    Simulates a concurrent script_store.load_scripts()/reload happening
+    partway through a run (here, during a wait_for's poll loop) that
+    removes the callee from the live store entirely. Without snapshotting
+    (ctx.scripts), the later run_script step would raise "Unknown script"
+    even though this run already validated and started before the reload.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("callee", steps=[_set_property("camera", "CCD_EXPOSURE", {"X": "1"})])
+    _script(
+        "caller",
+        steps=[
+            _wait_for("camera", "CCD_TEMPERATURE", "equals", "Ok", timeout=5),
+            {"step": "run_script", "script": "callee"},
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    states = iter(["Busy", "Ok"])
+
+    def fake_get_property_state(device: str, name: str) -> str:
+        state = next(states)
+        if state == "Ok":
+            # Simulate a concurrent reload dropping "callee" from the live
+            # store while this run is already in progress.
+            del script_store._scripts["callee"]
+        return state
+
+    monkeypatch.setattr(indi_messaging, "get_property_state", fake_get_property_state)
+
+    result = await script_engine.execute_script("caller", "test-rig", {})
+
+    # wait_for + run_script + the callee's own set_property step
+    assert result["stepsExecuted"] == 3

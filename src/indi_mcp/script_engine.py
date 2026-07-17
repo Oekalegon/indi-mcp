@@ -99,13 +99,26 @@ class ScriptResult(TypedDict):
 
 @dataclass
 class _ExecutionContext:
-    """State shared, unchanged, across an entire run — including into nested `run_script` calls."""
+    """State shared, unchanged, across an entire run — including into nested `run_script` calls.
+
+    `scripts` is a snapshot of every script reachable from the top-level
+    script via `run_script`, taken once at the start of the run — nested
+    `run_script` steps resolve their callee from this dict, never by
+    calling back into the live `script_store` module state. Without this,
+    a `run_script` step executing minutes into a long sequence could
+    resolve against a script library that's since been reloaded (e.g. a
+    concurrent `load_scripts()`/future `save_script()` call), running a
+    different version of a sub-script than the one that was validated
+    (role resolution, `totalSteps`, cycle/argument checks) at the start of
+    this same run — or finding it gone entirely.
+    """
 
     role_to_device: dict[str, str]
     cancel_event: asyncio.Event | None
     pause_event: asyncio.Event | None
     on_progress: Callable[[ScriptProgress], None] | None
     total_steps: int | None
+    scripts: dict[str, Script]
     steps_executed: int = field(default=0)
 
 
@@ -139,7 +152,8 @@ async def execute_script(
     """
     script = script_store.get_script(script_id)
     rig = rig_store.get_rig(rig_id)
-    roles = _collect_roles(script)
+    scripts = _collect_reachable_scripts(script)
+    roles = _collect_roles(scripts)
     role_to_device = _resolve_role_to_device(rig, roles)
     _warn_on_missing_devices(rig_id, role_to_device)
     resolved_params = _resolve_parameters(script, parameters)
@@ -149,22 +163,46 @@ async def execute_script(
         cancel_event=cancel_event,
         pause_event=pause_event,
         on_progress=on_progress,
-        total_steps=_count_total_steps(script),
+        scripts=scripts,
+        total_steps=_count_total_steps(script, scripts),
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
     return {"scriptId": script.id, "stepsExecuted": ctx.steps_executed}
 
 
-def _collect_roles(script: Script, _visited: set[str] | None = None) -> set[str]:
-    """Every role referenced by `script`'s own steps, plus every script it calls transitively."""
-    visited = _visited if _visited is not None else set()
-    if script.id in visited:
-        return set()
-    visited.add(script.id)
-    roles = set(script_store.referenced_roles(script))
+def _collect_reachable_scripts(
+    script: Script, _collected: dict[str, Script] | None = None
+) -> dict[str, Script]:
+    """Every script reachable from `script` via `run_script` (including itself), keyed by `id`.
+
+    Read from `script_store` exactly once per run, up front — see
+    `_ExecutionContext.scripts` for why the rest of the run must resolve
+    `run_script` callees from this snapshot rather than calling back into
+    the live store. Safe to recurse without a separate cycle guard: a
+    script already in `_collected` just returns immediately, and
+    `script_store.load_scripts` already rejects any `run_script` call
+    cycle at load time, so this always terminates.
+    """
+    collected = _collected if _collected is not None else {}
+    if script.id in collected:
+        return collected
+    collected[script.id] = script
     for call in _run_script_calls(script.steps):
         callee = script_store.get_script(call.script)
-        roles |= _collect_roles(callee, visited)
+        _collect_reachable_scripts(callee, collected)
+    return collected
+
+
+def _collect_roles(scripts: dict[str, Script]) -> set[str]:
+    """Every role referenced anywhere across `scripts` — the run's full reachable set.
+
+    `scripts` (see `_collect_reachable_scripts`) already includes every
+    script transitively reachable via `run_script`, so no further
+    recursion is needed here.
+    """
+    roles: set[str] = set()
+    for script in scripts.values():
+        roles |= script_store.referenced_roles(script)
     return roles
 
 
@@ -181,18 +219,19 @@ def _run_script_calls(steps: list[Step]) -> list[RunScriptStep]:
     return calls
 
 
-def _count_total_steps(script: Script) -> int | None:
+def _count_total_steps(script: Script, scripts: dict[str, Script]) -> int | None:
     """The exact number of steps a run of `script` will dispatch, or `None` if that isn't knowable.
 
     Walks the whole call tree (this script, plus every script it calls via
-    `run_script`, transitively — safe to recurse without cycle-tracking
-    here, since `script_store.load_scripts` already rejects any `run_script`
-    call cycle at load time) counting one per dispatched step — matching
-    `stepsExecuted`'s own accounting, including container steps like
-    `repeat`/`run_script` counting themselves. Deliberately not
-    cycle-tracked as a "visited" set the way `_collect_roles` is: a script
-    called twice (two separate `run_script` steps naming the same callee)
-    must be counted twice, not skipped the second time.
+    `run_script`, transitively, resolved from `scripts` — the run's own
+    snapshot, see `_collect_reachable_scripts` — never the live
+    `script_store` module state) counting one per dispatched step —
+    matching `stepsExecuted`'s own accounting, including container steps
+    like `repeat`/`run_script` counting themselves. No cycle-tracking is
+    needed here (unlike a "visited" set): a script called twice (two
+    separate `run_script` steps naming the same callee) must be counted
+    twice, not skipped the second time, and `script_store.load_scripts`
+    already guarantees the call graph has no cycle to recurse into forever.
 
     This is only ever exact or `None`, never an estimate presented as if it
     were exact:
@@ -207,35 +246,34 @@ def _count_total_steps(script: Script) -> int | None:
       they happen to match, the count is unambiguous regardless of which
       branch actually runs.
     """
-    return _count_steps_list(script.steps)
+    return _count_steps_list(script.steps, scripts)
 
 
-def _count_steps_list(steps: list[Step]) -> int | None:
+def _count_steps_list(steps: list[Step], scripts: dict[str, Script]) -> int | None:
     total = 0
     for step in steps:
-        count = _count_one_step(step)
+        count = _count_one_step(step, scripts)
         if count is None:
             return None
         total += count
     return total
 
 
-def _count_one_step(step: Step) -> int | None:
+def _count_one_step(step: Step, scripts: dict[str, Script]) -> int | None:
     if isinstance(step, RepeatStep):
         if step.until is not None:
             return None
         assert step.count is not None
-        body = _count_steps_list(step.steps)
+        body = _count_steps_list(step.steps, scripts)
         return None if body is None else 1 + body * step.count
     if isinstance(step, IfStep):
-        then_count = _count_steps_list(step.then)
-        else_count = _count_steps_list(step.else_)
+        then_count = _count_steps_list(step.then, scripts)
+        else_count = _count_steps_list(step.else_, scripts)
         if then_count is None or else_count is None or then_count != else_count:
             return None
         return 1 + then_count
     if isinstance(step, RunScriptStep):
-        callee = script_store.get_script(step.script)
-        callee_total = _count_total_steps(callee)
+        callee_total = _count_total_steps(scripts[step.script], scripts)
         return None if callee_total is None else 1 + callee_total
     return 1
 
@@ -434,7 +472,7 @@ async def _execute_run_script(
     script_id: str,
     pausable: bool,
 ) -> None:
-    callee = script_store.get_script(step.script)
+    callee = ctx.scripts[step.script]  # the run's own snapshot, not the live script_store
     call_args = {name: _substitute(value, params) for name, value in step.parameters.items()}
     resolved_params = _resolve_parameters(callee, call_args)
     await _execute_steps(callee.steps, ctx, resolved_params, callee.id, callee.pausable)
