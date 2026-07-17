@@ -15,6 +15,8 @@ An [MCP](https://modelcontextprotocol.io) server that controls astrophotography 
   systemd service on the Raspberry Pi (`streamable-http`)
 * [Rig YAML Schema](docs/RigSchema.md) — field reference for `rigs/*.yaml` imaging rig
   definitions
+* [Observatory Location YAML Schema](docs/ObservatorySchema.md) — field reference for
+  `observatories/*.yaml` location definitions
 
 ## Debug CLI
 
