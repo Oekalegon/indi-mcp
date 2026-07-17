@@ -19,7 +19,7 @@ The MCP server will need to be connected to an INDI server, which in turn will b
 	* Start an INDI driver
 	* Stop an INDI driver
 * INDI messaging layer - Including a stream of messages being recieved from the INDI server. This will include all INDI message types (definition, new, set, message). The user can also send messages to the INDI server through mcp, thereby the user will be able to control INDI devices. This will be the most basic control layer.
-* INDI scripting layer - The MCP server will include scripts for e.g. capturing a frame, capturing a sequence of frames, slewing, etc., that run INDI messages sequentially, with later messages depending on the output of earlier ones. These scripts will be defined in YAML, parsed with a safe loader (`yaml.safe_load`, never the unsafe `yaml.load`) and executed against a fixed, schema-validated set of step primitives rather than an embedded expression language. Because a script is then just declarative data, not executable code, it can safely be authored on the controlling computer and uploaded to the MCP server to run.
+* INDI scripting layer - The MCP server will include scripts for e.g. capturing a frame, capturing a sequence of frames, slewing, etc., that run INDI messages sequentially, with later messages depending on the output of earlier ones. These scripts will be defined in YAML, parsed with a safe loader (`yaml.safe_load`, never the unsafe `yaml.load`) and executed against a fixed, schema-validated set of step primitives rather than an embedded expression language. Because a script is then just declarative data, not executable code, it can safely be authored on the controlling computer and uploaded to the MCP server to run. See [ScriptSchema.md](ScriptSchema.md) for the full YAML schema.
 
 ## MCP message format
 
@@ -59,13 +59,13 @@ This section covers only the JSON shape of *calling* a script and getting its re
 
 Because scripts run long-running sequences on the INDI Device and are explicitly meant to keep running even if the Client Computer disconnects (see the intro above), invoking a script is **asynchronous**: the tool call that starts a script returns immediately with a `runId`, rather than blocking until the script finishes. That `runId` is then used both for live progress updates and for polling the outcome after a reconnect.
 
-**Starting a script** — an MCP tool call (e.g. `run_script`) with arguments naming the script and its parameters:
+**Starting a script** — an MCP tool call (e.g. `run_script`) naming the script, the rig whose components its steps resolve against (see [ScriptSchema.md § Resolving roles to devices](ScriptSchema.md#resolving-roles-to-devices)), and its parameters:
 
 ```json
 {
   "script": "capture_sequence",
+  "rigId": "newtonian-8in",
   "parameters": {
-    "device": "CCD Simulator",
     "count": 10,
     "exposureSeconds": 30
   }
@@ -179,7 +179,7 @@ This doesn't need a separate mechanism — a "call another script" step reuses t
     device: "ZWO CCD ASI2600MM Pro"
 ```
 
-Illustrating the M101 example as composition (not a final step schema — that's still INDIMCP-6's job — just showing the shape):
+Illustrating the M101 example as composition (an early sketch of the shape — see [ScriptSchema.md](ScriptSchema.md) for the schema this settled into, including `role`-based device resolution rather than a hardcoded `device`):
 
 ```yaml
 id: capture_sequence_m101
@@ -207,13 +207,13 @@ steps:
         parameters: { exposureSeconds: 300 }
 ```
 
-Composability raises a few things the schema and execution engine (INDIMCP-6/INDIMCP-7) need to resolve, noted here so they aren't lost:
+Composability raises a few things the schema and execution engine (INDIMCP-6/INDIMCP-7) need to resolve, noted here so they aren't lost — see [ScriptSchema.md § Script composition](ScriptSchema.md#script-composition) for how INDIMCP-6 settled these:
 
 * **Same script library, resolved by id.** Sub-scripts are looked up from the same script store a top-level `run_script` call would use — there's no separate "library" of reusable fragments.
 * **Cycle detection at validation time.** Loading scripts must build a call graph across the whole library and reject a cycle (A calls B calls A) before anything runs, not discover infinite recursion at runtime.
 * **Nested progress, not opaque sub-runs.** A sub-script gets its own `runId` but is tagged with a `parentRunId`, so `scriptProgress`/`scriptCompleted`/etc. events form a walkable execution tree — a client watching the top-level `runId` shouldn't lose visibility into what's happening inside a nested `focus` or `plate_solve_until_precision` call.
 * **Cancellation cascades.** Cancelling the top-level run cancels whichever sub-script is currently executing.
-* **Pausability becomes dynamic.** Each script declares its own `pausable` flag; for a composite run, the *effective* pausability at any moment is whatever the currently-executing (sub-)script declares — e.g. pausable between `capture_frame` calls but not mid-`slew`. This means `pausable` may need to be re-reported as execution moves between sub-scripts, not fixed once at `scriptStarted` — full mechanics still to be worked out in the schema design.
+* **Pausability becomes dynamic.** Each script declares its own `pausable` flag; for a composite run, the *effective* pausability at any moment is whatever the currently-executing (sub-)script declares — e.g. pausable between `capture_frame` calls but not mid-`slew`. This means `pausable` may need to be re-reported as execution moves between sub-scripts, not fixed once at `scriptStarted`.
 * **A `repeat`/loop construct is needed** ("do this N times", "repeat until plate-solve precision is met") — kept as a closed, schema-defined construct (a count, or a repeat-until using the same restricted comparison-operator vocabulary already established for conditionals), not an embedded expression language, consistent with the safety rules above.
 
 ## Event streams
@@ -345,7 +345,7 @@ Two separate concerns: finding out what frames exist (metadata, cheap, queried a
 
 Scripts (and the MCP server generally) need to know about the physical imaging setup — telescope, focuser, filter wheel, imaging camera, guide camera — not just the live INDI devices currently connected. INDI can report *some* of this at runtime (a camera's pixel count, pixel size and bit depth, and sometimes cooling capability, are commonly exposed through its `CCD_INFO`-family properties), but it has no concept of aperture, focal length, or which physical optical train a device is wired through (imaging vs. guiding) — that's operator knowledge with no protocol representation. A user may also swap rigs entirely between sessions, so the server must be able to store **multiple** rig definitions, not just one.
 
-**Rig definitions are YAML documents, not SQLite rows** — unlike the event log and frame metadata (high-volume, write-heavy, time-indexed operational data, which is why those use SQLite), a rig definition is low-volume, human-curated configuration that changes rarely. This mirrors the scripting layer: declarative data, loaded with `yaml.safe_load`, validated against a schema, and — like scripts — potentially authored on the Client Computer and uploaded, so the same safety discipline applies. Each rig is one YAML file (e.g. under `rigs/*.yaml`), identified by a stable `id` that scripts reference (e.g. a script parameter `"rig": "newtonian-8in"`).
+**Rig definitions are YAML documents, not SQLite rows** — unlike the event log and frame metadata (high-volume, write-heavy, time-indexed operational data, which is why those use SQLite), a rig definition is low-volume, human-curated configuration that changes rarely. This mirrors the scripting layer: declarative data, loaded with `yaml.safe_load`, validated against a schema, and — like scripts — potentially authored on the Client Computer and uploaded, so the same safety discipline applies. Each rig is one YAML file (e.g. under `rigs/*.yaml`), identified by a stable `id` that a `run_script` call references via `rigId` (see [ScriptSchema.md § Resolving roles to devices](ScriptSchema.md#resolving-roles-to-devices)).
 
 **Schema (sketch):**
 
