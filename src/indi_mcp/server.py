@@ -6,10 +6,11 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from indi_mcp import indi_driver, indi_messaging, indi_server, rig_store
+from indi_mcp import indi_driver, indi_messaging, indi_server, observatory_store, rig_store
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
+from indi_mcp.observatory_store import Observatory, ObservatorySummary
 from indi_mcp.rig_store import DraftDeviceInfo, Rig, RigCheck, RigDraft, RigSuggestion, RigSummary
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,33 @@ async def draft_rig() -> RigDraft:
     return rig_store.draft_rig(devices)
 
 
+@mcp.tool()
+def list_observatories() -> list[ObservatorySummary]:
+    """List the id/name of every configured observatory location (see `ObservatorySchema.md`)."""
+    return observatory_store.list_observatories()
+
+
+@mcp.tool()
+def get_observatory(observatory_id: str) -> Observatory:
+    """Return the full definition of the observatory location identified by `observatory_id`."""
+    return observatory_store.get_observatory(observatory_id)
+
+
+@mcp.tool()
+async def save_observatory(observatory: Observatory, overwrite: bool = False) -> Observatory:
+    """Save an observatory location definition.
+
+    Writes `observatory` to `observatories/<observatory.id>.yaml` and reloads
+    it so it's immediately available by `id` to `get_observatory`. Refuses to
+    replace an existing file unless `overwrite` is set, since reusing an `id`
+    could otherwise silently destroy a previously saved location. The actual
+    file I/O runs in a worker thread so it doesn't block the event loop.
+    """
+    return await asyncio.to_thread(
+        observatory_store.save_observatory, observatory, overwrite=overwrite
+    )
+
+
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
     """Start serving the MCP server over the given transport.
 
@@ -197,6 +225,7 @@ def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 800
     """
     logging.basicConfig(level=logging.INFO)
     rig_store.load_rigs()
+    observatory_store.load_observatories()
     if transport != "stdio":
         mcp.settings.host = host
         mcp.settings.port = port
