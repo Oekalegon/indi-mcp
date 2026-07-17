@@ -22,7 +22,7 @@ matter:
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
@@ -290,6 +290,17 @@ async def _execute_steps(
         await _run_one_step(step, ctx, params, script_id, pausable)
 
 
+StepHandler = Callable[[Any, "_ExecutionContext", dict[str, Any], str, bool], Awaitable[None]]
+"""A step handler's uniform signature: `(step, ctx, params, script_id, pausable)`.
+
+Every handler takes the same five arguments even though most ignore
+`script_id`/`pausable` (only `repeat`/`if` recurse with them, and
+`run_script` uses the *callee's* own id/pausable instead) — a uniform
+signature is what makes `STEP_HANDLERS` below a single flat registry
+rather than needing per-arity special-casing.
+"""
+
+
 async def _run_one_step(
     step: Step,
     ctx: _ExecutionContext,
@@ -302,24 +313,23 @@ async def _run_one_step(
     ctx.steps_executed += 1
     _report_progress(ctx, script_id, step)
 
-    if isinstance(step, SetPropertyStep):
-        await _execute_set_property(step, ctx, params)
-    elif isinstance(step, WaitForStep):
-        await _execute_wait_for(step, ctx, params)
-    elif isinstance(step, CaptureFrameStep):
-        await _execute_capture_frame_stub(step, ctx, params)
-    elif isinstance(step, SlewStep):
-        await _execute_slew_stub(step, ctx, params)
-    elif isinstance(step, RunScriptStep):
-        await _execute_run_script(step, ctx, params)
-    elif isinstance(step, RepeatStep):
-        await _execute_repeat(step, ctx, params, script_id, pausable)
-    elif isinstance(step, IfStep):
-        await _execute_if(step, ctx, params, script_id, pausable)
+    handler = STEP_HANDLERS.get(type(step))
+    if handler is None:
+        raise ScriptValidationError(
+            f"no handler registered for step type {type(step).__name__!r} "
+            f"(step={step.description or step!r}); this should be unreachable for a "
+            "script that loaded successfully, since script_store only produces the "
+            "closed set of step types registered here"
+        )
+    await handler(step, ctx, params, script_id, pausable)
 
 
 async def _execute_set_property(
-    step: SetPropertyStep, ctx: _ExecutionContext, params: dict[str, Any]
+    step: SetPropertyStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
 ) -> None:
     device = _resolve_device(step.role, ctx)
     elements = {name: str(_substitute(value, params)) for name, value in step.elements.items()}
@@ -327,7 +337,11 @@ async def _execute_set_property(
 
 
 async def _execute_wait_for(
-    step: WaitForStep, ctx: _ExecutionContext, params: dict[str, Any]
+    step: WaitForStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
 ) -> None:
     timeout = float(_substitute(step.timeoutSeconds, params))
     deadline = asyncio.get_running_loop().time() + timeout
@@ -343,7 +357,11 @@ async def _execute_wait_for(
 
 
 async def _execute_run_script(
-    step: RunScriptStep, ctx: _ExecutionContext, params: dict[str, Any]
+    step: RunScriptStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
 ) -> None:
     callee = script_store.get_script(step.script)
     call_args = {name: _substitute(value, params) for name, value in step.parameters.items()}
@@ -399,7 +417,11 @@ async def _execute_if(
 
 
 async def _execute_capture_frame_stub(
-    step: CaptureFrameStep, ctx: _ExecutionContext, params: dict[str, Any]
+    step: CaptureFrameStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
 ) -> None:
     """Stub: log the intended capture; no real INDI interaction yet.
 
@@ -419,7 +441,11 @@ async def _execute_capture_frame_stub(
 
 
 async def _execute_slew_stub(
-    step: SlewStep, ctx: _ExecutionContext, params: dict[str, Any]
+    step: SlewStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
 ) -> None:
     """Stub: log the intended slew; no real INDI interaction yet.
 
@@ -431,6 +457,30 @@ async def _execute_slew_stub(
     logger.info(
         "slew stub: device=%s target=%s (no real slew yet, see INDIMCP-29)", device, step.target
     )
+
+
+STEP_HANDLERS: dict[type, StepHandler] = {
+    SetPropertyStep: _execute_set_property,
+    WaitForStep: _execute_wait_for,
+    CaptureFrameStep: _execute_capture_frame_stub,
+    SlewStep: _execute_slew_stub,
+    RunScriptStep: _execute_run_script,
+    RepeatStep: _execute_repeat,
+    IfStep: _execute_if,
+}
+"""The whitelist of step types this engine knows how to run.
+
+Every step type `script_store.Script` can produce must have a handler
+registered here — `_run_one_step` looks up `type(step)` in this dict and
+raises `ScriptValidationError` (rather than silently no-op'ing) if a step's
+runtime type isn't registered. Since `script_store`'s `Step` union is
+already closed to these same 7 types (INDIMCP-6's "no embedded expression
+language" rule — see `docs/ScriptSchema.md`), this can't actually be missed
+for a script that loaded successfully; it exists as an explicit,
+inspectable whitelist rather than an implicit if/elif chain, and as a
+deliberate failure mode if a future refactor ever adds a step type to the
+schema without adding its handler here.
+"""
 
 
 def _evaluate_condition(

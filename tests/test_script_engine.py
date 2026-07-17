@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -536,3 +536,34 @@ async def test_execute_script_non_pausable_script_ignores_pause_event(
     )
 
     assert result["stepsExecuted"] == 1
+
+
+def test_step_handlers_covers_every_closed_step_type() -> None:
+    step_types = {
+        script_store.SetPropertyStep,
+        script_store.WaitForStep,
+        script_store.CaptureFrameStep,
+        script_store.SlewStep,
+        script_store.RunScriptStep,
+        script_store.RepeatStep,
+        script_store.IfStep,
+    }
+
+    assert set(script_engine.STEP_HANDLERS) == step_types
+
+
+async def test_run_one_step_rejects_a_step_type_with_no_registered_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = script_engine._ExecutionContext(
+        role_to_device={}, cancel_event=None, pause_event=None, on_progress=None
+    )
+
+    class _UnregisteredStep:
+        description = None
+        every = None
+
+    with pytest.raises(script_engine.ScriptValidationError, match="no handler registered"):
+        await script_engine._run_one_step(
+            cast(script_store.Step, _UnregisteredStep()), ctx, {}, "script", False
+        )
