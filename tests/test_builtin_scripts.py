@@ -2,11 +2,12 @@
 
 Unlike `rigs/`/`observatories/`, which are user/hardware-specific and never
 committed, primitive/composed scripts (see `docs/Design.md`'s "Composing
-scripts" section) are meant to ship with the project. Only `slew` ships so
-far (INDIMCP-8); the remaining primitives and a composed sequence are
-tracked separately (INDIMCP-41 through INDIMCP-47). This just confirms
-whatever's here loads and validates cleanly, the way any script a client
-might upload would.
+scripts" section) are meant to ship with the project. `slew` (INDIMCP-8)
+and `park`/`unpark` (INDIMCP-48) ship so far; the remaining primitives,
+tracking control, and a composed sequence are tracked separately
+(INDIMCP-41 through INDIMCP-47, INDIMCP-49). This just confirms whatever's
+here loads and validates cleanly, the way any script a client might
+upload would.
 """
 
 from pathlib import Path
@@ -55,3 +56,43 @@ def test_builtin_slew_script_is_a_thin_wrapper_around_the_slew_step() -> None:
     assert step.target.raDec is not None
     assert step.target.raDec.ra == "{{ ra }}"
     assert step.target.raDec.dec == "{{ dec }}"
+
+
+def test_builtin_park_script_sets_park_and_waits() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    park = script_store.get_script("park")
+
+    assert park.pausable is False
+    assert park.parameters == {}
+    assert len(park.steps) == 2
+    set_step, wait_step = park.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "mount"
+    assert set_step.property == "TELESCOPE_PARK"
+    assert set_step.elements == {"PARK": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "mount"
+    assert wait_step.condition.property == "TELESCOPE_PARK"
+    assert wait_step.condition.element is None
+    assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_unpark_script_sets_unpark_and_waits() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    unpark = script_store.get_script("unpark")
+
+    assert unpark.pausable is False
+    assert unpark.parameters == {}
+    assert len(unpark.steps) == 2
+    set_step, wait_step = unpark.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "mount"
+    assert set_step.property == "TELESCOPE_PARK"
+    assert set_step.elements == {"UNPARK": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "mount"
+    assert wait_step.condition.property == "TELESCOPE_PARK"
+    assert wait_step.condition.element is None
+    assert wait_step.condition.value == "Ok"
