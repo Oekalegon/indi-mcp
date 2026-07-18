@@ -1,0 +1,26 @@
+id: slew
+name: Slew the mount to a fixed RA/Dec
+description: >
+  Slews the rig's mount to a fixed equatorial (RA/Dec) coordinate and waits for the
+  move to complete. A thin, reusable wrapper around the slew step primitive so
+  composed sequences can `run_script: slew` instead of repeating a raw `slew` step —
+  see docs/Design.md's "Composing scripts" section. Only a fixed RA/Dec target is
+  supported for now; slewing to a named object (e.g. "M101") needs astropy-based name
+  resolution that doesn't exist yet (INDIMCP-29).
+pausable: false
+parameters:
+  ra:
+    type: number
+    required: true
+    description: Right ascension of the target, in hours.
+  dec:
+    type: number
+    required: true
+    description: Declination of the target, in degrees.
+steps:
+  - step: slew
+    role: mount
+    target:
+      raDec:
+        ra: "{{ ra }}"
+        dec: "{{ dec }}"

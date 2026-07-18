@@ -58,6 +58,16 @@ installed (see the [Design Document](Design.md)), and that `uv` is available.
    below) if you prefer a different install layout, e.g. `pip install indi-mcp` into
    `/opt/indi-mcp/.venv` directly.
 
+   Note that the code checkout (`/opt/indi-mcp/src`) is separate from the service's
+   `WorkingDirectory` (`/opt/indi-mcp`). This matters for the built-in scripts shipped
+   in the repo under `scripts/`: `script_store` looks for them at `./scripts` by
+   default, which resolves against `WorkingDirectory`, not the checkout — so the
+   shipped unit file sets `INDI_MCP_SCRIPTS_DIR` explicitly to point at
+   `/opt/indi-mcp/src/scripts`. If you adjust the checkout path, update that
+   environment variable to match. `rigs/`/`observatories/` don't need this, since
+   those are user-authored config expected to live under `/opt/indi-mcp` itself, not
+   shipped in the repo.
+
 3. Install and enable the unit file:
 
    ```bash
