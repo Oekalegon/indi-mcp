@@ -1,0 +1,21 @@
+id: park
+name: Park the mount
+description: >
+  Parks the rig's mount and waits for the move to complete. A thin, reusable wrapper
+  around TELESCOPE_PARK so composed sequences can `run_script: park` instead of
+  repeating the raw set_property/wait_for steps — see docs/Design.md's "Composing
+  scripts" section. Built entirely from the generic set_property/wait_for
+  primitives, unlike slew/capture_frame.
+pausable: false
+steps:
+  - step: set_property
+    role: mount
+    property: TELESCOPE_PARK
+    elements: { PARK: "On" }
+  - step: wait_for
+    condition:
+      role: mount
+      property: TELESCOPE_PARK
+      operator: equals
+      value: Ok
+    timeoutSeconds: 60
