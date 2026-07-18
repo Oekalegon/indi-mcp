@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ScriptCancelled",
     "ScriptExecutionError",
+    "ScriptPreconditionError",
     "ScriptProgress",
     "ScriptResult",
     "ScriptValidationError",
@@ -66,11 +67,34 @@ than something exposed in the YAML.
 
 
 class ScriptValidationError(Exception):
-    """Raised before execution starts: a role/rig problem that isn't a per-step failure."""
+    """Raised before execution starts: the script/rig/parameters themselves are invalid.
+
+    A role with no matching component, an unknown script/rig id, a
+    missing required parameter — problems inherent to *this* (script,
+    rig, parameters) combination that no amount of waiting or connecting
+    hardware would fix; the script would need to change, or a different
+    rig/id supplied.
+    """
+
+
+class ScriptPreconditionError(Exception):
+    """Raised before (or at the very start of) a step: the script is valid, but the physical
+    rig isn't currently in a state this run requires — a device isn't connected, a mount is
+    parked, etc.
+
+    Distinct from `ScriptValidationError` (nothing about the script/rig/
+    parameters is wrong) and `ScriptExecutionError` (no step has actually
+    failed while running) — this is specifically "try again once the
+    hardware is ready," not "fix the script" or "something went wrong
+    mid-step."
+    """
 
 
 class ScriptExecutionError(Exception):
-    """Raised when a step fails at runtime (`wait_for` timeout, `maxIterations` exceeded, ...)."""
+    """Raised when a step actively fails while running (`wait_for` timeout, `maxIterations`
+    exceeded, ...) — the script and the rig were both fine to start; something about carrying
+    out a specific step's own work didn't succeed.
+    """
 
 
 class ScriptCancelled(Exception):
@@ -148,10 +172,15 @@ async def execute_script(
     component with no `device`, or a role matching more than one
     device-bearing component all raise `ScriptValidationError` before any
     step runs (see `docs/ScriptSchema.md#resolving-roles-to-devices`). Also
-    warns (logs) about any resolved device not currently connected,
-    mirroring `check_rig`'s "warn rather than fail" behavior, so a run
-    against a rig with a missing device surfaces early rather than failing
-    confusingly mid-script.
+    warns (logs) about any resolved device not currently connected to
+    `indiserver` at all, mirroring `check_rig`'s "warn rather than fail"
+    behavior for the *whole rig* (a rig might intentionally be used
+    without one of its components), and separately, strictly, checks that
+    every device this specific run actually needs has `CONNECTION.CONNECT
+    = On` — raising `ScriptPreconditionError` if not (see
+    `_check_devices_connected`), so a run against a device that's present
+    but not yet connected fails clearly up front rather than with a raw,
+    confusing error partway through a step.
 
     `cancel_event`/`pause_event` are checked between steps throughout the
     whole run, including inside nested `run_script` calls (cancellation
@@ -164,7 +193,9 @@ async def execute_script(
     scripts = _collect_reachable_scripts(script)
     roles = _collect_roles(scripts)
     role_to_device = _resolve_role_to_device(rig, roles)
-    _warn_on_missing_devices(rig_id, role_to_device)
+    known_devices = set(indi_messaging.list_devices())
+    _warn_on_missing_devices(rig_id, known_devices)
+    _check_devices_connected(role_to_device, known_devices)
     resolved_params = _resolve_parameters(script, parameters)
 
     ctx = _ExecutionContext(
@@ -186,8 +217,9 @@ def _get_script(script_id: str) -> Script:
     script here, and each `run_script` callee walked by
     `_collect_reachable_scripts` — goes through this, so a caller relying
     on this module's documented exception contract (`ScriptValidationError`/
-    `ScriptExecutionError`/`ScriptCancelled`, never anything else) never
-    sees a bare `ValueError` leak from `script_store` instead.
+    `ScriptPreconditionError`/`ScriptExecutionError`/`ScriptCancelled`,
+    never anything else) never sees a bare `ValueError` leak from
+    `script_store` instead.
     """
     try:
         return script_store.get_script(script_id)
@@ -352,12 +384,71 @@ def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, st
     return role_to_device
 
 
-def _warn_on_missing_devices(rig_id: str, role_to_device: dict[str, str]) -> None:
-    check = rig_store.check_rig(rig_id, indi_messaging.list_devices())
+def _warn_on_missing_devices(rig_id: str, known_devices: set[str]) -> None:
+    check = rig_store.check_rig(rig_id, known_devices)
     if not check["ok"]:
         logger.warning(
             "Rig %r has missing device(s) before running script: %s", rig_id, check["missing"]
         )
+
+
+def _check_devices_connected(role_to_device: dict[str, str], known_devices: set[str]) -> None:
+    """Raise `ScriptPreconditionError` for any resolved device that isn't confirmed connected.
+
+    Checks every distinct (role, device) this run actually needs (not the
+    whole rig — `_warn_on_missing_devices` already covers that, as a
+    warning, separately). Discovered via manual testing: sending a command
+    to a device that's known to `indi_messaging` (e.g. present in
+    `list_devices()`) but not yet `CONNECTION.CONNECT = On` previously
+    raised a raw `ValueError` from deep inside `send_property` instead of
+    one of this module's documented exception types — this catches that
+    case up front instead.
+
+    Distinguishes two different problems that would otherwise both look
+    like "not connected": a device entirely absent from `known_devices`
+    (never plugged in, its driver isn't running — `_warn_on_missing_devices`
+    already flags this as a warning for the whole rig; this raises for it
+    specifically when the *run* needs it) gets its own message, since
+    there's no `CONNECTION` property to set `On` for a device `indiserver`
+    has never heard of — the fix is checking the physical connection or
+    starting the driver, not "connecting" anything. A device `indiserver`
+    does know about but hasn't reported `CONNECTION.CONNECT = On` for gets
+    the "connect it" message `CONNECTION` actually supports fixing.
+
+    Unlike `_check_not_parked`/`_ensure_track_on_slew` (which treat an
+    undefined property as "not applicable, skip" because `TELESCOPE_PARK`/
+    `ON_COORD_SET` are genuinely optional on some mount drivers),
+    `CONNECTION` is part of INDI's base `DefaultDevice` class — every
+    known device defines it. So here, a known device with an undefined
+    `CONNECTION` means its properties haven't been received yet (a startup
+    race, not "doesn't apply"), and is treated the same as "confirmed not
+    connected": both fail loudly before any step runs, rather than risking
+    a raw error leaking out mid-script.
+
+    Deliberately does not auto-connect the device. Connecting isn't
+    guaranteed side-effect-free across every driver (some focusers home on
+    connect, some filter wheels calibrate to a reference slot, some mounts
+    do a brief init move) — silently connecting could move hardware in a
+    way the script never asked for, the same reasoning `slew` doesn't
+    auto-unpark. Left to the script (an explicit `connect` step, see
+    INDIMCP-52) or the operator.
+    """
+    checked: set[str] = set()
+    for role, device in role_to_device.items():
+        if device in checked:
+            continue
+        checked.add(device)
+        if device not in known_devices:
+            raise ScriptPreconditionError(
+                f"device {device!r} (role {role!r}) is not known to indiserver "
+                "(not plugged in, or its driver isn't running)"
+            )
+        values = indi_messaging.get_property_values(device, "CONNECTION")
+        if values is None or values.get("CONNECT") != "On":
+            raise ScriptPreconditionError(
+                f"device {device!r} (role {role!r}) is not connected; "
+                "connect it before running this script"
+            )
 
 
 def _resolve_parameters(script: Script, supplied: dict[str, Any]) -> dict[str, Any]:
@@ -631,10 +722,10 @@ async def _execute_slew(
 ) -> None:
     """Slew the mount to `step.target` and wait through the `Busy`->`Ok` transition.
 
-    Fails fast with `ScriptExecutionError` if the mount is currently parked
-    (see `_check_not_parked`) — never unparks it automatically. Sets
-    `ON_COORD_SET` to `TRACK` before sending the target coordinate (see
-    `_ensure_track_on_slew`), so the mount deterministically ends up
+    Fails fast with `ScriptPreconditionError` if the mount is currently
+    parked (see `_check_not_parked`) — never unparks it automatically.
+    Sets `ON_COORD_SET` to `TRACK` before sending the target coordinate
+    (see `_ensure_track_on_slew`), so the mount deterministically ends up
     tracking afterward regardless of whatever mode a previous session left
     it in.
 
@@ -643,8 +734,9 @@ async def _execute_slew(
     name resolution (INDIMCP-29, not built yet) to turn a name like `"M101"`
     into RA/Dec, so it raises `ScriptExecutionError` for now rather than
     silently doing nothing — consistent with this module's exception
-    contract (`ScriptValidationError`/`ScriptExecutionError`/
-    `ScriptCancelled` only, never a bare `NotImplementedError` leaking out).
+    contract (`ScriptValidationError`/`ScriptPreconditionError`/
+    `ScriptExecutionError`/`ScriptCancelled` only, never a bare
+    `NotImplementedError` leaking out).
 
     **No horizon/altitude awareness yet.** Neither the target nor the path
     to it is checked against the horizon — two above-horizon endpoints
@@ -674,7 +766,7 @@ async def _execute_slew(
 
 
 def _check_not_parked(device: str) -> None:
-    """Raise `ScriptExecutionError` if `device`'s mount is currently parked.
+    """Raise `ScriptPreconditionError` if `device`'s mount is currently parked.
 
     Most mount drivers reject (or simply ignore) a slew command while
     parked, so without this check a slew against a parked mount would just
@@ -693,7 +785,7 @@ def _check_not_parked(device: str) -> None:
     """
     values = indi_messaging.get_property_values(device, "TELESCOPE_PARK")
     if values is not None and values.get("PARK") == "On":
-        raise ScriptExecutionError(
+        raise ScriptPreconditionError(
             f"mount {device!r} is parked; unpark it (TELESCOPE_PARK) before slewing"
         )
 

@@ -6,31 +6,48 @@ import pytest
 
 from indi_mcp import indi_messaging, rig_store, script_engine, script_store
 
+_known_devices: list[str] = []
+
 
 @pytest.fixture(autouse=True)
 def _reset_stores() -> None:
     rig_store._rigs = {}
     script_store._scripts = {}
+    _known_devices.clear()
+
+
+def _default_get_property_values(device: str, name: str) -> dict[str, str] | None:
+    """Every device is reported connected by default; every other property is undefined."""
+    if name == "CONNECTION":
+        return {"CONNECT": "On", "DISCONNECT": "Off"}
+    return None
 
 
 @pytest.fixture(autouse=True)
 def _mock_indi_messaging_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test drives `execute_script`, which always calls `list_devices`/`check_rig`.
 
-    Default to "nothing connected, rig is fine, no property values defined"
-    so tests that only care about one specific bit of step execution don't
+    Default to "every device `_rig()` registers is known to indiserver and
+    reports connected, rig is fine, no other property values defined" so
+    tests that only care about one specific bit of step execution don't
     each need to stub all of this out themselves; tests exercising the
-    missing-device warning path override `check_rig`, and tests exercising
-    a specific property's values (e.g. `TELESCOPE_PARK`, a `wait_for`
-    condition's element) override `get_property_values`.
+    missing-device warning path override `check_rig`, tests exercising a
+    device unknown to indiserver entirely override `list_devices`, tests
+    exercising the not-connected check override `get_property_values` for
+    `CONNECTION` specifically, and tests exercising a specific property's
+    values (e.g. `TELESCOPE_PARK`, a `wait_for` condition's element)
+    override `get_property_values` for that property while still
+    delegating to `_default_get_property_values` for anything else (see
+    those tests).
     """
-    monkeypatch.setattr(indi_messaging, "list_devices", lambda: [])
-    monkeypatch.setattr(indi_messaging, "get_property_values", lambda device, name: None)
+    monkeypatch.setattr(indi_messaging, "list_devices", lambda: list(_known_devices))
+    monkeypatch.setattr(indi_messaging, "get_property_values", _default_get_property_values)
 
 
 def _rig(*components: rig_store.Component, rig_id: str = "test-rig") -> rig_store.Rig:
     rig = rig_store.Rig(id=rig_id, name="Test rig", components=list(components))
     rig_store._rigs[rig.id] = rig
+    _known_devices.extend(c.device for c in components if c.device is not None)
     return rig
 
 
@@ -204,6 +221,120 @@ async def test_execute_script_warns_but_does_not_fail_on_missing_devices(
     assert any("missing device" in record.message for record in caplog.records)
 
 
+async def test_execute_script_raises_when_device_is_not_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("cool", steps=[_set_property("camera", "CCD_TEMPERATURE", {"X": "1"})])
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    with pytest.raises(script_engine.ScriptPreconditionError, match="camera.*not connected"):
+        await script_engine.execute_script("cool", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_raises_when_device_is_unknown_to_indiserver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device indiserver has never heard of gets a distinct message from "not connected" —
+
+    there's no CONNECTION property to set On for a device that isn't
+    plugged in / whose driver isn't running, so the fix is different
+    (check the physical connection / start the driver), and the error
+    should say so rather than suggesting "connect it".
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("cool", steps=[_set_property("camera", "CCD_TEMPERATURE", {"X": "1"})])
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "list_devices", lambda: [])
+
+    with pytest.raises(
+        script_engine.ScriptPreconditionError, match="camera.*not known to indiserver"
+    ):
+        await script_engine.execute_script("cool", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_raises_when_connection_state_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CONNECTION is always defined on a real INDI device, unlike TELESCOPE_PARK/ON_COORD_SET —
+
+    an undefined CONNECTION means the property hasn't been received yet
+    (a startup race), not "doesn't apply", so it's treated the same as
+    "confirmed not connected" rather than silently skipped.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("cool", steps=[_set_property("camera", "CCD_TEMPERATURE", {"X": "1"})])
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_values", lambda device, name: None)
+
+    with pytest.raises(script_engine.ScriptPreconditionError, match="not connected"):
+        await script_engine.execute_script("cool", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_proceeds_when_device_is_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("cool", steps=[_set_property("camera", "CCD_TEMPERATURE", {"X": "1"})])
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script("cool", "test-rig", {})
+
+    send_property.assert_awaited_once()
+
+
+async def test_execute_script_checks_every_distinct_device_the_run_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second, not-connected device is caught even if the first one is fine."""
+    _rig(
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+        rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
+    )
+    _script(
+        "sequence",
+        steps=[
+            _set_property("camera", "CCD_TEMPERATURE", {"X": "1"}),
+            {"step": "slew", "role": "mount", "target": {"raDec": {"ra": 1.0, "dec": 2.0}}},
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "On", "DISCONNECT": "Off"}
+            if name == "CONNECTION" and device == "CCD Simulator"
+            else {"CONNECT": "Off", "DISCONNECT": "On"}
+            if name == "CONNECTION"
+            else None
+        ),
+    )
+
+    with pytest.raises(script_engine.ScriptPreconditionError, match="Telescope Simulator"):
+        await script_engine.execute_script("sequence", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
 async def test_execute_script_wait_for_succeeds_once_condition_is_met(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -254,7 +385,11 @@ async def test_execute_script_wait_for_compares_a_numeric_element(
     monkeypatch.setattr(
         indi_messaging,
         "get_property_values",
-        lambda device, name: {"CCD_TEMPERATURE_VALUE": "-12.5"},
+        lambda device, name: (
+            {"CCD_TEMPERATURE_VALUE": "-12.5"}
+            if name == "CCD_TEMPERATURE"
+            else _default_get_property_values(device, name)
+        ),
     )
 
     result = await script_engine.execute_script("wait", "test-rig", {})
@@ -285,7 +420,11 @@ async def test_execute_script_wait_for_warns_on_a_typo_d_element_name(
     monkeypatch.setattr(
         indi_messaging,
         "get_property_values",
-        lambda device, name: {"CCD_TEMPERATURE_VALUE": "-12.5"},
+        lambda device, name: (
+            {"CCD_TEMPERATURE_VALUE": "-12.5"}
+            if name == "CCD_TEMPERATURE"
+            else _default_get_property_values(device, name)
+        ),
     )
     monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
 
@@ -595,10 +734,14 @@ async def test_execute_script_slew_rejects_a_parked_mount(
     monkeypatch.setattr(
         indi_messaging,
         "get_property_values",
-        lambda device, name: {"PARK": "On", "UNPARK": "Off"} if name == "TELESCOPE_PARK" else None,
+        lambda device, name: (
+            {"PARK": "On", "UNPARK": "Off"}
+            if name == "TELESCOPE_PARK"
+            else _default_get_property_values(device, name)
+        ),
     )
 
-    with pytest.raises(script_engine.ScriptExecutionError, match="parked"):
+    with pytest.raises(script_engine.ScriptPreconditionError, match="parked"):
         await script_engine.execute_script("slew", "test-rig", {})
 
     send_property.assert_not_awaited()
@@ -617,7 +760,11 @@ async def test_execute_script_slew_proceeds_when_mount_is_unparked(
     monkeypatch.setattr(
         indi_messaging,
         "get_property_values",
-        lambda device, name: {"PARK": "Off", "UNPARK": "On"} if name == "TELESCOPE_PARK" else None,
+        lambda device, name: (
+            {"PARK": "Off", "UNPARK": "On"}
+            if name == "TELESCOPE_PARK"
+            else _default_get_property_values(device, name)
+        ),
     )
     monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
 
@@ -658,7 +805,9 @@ async def test_execute_script_slew_sets_on_coord_set_to_track_before_slewing(
         indi_messaging,
         "get_property_values",
         lambda device, name: (
-            {"SLEW": "Off", "TRACK": "Off", "SYNC": "On"} if name == "ON_COORD_SET" else None
+            {"SLEW": "Off", "TRACK": "Off", "SYNC": "On"}
+            if name == "ON_COORD_SET"
+            else _default_get_property_values(device, name)
         ),
     )
     monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
