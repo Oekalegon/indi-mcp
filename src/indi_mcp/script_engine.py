@@ -632,7 +632,11 @@ async def _execute_slew(
     """Slew the mount to `step.target` and wait through the `Busy`->`Ok` transition.
 
     Fails fast with `ScriptExecutionError` if the mount is currently parked
-    (see `_check_not_parked`) — never unparks it automatically.
+    (see `_check_not_parked`) — never unparks it automatically. Sets
+    `ON_COORD_SET` to `TRACK` before sending the target coordinate (see
+    `_ensure_track_on_slew`), so the mount deterministically ends up
+    tracking afterward regardless of whatever mode a previous session left
+    it in.
 
     Only `target.raDec` is implemented: sets `EQUATORIAL_EOD_COORD`'s `RA`/
     `DEC` elements directly. `target.objectName` still needs astropy-based
@@ -660,6 +664,7 @@ async def _execute_slew(
         )
     ra = float(_substitute(step.target.raDec.ra, params))
     dec = float(_substitute(step.target.raDec.dec, params))
+    await _ensure_track_on_slew(device)
     await indi_messaging.send_property(
         device, "EQUATORIAL_EOD_COORD", {"RA": str(ra), "DEC": str(dec)}
     )
@@ -691,6 +696,35 @@ def _check_not_parked(device: str) -> None:
         raise ScriptExecutionError(
             f"mount {device!r} is parked; unpark it (TELESCOPE_PARK) before slewing"
         )
+
+
+async def _ensure_track_on_slew(device: str) -> None:
+    """Set `ON_COORD_SET` to `TRACK`, so `slew` deterministically leaves the mount tracking.
+
+    `ON_COORD_SET` (`SLEW`/`TRACK`/`SYNC`) controls what a new
+    `EQUATORIAL_EOD_COORD` command *means* to the driver — without setting
+    it explicitly here, whether the mount ends up tracking after a slew
+    would depend on whatever mode it was last left in (verified against a
+    real `indi_simulator_telescope`: leaving `ON_COORD_SET` alone after a
+    previous session set it to `SLEW` would move the mount to the target
+    and then silently leave it *not* tracking — star-trailing risk for any
+    imaging sequence built on top of `slew`). Unlike `_check_not_parked`,
+    this isn't withheld as "an action the script should ask for
+    explicitly": engaging tracking is intrinsic to what `slew` means (the
+    schema's own wording is "set target coordinates, wait for the mount's
+    Busy->Ok transition" — a slew that doesn't end up tracking isn't a
+    completed slew for imaging purposes), not a separate hardware action
+    like unparking.
+
+    `ON_COORD_SET` is part of INDI's base `Telescope` class and
+    near-universal, but not every driver is guaranteed to expose it —
+    skipped, not an error, if undefined, matching `_check_not_parked`'s
+    handling of `TELESCOPE_PARK`.
+    """
+    values = indi_messaging.get_property_values(device, "ON_COORD_SET")
+    if values is None:
+        return
+    await indi_messaging.send_property(device, "ON_COORD_SET", {"TRACK": "On"})
 
 
 STEP_HANDLERS: dict[type, StepHandler] = {
