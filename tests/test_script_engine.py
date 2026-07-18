@@ -1,6 +1,6 @@
 import asyncio
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -642,6 +642,53 @@ async def test_execute_script_slew_proceeds_when_mount_has_no_park_property(
     await script_engine.execute_script("slew", "test-rig", {})
 
     send_property.assert_awaited_once()
+
+
+async def test_execute_script_slew_sets_on_coord_set_to_track_before_slewing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "slew",
+        steps=[{"step": "slew", "role": "mount", "target": {"raDec": {"ra": 1.0, "dec": 2.0}}}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"SLEW": "Off", "TRACK": "Off", "SYNC": "On"} if name == "ON_COORD_SET" else None
+        ),
+    )
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("slew", "test-rig", {})
+
+    assert send_property.await_args_list == [
+        call("Telescope Simulator", "ON_COORD_SET", {"TRACK": "On"}),
+        call("Telescope Simulator", "EQUATORIAL_EOD_COORD", {"RA": "1.0", "DEC": "2.0"}),
+    ]
+
+
+async def test_execute_script_slew_skips_on_coord_set_when_mount_has_no_such_property(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A driver with no ON_COORD_SET support at all is skipped, not an error."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "slew",
+        steps=[{"step": "slew", "role": "mount", "target": {"raDec": {"ra": 1.0, "dec": 2.0}}}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("slew", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "Telescope Simulator", "EQUATORIAL_EOD_COORD", {"RA": "1.0", "DEC": "2.0"}
+    )
 
 
 async def test_execute_script_reports_progress_for_each_step(
