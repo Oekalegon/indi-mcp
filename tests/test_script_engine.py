@@ -230,7 +230,7 @@ async def test_execute_script_raises_when_device_is_not_connected(
         ),
     )
 
-    with pytest.raises(script_engine.ScriptValidationError, match="not connected"):
+    with pytest.raises(script_engine.ScriptPreconditionError, match="not connected"):
         await script_engine.execute_script("cool", "test-rig", {})
 
     send_property.assert_not_awaited()
@@ -251,7 +251,7 @@ async def test_execute_script_raises_when_connection_state_is_unknown(
     monkeypatch.setattr(indi_messaging, "send_property", send_property)
     monkeypatch.setattr(indi_messaging, "get_property_values", lambda device, name: None)
 
-    with pytest.raises(script_engine.ScriptValidationError, match="not connected"):
+    with pytest.raises(script_engine.ScriptPreconditionError, match="not connected"):
         await script_engine.execute_script("cool", "test-rig", {})
 
     send_property.assert_not_awaited()
@@ -299,7 +299,7 @@ async def test_execute_script_checks_every_distinct_device_the_run_needs(
         ),
     )
 
-    with pytest.raises(script_engine.ScriptValidationError, match="Telescope Simulator"):
+    with pytest.raises(script_engine.ScriptPreconditionError, match="Telescope Simulator"):
         await script_engine.execute_script("sequence", "test-rig", {})
 
     send_property.assert_not_awaited()
@@ -711,7 +711,7 @@ async def test_execute_script_slew_rejects_a_parked_mount(
         ),
     )
 
-    with pytest.raises(script_engine.ScriptExecutionError, match="parked"):
+    with pytest.raises(script_engine.ScriptPreconditionError, match="parked"):
         await script_engine.execute_script("slew", "test-rig", {})
 
     send_property.assert_not_awaited()
