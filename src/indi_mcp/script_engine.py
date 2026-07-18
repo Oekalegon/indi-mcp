@@ -148,10 +148,15 @@ async def execute_script(
     component with no `device`, or a role matching more than one
     device-bearing component all raise `ScriptValidationError` before any
     step runs (see `docs/ScriptSchema.md#resolving-roles-to-devices`). Also
-    warns (logs) about any resolved device not currently connected,
-    mirroring `check_rig`'s "warn rather than fail" behavior, so a run
-    against a rig with a missing device surfaces early rather than failing
-    confusingly mid-script.
+    warns (logs) about any resolved device not currently connected to
+    `indiserver` at all, mirroring `check_rig`'s "warn rather than fail"
+    behavior for the *whole rig* (a rig might intentionally be used
+    without one of its components), and separately, strictly, checks that
+    every device this specific run actually needs has `CONNECTION.CONNECT
+    = On` — raising `ScriptValidationError` if not (see
+    `_check_devices_connected`), so a run against a device that's present
+    but not yet connected fails clearly up front rather than with a raw,
+    confusing error partway through a step.
 
     `cancel_event`/`pause_event` are checked between steps throughout the
     whole run, including inside nested `run_script` calls (cancellation
@@ -165,6 +170,7 @@ async def execute_script(
     roles = _collect_roles(scripts)
     role_to_device = _resolve_role_to_device(rig, roles)
     _warn_on_missing_devices(rig_id, role_to_device)
+    _check_devices_connected(role_to_device)
     resolved_params = _resolve_parameters(script, parameters)
 
     ctx = _ExecutionContext(
@@ -358,6 +364,44 @@ def _warn_on_missing_devices(rig_id: str, role_to_device: dict[str, str]) -> Non
         logger.warning(
             "Rig %r has missing device(s) before running script: %s", rig_id, check["missing"]
         )
+
+
+def _check_devices_connected(role_to_device: dict[str, str]) -> None:
+    """Raise `ScriptValidationError` for any resolved device that isn't confirmed connected.
+
+    Checks every distinct device this run actually needs (not the whole
+    rig — `_warn_on_missing_devices` already covers that, as a warning,
+    separately). Discovered via manual testing: sending a command to a
+    device that's known to `indi_messaging` (e.g. present in
+    `list_devices()`) but not yet `CONNECTION.CONNECT = On` previously
+    raised a raw `ValueError` from deep inside `send_property` instead of
+    one of this module's documented exception types — this catches that
+    case up front instead.
+
+    Unlike `_check_not_parked`/`_ensure_track_on_slew` (which treat an
+    undefined property as "not applicable, skip" because `TELESCOPE_PARK`/
+    `ON_COORD_SET` are genuinely optional on some mount drivers),
+    `CONNECTION` is part of INDI's base `DefaultDevice` class — every
+    device defines it. So here, an undefined `CONNECTION` means the
+    device's properties haven't been received yet (a startup race, not
+    "doesn't apply"), and is treated the same as "confirmed not
+    connected": both fail loudly before any step runs, rather than risking
+    a raw error leaking out mid-script.
+
+    Deliberately does not auto-connect the device. Connecting isn't
+    guaranteed side-effect-free across every driver (some focusers home on
+    connect, some filter wheels calibrate to a reference slot, some mounts
+    do a brief init move) — silently connecting could move hardware in a
+    way the script never asked for, the same reasoning `slew` doesn't
+    auto-unpark. Left to the script (an explicit `connect` step, see
+    INDIMCP-52) or the operator.
+    """
+    for device in set(role_to_device.values()):
+        values = indi_messaging.get_property_values(device, "CONNECTION")
+        if values is None or values.get("CONNECT") != "On":
+            raise ScriptValidationError(
+                f"device {device!r} is not connected; connect it before running this script"
+            )
 
 
 def _resolve_parameters(script: Script, supplied: dict[str, Any]) -> dict[str, Any]:
