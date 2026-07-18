@@ -6,11 +6,14 @@ import pytest
 
 from indi_mcp import indi_messaging, rig_store, script_engine, script_store
 
+_known_devices: list[str] = []
+
 
 @pytest.fixture(autouse=True)
 def _reset_stores() -> None:
     rig_store._rigs = {}
     script_store._scripts = {}
+    _known_devices.clear()
 
 
 def _default_get_property_values(device: str, name: str) -> dict[str, str] | None:
@@ -24,24 +27,27 @@ def _default_get_property_values(device: str, name: str) -> dict[str, str] | Non
 def _mock_indi_messaging_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test drives `execute_script`, which always calls `list_devices`/`check_rig`.
 
-    Default to "nothing in list_devices(), rig is fine, every device
-    reports connected, no other property values defined" so tests that
-    only care about one specific bit of step execution don't each need to
-    stub all of this out themselves; tests exercising the missing-device
-    warning path override `check_rig`, tests exercising the not-connected
-    check override `get_property_values` for `CONNECTION` specifically,
-    and tests exercising a specific property's values (e.g.
-    `TELESCOPE_PARK`, a `wait_for` condition's element) override
-    `get_property_values` for that property while still delegating to
-    `_default_get_property_values` for anything else (see those tests).
+    Default to "every device `_rig()` registers is known to indiserver and
+    reports connected, rig is fine, no other property values defined" so
+    tests that only care about one specific bit of step execution don't
+    each need to stub all of this out themselves; tests exercising the
+    missing-device warning path override `check_rig`, tests exercising a
+    device unknown to indiserver entirely override `list_devices`, tests
+    exercising the not-connected check override `get_property_values` for
+    `CONNECTION` specifically, and tests exercising a specific property's
+    values (e.g. `TELESCOPE_PARK`, a `wait_for` condition's element)
+    override `get_property_values` for that property while still
+    delegating to `_default_get_property_values` for anything else (see
+    those tests).
     """
-    monkeypatch.setattr(indi_messaging, "list_devices", lambda: [])
+    monkeypatch.setattr(indi_messaging, "list_devices", lambda: list(_known_devices))
     monkeypatch.setattr(indi_messaging, "get_property_values", _default_get_property_values)
 
 
 def _rig(*components: rig_store.Component, rig_id: str = "test-rig") -> rig_store.Rig:
     rig = rig_store.Rig(id=rig_id, name="Test rig", components=list(components))
     rig_store._rigs[rig.id] = rig
+    _known_devices.extend(c.device for c in components if c.device is not None)
     return rig
 
 
@@ -230,7 +236,31 @@ async def test_execute_script_raises_when_device_is_not_connected(
         ),
     )
 
-    with pytest.raises(script_engine.ScriptPreconditionError, match="not connected"):
+    with pytest.raises(script_engine.ScriptPreconditionError, match="camera.*not connected"):
+        await script_engine.execute_script("cool", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_raises_when_device_is_unknown_to_indiserver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device indiserver has never heard of gets a distinct message from "not connected" —
+
+    there's no CONNECTION property to set On for a device that isn't
+    plugged in / whose driver isn't running, so the fix is different
+    (check the physical connection / start the driver), and the error
+    should say so rather than suggesting "connect it".
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("cool", steps=[_set_property("camera", "CCD_TEMPERATURE", {"X": "1"})])
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "list_devices", lambda: [])
+
+    with pytest.raises(
+        script_engine.ScriptPreconditionError, match="camera.*not known to indiserver"
+    ):
         await script_engine.execute_script("cool", "test-rig", {})
 
     send_property.assert_not_awaited()

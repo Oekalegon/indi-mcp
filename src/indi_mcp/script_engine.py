@@ -193,8 +193,9 @@ async def execute_script(
     scripts = _collect_reachable_scripts(script)
     roles = _collect_roles(scripts)
     role_to_device = _resolve_role_to_device(rig, roles)
-    _warn_on_missing_devices(rig_id, role_to_device)
-    _check_devices_connected(role_to_device)
+    known_devices = set(indi_messaging.list_devices())
+    _warn_on_missing_devices(rig_id, known_devices)
+    _check_devices_connected(role_to_device, known_devices)
     resolved_params = _resolve_parameters(script, parameters)
 
     ctx = _ExecutionContext(
@@ -383,33 +384,44 @@ def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, st
     return role_to_device
 
 
-def _warn_on_missing_devices(rig_id: str, role_to_device: dict[str, str]) -> None:
-    check = rig_store.check_rig(rig_id, indi_messaging.list_devices())
+def _warn_on_missing_devices(rig_id: str, known_devices: set[str]) -> None:
+    check = rig_store.check_rig(rig_id, known_devices)
     if not check["ok"]:
         logger.warning(
             "Rig %r has missing device(s) before running script: %s", rig_id, check["missing"]
         )
 
 
-def _check_devices_connected(role_to_device: dict[str, str]) -> None:
+def _check_devices_connected(role_to_device: dict[str, str], known_devices: set[str]) -> None:
     """Raise `ScriptPreconditionError` for any resolved device that isn't confirmed connected.
 
-    Checks every distinct device this run actually needs (not the whole
-    rig — `_warn_on_missing_devices` already covers that, as a warning,
-    separately). Discovered via manual testing: sending a command to a
-    device that's known to `indi_messaging` (e.g. present in
+    Checks every distinct (role, device) this run actually needs (not the
+    whole rig — `_warn_on_missing_devices` already covers that, as a
+    warning, separately). Discovered via manual testing: sending a command
+    to a device that's known to `indi_messaging` (e.g. present in
     `list_devices()`) but not yet `CONNECTION.CONNECT = On` previously
     raised a raw `ValueError` from deep inside `send_property` instead of
     one of this module's documented exception types — this catches that
     case up front instead.
 
+    Distinguishes two different problems that would otherwise both look
+    like "not connected": a device entirely absent from `known_devices`
+    (never plugged in, its driver isn't running — `_warn_on_missing_devices`
+    already flags this as a warning for the whole rig; this raises for it
+    specifically when the *run* needs it) gets its own message, since
+    there's no `CONNECTION` property to set `On` for a device `indiserver`
+    has never heard of — the fix is checking the physical connection or
+    starting the driver, not "connecting" anything. A device `indiserver`
+    does know about but hasn't reported `CONNECTION.CONNECT = On` for gets
+    the "connect it" message `CONNECTION` actually supports fixing.
+
     Unlike `_check_not_parked`/`_ensure_track_on_slew` (which treat an
     undefined property as "not applicable, skip" because `TELESCOPE_PARK`/
     `ON_COORD_SET` are genuinely optional on some mount drivers),
     `CONNECTION` is part of INDI's base `DefaultDevice` class — every
-    device defines it. So here, an undefined `CONNECTION` means the
-    device's properties haven't been received yet (a startup race, not
-    "doesn't apply"), and is treated the same as "confirmed not
+    known device defines it. So here, a known device with an undefined
+    `CONNECTION` means its properties haven't been received yet (a startup
+    race, not "doesn't apply"), and is treated the same as "confirmed not
     connected": both fail loudly before any step runs, rather than risking
     a raw error leaking out mid-script.
 
@@ -421,11 +433,21 @@ def _check_devices_connected(role_to_device: dict[str, str]) -> None:
     auto-unpark. Left to the script (an explicit `connect` step, see
     INDIMCP-52) or the operator.
     """
-    for device in set(role_to_device.values()):
+    checked: set[str] = set()
+    for role, device in role_to_device.items():
+        if device in checked:
+            continue
+        checked.add(device)
+        if device not in known_devices:
+            raise ScriptPreconditionError(
+                f"device {device!r} (role {role!r}) is not known to indiserver "
+                "(not plugged in, or its driver isn't running)"
+            )
         values = indi_messaging.get_property_values(device, "CONNECTION")
         if values is None or values.get("CONNECT") != "On":
             raise ScriptPreconditionError(
-                f"device {device!r} is not connected; connect it before running this script"
+                f"device {device!r} (role {role!r}) is not connected; "
+                "connect it before running this script"
             )
 
 
