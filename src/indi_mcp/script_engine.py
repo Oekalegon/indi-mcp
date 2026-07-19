@@ -195,7 +195,8 @@ async def execute_script(
     role_to_device = _resolve_role_to_device(rig, roles)
     known_devices = set(indi_messaging.list_devices())
     _warn_on_missing_devices(rig_id, known_devices)
-    _check_devices_connected(role_to_device, known_devices)
+    exempt_roles = _roles_managing_own_connection(scripts)
+    _check_devices_connected(role_to_device, known_devices, exempt_roles)
     resolved_params = _resolve_parameters(script, parameters)
 
     ctx = _ExecutionContext(
@@ -285,6 +286,40 @@ def _run_script_calls(steps: list[Step]) -> list[RunScriptStep]:
             calls.extend(_run_script_calls(step.then))
             calls.extend(_run_script_calls(step.else_))
     return calls
+
+
+def _iter_all_steps(steps: list[Step]) -> list[Step]:
+    """Flatten `steps` and everything nested inside `repeat`/`if` bodies (not `run_script`)."""
+    flattened: list[Step] = []
+    for step in steps:
+        flattened.append(step)
+        if isinstance(step, RepeatStep):
+            flattened.extend(_iter_all_steps(step.steps))
+        elif isinstance(step, IfStep):
+            flattened.extend(_iter_all_steps(step.then))
+            flattened.extend(_iter_all_steps(step.else_))
+    return flattened
+
+
+def _roles_managing_own_connection(scripts: dict[str, Script]) -> set[str]:
+    """Every role that some step in `scripts` itself sets or checks `CONNECTION` for.
+
+    Exempts these roles from `_check_devices_connected`'s "must already be
+    connected" requirement — otherwise a `connect_*`/`disconnect_*` script
+    (whose entire job is to set `CONNECTION`) could never run, since it
+    would require the very state it exists to create. Only the "must
+    already be connected" half is exempted, never "must be known to
+    `indiserver` at all" — there's nothing a `connect_*` script can do
+    about a device whose driver was never started.
+    """
+    roles: set[str] = set()
+    for script in scripts.values():
+        for step in _iter_all_steps(script.steps):
+            if isinstance(step, SetPropertyStep) and step.property == "CONNECTION":
+                roles.add(step.role)
+            elif isinstance(step, WaitForStep) and step.condition.property == "CONNECTION":
+                roles.add(step.condition.role)
+    return roles
 
 
 def _count_total_steps(script: Script, scripts: dict[str, Script]) -> int | None:
@@ -392,7 +427,9 @@ def _warn_on_missing_devices(rig_id: str, known_devices: set[str]) -> None:
         )
 
 
-def _check_devices_connected(role_to_device: dict[str, str], known_devices: set[str]) -> None:
+def _check_devices_connected(
+    role_to_device: dict[str, str], known_devices: set[str], exempt_roles: set[str]
+) -> None:
     """Raise `ScriptPreconditionError` for any resolved device that isn't confirmed connected.
 
     Checks every distinct (role, device) this run actually needs (not the
@@ -432,6 +469,15 @@ def _check_devices_connected(role_to_device: dict[str, str], known_devices: set[
     way the script never asked for, the same reasoning `slew` doesn't
     auto-unpark. Left to the script (an explicit `connect` step, see
     INDIMCP-52) or the operator.
+
+    `exempt_roles` (see `_roles_managing_own_connection`) skips the "must
+    already be `CONNECT = On`" half of this check for roles whose own run
+    sets/checks `CONNECTION` — otherwise a `connect_*`/`disconnect_*`
+    script could never run against a not-yet-connected device, since it
+    would require the very state it exists to create. The "must be known
+    to indiserver at all" half stays unconditional for every device
+    regardless of exemption: no script can connect a device whose driver
+    was never started.
     """
     checked: set[str] = set()
     for role, device in role_to_device.items():
@@ -443,6 +489,12 @@ def _check_devices_connected(role_to_device: dict[str, str], known_devices: set[
                 f"device {device!r} (role {role!r}) is not known to indiserver "
                 "(not plugged in, or its driver isn't running)"
             )
+
+    checked = set()
+    for role, device in role_to_device.items():
+        if role in exempt_roles or device in checked:
+            continue
+        checked.add(device)
         values = indi_messaging.get_property_values(device, "CONNECTION")
         if values is None or values.get("CONNECT") != "On":
             raise ScriptPreconditionError(

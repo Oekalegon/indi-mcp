@@ -335,6 +335,84 @@ async def test_execute_script_checks_every_distinct_device_the_run_needs(
     send_property.assert_not_awaited()
 
 
+async def test_execute_script_connect_script_proceeds_when_device_is_not_yet_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script whose own steps set CONNECTION for a role is exempt from "must already be
+    connected" — otherwise a connect script could never run against the very device it
+    exists to connect (a deadlock)."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect_mount",
+        steps=[_set_property("mount", "CONNECTION", {"CONNECT": "On"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    await script_engine.execute_script("connect_mount", "test-rig", {})
+
+    send_property.assert_awaited_once()
+
+
+async def test_execute_script_connect_script_still_requires_device_known_to_indiserver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exemption only covers "must already be connected" — a device indiserver has
+    never heard of still fails, since no script can connect a driver that isn't running."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect_mount",
+        steps=[
+            _set_property("mount", "CONNECTION", {"CONNECT": "On"}),
+            _wait_for("mount", "CONNECTION", "equals", "Ok"),
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "list_devices", lambda: [])
+
+    with pytest.raises(
+        script_engine.ScriptPreconditionError, match="mount.*not known to indiserver"
+    ):
+        await script_engine.execute_script("connect_mount", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_non_exempt_script_still_requires_connection_for_same_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script that doesn't itself manage CONNECTION for a role still requires the device
+    already be connected, even if some other loaded script happens to manage that role."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect_mount",
+        steps=[
+            _set_property("mount", "CONNECTION", {"CONNECT": "On"}),
+            _wait_for("mount", "CONNECTION", "equals", "Ok"),
+        ],
+    )
+    _script("park", steps=[_set_property("mount", "TELESCOPE_PARK", {"PARK": "On"})])
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    with pytest.raises(script_engine.ScriptPreconditionError, match="mount.*not connected"):
+        await script_engine.execute_script("park", "test-rig", {})
+
+
 async def test_execute_script_wait_for_succeeds_once_condition_is_met(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

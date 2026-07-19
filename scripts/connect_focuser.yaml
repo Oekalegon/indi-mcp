@@ -1,0 +1,20 @@
+id: connect_focuser
+name: Connect the Focuser device
+description: >
+  Connects the rig's Focuser device (CONNECTION.CONNECT=On) and waits for it
+  to finish connecting. A thin, reusable wrapper so composed sequences can
+  `run_script: connect_focuser` instead of repeating the raw set_property/wait_for
+  steps — see docs/Design.md's "Composing scripts" section.
+pausable: false
+steps:
+  - step: set_property
+    role: focuser
+    property: CONNECTION
+    elements: { CONNECT: "On" }
+  - step: wait_for
+    condition:
+      role: focuser
+      property: CONNECTION
+      operator: equals
+      value: Ok
+    timeoutSeconds: 30

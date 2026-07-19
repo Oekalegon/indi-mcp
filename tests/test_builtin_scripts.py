@@ -2,8 +2,9 @@
 
 Unlike `rigs/`/`observatories/`, which are user/hardware-specific and never
 committed, primitive/composed scripts (see `docs/Design.md`'s "Composing
-scripts" section) are meant to ship with the project. `slew` (INDIMCP-8)
-and `park`/`unpark` (INDIMCP-48) ship so far; the remaining primitives,
+scripts" section) are meant to ship with the project. `slew` (INDIMCP-8),
+`park`/`unpark` (INDIMCP-48), and a `connect_*`/`disconnect_*` pair per
+device-bearing role (INDIMCP-52) ship so far; the remaining primitives,
 tracking control, and a composed sequence are tracked separately
 (INDIMCP-41 through INDIMCP-47, INDIMCP-49). This just confirms whatever's
 here loads and validates cleanly, the way any script a client might
@@ -76,6 +77,49 @@ def test_builtin_park_script_sets_park_and_waits() -> None:
     assert wait_step.condition.property == "TELESCOPE_PARK"
     assert wait_step.condition.element is None
     assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_connect_mount_script_sets_connect_and_waits_on_vector_state() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    connect_mount = script_store.get_script("connect_mount")
+
+    assert connect_mount.pausable is False
+    assert connect_mount.parameters == {}
+    assert len(connect_mount.steps) == 2
+    set_step, wait_step = connect_mount.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "mount"
+    assert set_step.property == "CONNECTION"
+    assert set_step.elements == {"CONNECT": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "mount"
+    assert wait_step.condition.property == "CONNECTION"
+    assert wait_step.condition.element is None
+    assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_disconnect_mount_script_sets_disconnect_and_waits_on_connect_element() -> None:
+    """Unlike connect, CONNECTION's vector state resets to Idle (not Ok) once disconnected —
+    confirmed against a real indiserver — so disconnect scripts must wait on the CONNECT
+    element going Off rather than on the vector state."""
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    disconnect_mount = script_store.get_script("disconnect_mount")
+
+    assert disconnect_mount.pausable is False
+    assert disconnect_mount.parameters == {}
+    assert len(disconnect_mount.steps) == 2
+    set_step, wait_step = disconnect_mount.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "mount"
+    assert set_step.property == "CONNECTION"
+    assert set_step.elements == {"DISCONNECT": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "mount"
+    assert wait_step.condition.property == "CONNECTION"
+    assert wait_step.condition.element == "CONNECT"
+    assert wait_step.condition.value == "Off"
 
 
 def test_builtin_unpark_script_sets_unpark_and_waits() -> None:

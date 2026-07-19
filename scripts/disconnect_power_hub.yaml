@@ -1,0 +1,21 @@
+id: disconnect_power_hub
+name: Disconnect the Power Hub device
+description: >
+  Disconnects the rig's Power Hub device (CONNECTION.DISCONNECT=On) and waits for it
+  to finish disconnecting. A thin, reusable wrapper so composed sequences can
+  `run_script: disconnect_power_hub` instead of repeating the raw set_property/wait_for
+  steps — see docs/Design.md's "Composing scripts" section.
+pausable: false
+steps:
+  - step: set_property
+    role: powerHub
+    property: CONNECTION
+    elements: { DISCONNECT: "On" }
+  - step: wait_for
+    condition:
+      role: powerHub
+      property: CONNECTION
+      element: CONNECT
+      operator: equals
+      value: "Off"
+    timeoutSeconds: 30
