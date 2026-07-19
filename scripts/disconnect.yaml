@@ -1,0 +1,35 @@
+id: disconnect
+name: Disconnect a rig component by role
+description: >
+  Disconnects whichever device fills the given `role` in the current rig
+  (CONNECTION.DISCONNECT=On) and waits for it to finish disconnecting. One
+  generic script covers every device-bearing role — `role` is resolved
+  against the run's own parameter value before any step runs, exactly
+  like a literal role — so composed sequences can `run_script: disconnect`
+  with `parameters: { role: mount }` instead of a role-specific wrapper.
+  See docs/Design.md's "Composing scripts" section.
+
+  Waits on the CONNECT element going "Off" rather than the vector state
+  reaching "Ok": verified live against a real indiserver +
+  indi_simulator_telescope that CONNECTION's vector state resets to Idle
+  (not Ok) once disconnected, so waiting on state == "Ok" here would time
+  out forever.
+pausable: false
+parameters:
+  role:
+    type: string
+    required: true
+    description: The rig-component role to disconnect, e.g. "mount" or "camera".
+steps:
+  - step: set_property
+    role: "{{ role }}"
+    property: CONNECTION
+    elements: { DISCONNECT: "On" }
+  - step: wait_for
+    condition:
+      role: "{{ role }}"
+      property: CONNECTION
+      element: CONNECT
+      operator: equals
+      value: "Off"
+    timeoutSeconds: 30

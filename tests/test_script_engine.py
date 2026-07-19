@@ -122,6 +122,114 @@ async def test_execute_script_substitutes_parameter_references(
     )
 
 
+async def test_execute_script_substitutes_a_parameterized_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A step's `role` may itself be a `"{{ paramName }}"` reference, resolved up front
+    (before any step runs) against the run's own concrete parameter values — not just a
+    literal, as a single generic connect/disconnect script needs."""
+    _rig(
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+        rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
+    )
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script("connect", "test-rig", {"role": "mount"})
+
+    send_property.assert_awaited_once_with("Telescope Simulator", "CONNECTION", {"CONNECT": "On"})
+
+
+async def test_execute_script_raises_when_parameterized_role_has_no_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad parameterized role fails before any step runs, same as a bad literal role."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(script_engine.ScriptValidationError, match="camera"):
+        await script_engine.execute_script("connect", "test-rig", {"role": "camera"})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_raises_when_parameterized_role_is_not_a_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "number", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+
+    with pytest.raises(script_engine.ScriptValidationError, match="string"):
+        await script_engine.execute_script("connect", "test-rig", {"role": 1})
+
+
+async def test_execute_script_threads_parameterized_role_through_run_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A callee's parameterized role resolves against the *caller's* current parameter
+    values, walked recursively through the whole run_script call tree up front."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    _script(
+        "connect_mount",
+        steps=[
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script("connect_mount", "test-rig", {})
+
+    send_property.assert_awaited_once_with("Telescope Simulator", "CONNECTION", {"CONNECT": "On"})
+
+
+async def test_execute_script_generic_connect_script_is_exempt_for_its_own_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single generic, role-parameterized connect script is exempt from "must already be
+    connected" for whichever role it's invoked with — same deadlock-avoidance as the
+    per-role connect scripts, now for a single reusable script."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    await script_engine.execute_script("connect", "test-rig", {"role": "mount"})
+
+    send_property.assert_awaited_once()
+
+
 async def test_execute_script_raises_validation_error_for_unknown_script_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
