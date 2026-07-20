@@ -191,9 +191,51 @@ class _Run:
 
 _runs: dict[str, _Run] = {}
 
+_TERMINAL_KINDS = frozenset({"scriptCompleted", "scriptFailed", "scriptCancelled"})
+
+_MAX_FINISHED_RUNS = 200
+"""Cap on how many terminal (completed/failed/cancelled) runs `_runs` retains at once.
+
+Only terminal runs are ever evicted (see `_evict_finished_runs`) — an
+in-flight or paused run is never removed regardless of this cap. Without
+some bound, `_runs` would grow for as long as this service keeps running
+(it's deployed as a long-lived systemd service on a resource-constrained
+Pi, not restarted per session), accumulating every run ever started. This
+is a coarse memory-bound safety net, not a retention policy — there's no
+durability requirement for run status the way there is for the (separate,
+not-yet-built) SQLite-backed event log, so evicting the oldest terminal
+entries once the cap is exceeded is enough.
+"""
+
 
 def _now() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+def _is_terminal(run: _Run) -> bool:
+    """Whether `run` has reached one of the terminal status kinds.
+
+    Checked against `latest_status["kind"]` rather than `run.task.done()`:
+    the latter is still `False` for the remainder of `_run_and_record`'s own
+    execution right up until it returns, i.e. exactly when
+    `_evict_finished_runs` needs to see a just-finished run as eligible.
+    """
+    return run.latest_status["kind"] in _TERMINAL_KINDS
+
+
+def _evict_finished_runs() -> None:
+    """Drop the oldest terminal runs once more than `_MAX_FINISHED_RUNS` are on file.
+
+    `_runs` preserves insertion (start) order (a plain `dict`), so the
+    oldest entries are visited first — evicting oldest-first keeps whichever
+    runs were started most recently pollable the longest, which is what a
+    client that just started (or just reconnected after) a run actually
+    needs `get_script_status` to still have.
+    """
+    finished_ids = [run_id for run_id, run in _runs.items() if _is_terminal(run)]
+    excess = len(finished_ids) - _MAX_FINISHED_RUNS
+    for run_id in finished_ids[:excess]:
+        del _runs[run_id]
 
 
 def _get_run(run_id: str) -> _Run:
@@ -318,6 +360,7 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             "finishedAt": _now(),
             "result": result,
         }
+    _evict_finished_runs()
 
 
 def get_script_status(run_id: str) -> ScriptRunStatus:
@@ -349,11 +392,6 @@ async def cancel_script(run_id: str) -> ScriptRunStatus:
     if run.task is not None:
         await run.task
     return run.latest_status
-
-
-def _is_terminal(run: _Run) -> bool:
-    """Whether `run`'s background task has already finished (successfully or not)."""
-    return run.task is not None and run.task.done()
 
 
 def _pause_rejected(run: _Run, reason: str) -> ScriptRunPauseRejected:

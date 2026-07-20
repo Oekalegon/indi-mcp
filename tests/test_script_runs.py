@@ -328,3 +328,64 @@ async def test_pause_then_resume_a_pausable_script_lets_it_complete(
     await asyncio.wait_for(_await_run(started["runId"]), timeout=2)
     status = script_runs.get_script_status(started["runId"])
     assert status["kind"] == "scriptCompleted"
+
+
+async def test_evicts_the_oldest_finished_runs_once_over_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_runs` must not grow without bound on a long-lived server — once more than
+    `_MAX_FINISHED_RUNS` terminal runs are on file, the oldest ones are dropped."""
+    monkeypatch.setattr(script_runs, "_MAX_FINISHED_RUNS", 2)
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool",
+        steps=[_set_property("camera", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10"})],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+
+    run_ids = []
+    for _ in range(3):
+        started = await script_runs.start_script("cool", "test-rig", {})
+        await _await_run(started["runId"])
+        run_ids.append(started["runId"])
+
+    # The oldest finished run was evicted once the 3rd pushed the count over the cap.
+    with pytest.raises(ValueError, match=run_ids[0]):
+        script_runs.get_script_status(run_ids[0])
+    assert script_runs.get_script_status(run_ids[1])["kind"] == "scriptCompleted"
+    assert script_runs.get_script_status(run_ids[2])["kind"] == "scriptCompleted"
+
+
+async def test_does_not_evict_an_in_flight_run_regardless_of_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-flight (or paused) run is never evicted, even if the cap is already exceeded
+    by other, finished runs — only terminal runs are ever eligible for eviction."""
+    monkeypatch.setattr(script_runs, "_MAX_FINISHED_RUNS", 0)
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
+        rig_id="rig-2",
+    )
+    _script(
+        "cool",
+        steps=[_set_property("camera", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10"})],
+    )
+    _script(
+        "wait_forever",
+        steps=[_wait_for("mount", "CONNECTION", "equals", "On", element="DISCONNECT", timeout=100)],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+
+    still_running = await script_runs.start_script("wait_forever", "rig-2", {})
+    finished = await script_runs.start_script("cool", "test-rig", {})
+    await _await_run(finished["runId"])
+
+    # Even though the (0) cap is already exceeded by the finished run, the still-running
+    # run must still be pollable.
+    assert script_runs.get_script_status(still_running["runId"])["kind"] in (
+        "scriptStarted",
+        "scriptProgress",
+    )
+
+    await script_runs.cancel_script(still_running["runId"])
