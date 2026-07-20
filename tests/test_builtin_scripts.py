@@ -2,8 +2,9 @@
 
 Unlike `rigs/`/`observatories/`, which are user/hardware-specific and never
 committed, primitive/composed scripts (see `docs/Design.md`'s "Composing
-scripts" section) are meant to ship with the project. `slew` (INDIMCP-8)
-and `park`/`unpark` (INDIMCP-48) ship so far; the remaining primitives,
+scripts" section) are meant to ship with the project. `slew` (INDIMCP-8),
+`park`/`unpark` (INDIMCP-48), and a generic `connect`/`disconnect` pair,
+role-parameterized (INDIMCP-52), ship so far; the remaining primitives,
 tracking control, and a composed sequence are tracked separately
 (INDIMCP-41 through INDIMCP-47, INDIMCP-49). This just confirms whatever's
 here loads and validates cleanly, the way any script a client might
@@ -76,6 +77,53 @@ def test_builtin_park_script_sets_park_and_waits() -> None:
     assert wait_step.condition.property == "TELESCOPE_PARK"
     assert wait_step.condition.element is None
     assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_connect_script_is_role_parameterized_and_waits_on_vector_state() -> None:
+    """One generic script covers every device-bearing role: `role` is a required parameter
+    substituted into each step's `role` field, resolved before any step runs."""
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    connect = script_store.get_script("connect")
+
+    assert connect.pausable is False
+    assert set(connect.parameters) == {"role"}
+    assert connect.parameters["role"].required is True
+    assert len(connect.steps) == 2
+    set_step, wait_step = connect.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "{{ role }}"
+    assert set_step.property == "CONNECTION"
+    assert set_step.elements == {"CONNECT": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "{{ role }}"
+    assert wait_step.condition.property == "CONNECTION"
+    assert wait_step.condition.element is None
+    assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_disconnect_script_is_role_parameterized_and_waits_on_connect_element() -> None:
+    """Unlike connect, CONNECTION's vector state resets to Idle (not Ok) once disconnected —
+    confirmed against a real indiserver — so disconnect waits on the CONNECT element going
+    Off rather than on the vector state."""
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    disconnect = script_store.get_script("disconnect")
+
+    assert disconnect.pausable is False
+    assert set(disconnect.parameters) == {"role"}
+    assert disconnect.parameters["role"].required is True
+    assert len(disconnect.steps) == 2
+    set_step, wait_step = disconnect.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "{{ role }}"
+    assert set_step.property == "CONNECTION"
+    assert set_step.elements == {"DISCONNECT": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "{{ role }}"
+    assert wait_step.condition.property == "CONNECTION"
+    assert wait_step.condition.element == "CONNECT"
+    assert wait_step.condition.value == "Off"
 
 
 def test_builtin_unpark_script_sets_unpark_and_waits() -> None:

@@ -122,6 +122,150 @@ async def test_execute_script_substitutes_parameter_references(
     )
 
 
+async def test_execute_script_substitutes_a_parameterized_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A step's `role` may itself be a `"{{ paramName }}"` reference, resolved up front
+    (before any step runs) against the run's own concrete parameter values — not just a
+    literal, as a single generic connect/disconnect script needs."""
+    _rig(
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+        rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
+    )
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script("connect", "test-rig", {"role": "mount"})
+
+    send_property.assert_awaited_once_with("Telescope Simulator", "CONNECTION", {"CONNECT": "On"})
+
+
+async def test_execute_script_raises_when_parameterized_role_has_no_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad parameterized role fails before any step runs, same as a bad literal role."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(script_engine.ScriptValidationError, match="camera"):
+        await script_engine.execute_script("connect", "test-rig", {"role": "camera"})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_raises_when_parameterized_role_is_not_a_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "number", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+
+    with pytest.raises(script_engine.ScriptValidationError, match="string"):
+        await script_engine.execute_script("connect", "test-rig", {"role": 1})
+
+
+async def test_execute_script_threads_parameterized_role_through_run_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A callee's parameterized role resolves against the *caller's* current parameter
+    values, walked recursively through the whole run_script call tree up front."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    _script(
+        "connect_mount",
+        steps=[
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script("connect_mount", "test-rig", {})
+
+    send_property.assert_awaited_once_with("Telescope Simulator", "CONNECTION", {"CONNECT": "On"})
+
+
+async def test_execute_script_calling_same_sub_script_with_different_roles_resolves_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Role-usage collection memoizes by (script id, resolved params), not script id alone —
+    two run_script calls to the same generic connect script with *different* roles must
+    each still resolve and execute correctly, not have the second call's role usage dropped
+    as if it were a repeat of the first."""
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    _script(
+        "connect_all",
+        steps=[
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+            {"step": "run_script", "script": "connect", "parameters": {"role": "camera"}},
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script("connect_all", "test-rig", {})
+
+    assert send_property.await_args_list == [
+        call("Telescope Simulator", "CONNECTION", {"CONNECT": "On"}),
+        call("CCD Simulator", "CONNECTION", {"CONNECT": "On"}),
+        call("Telescope Simulator", "CONNECTION", {"CONNECT": "On"}),
+    ]
+
+
+async def test_execute_script_generic_connect_script_is_exempt_for_its_own_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single generic, role-parameterized connect script is exempt from "must already be
+    connected" for whichever role it's invoked with — same deadlock-avoidance as the
+    per-role connect scripts, now for a single reusable script."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    await script_engine.execute_script("connect", "test-rig", {"role": "mount"})
+
+    send_property.assert_awaited_once()
+
+
 async def test_execute_script_raises_validation_error_for_unknown_script_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -333,6 +477,84 @@ async def test_execute_script_checks_every_distinct_device_the_run_needs(
         await script_engine.execute_script("sequence", "test-rig", {})
 
     send_property.assert_not_awaited()
+
+
+async def test_execute_script_connect_script_proceeds_when_device_is_not_yet_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script whose own steps set CONNECTION for a role is exempt from "must already be
+    connected" — otherwise a connect script could never run against the very device it
+    exists to connect (a deadlock)."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect_mount",
+        steps=[_set_property("mount", "CONNECTION", {"CONNECT": "On"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    await script_engine.execute_script("connect_mount", "test-rig", {})
+
+    send_property.assert_awaited_once()
+
+
+async def test_execute_script_connect_script_still_requires_device_known_to_indiserver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exemption only covers "must already be connected" — a device indiserver has
+    never heard of still fails, since no script can connect a driver that isn't running."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect_mount",
+        steps=[
+            _set_property("mount", "CONNECTION", {"CONNECT": "On"}),
+            _wait_for("mount", "CONNECTION", "equals", "Ok"),
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "list_devices", lambda: [])
+
+    with pytest.raises(
+        script_engine.ScriptPreconditionError, match="mount.*not known to indiserver"
+    ):
+        await script_engine.execute_script("connect_mount", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_non_exempt_script_still_requires_connection_for_same_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script that doesn't itself manage CONNECTION for a role still requires the device
+    already be connected, even if some other loaded script happens to manage that role."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect_mount",
+        steps=[
+            _set_property("mount", "CONNECTION", {"CONNECT": "On"}),
+            _wait_for("mount", "CONNECTION", "equals", "Ok"),
+        ],
+    )
+    _script("park", steps=[_set_property("mount", "TELESCOPE_PARK", {"PARK": "On"})])
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    with pytest.raises(script_engine.ScriptPreconditionError, match="mount.*not connected"):
+        await script_engine.execute_script("park", "test-rig", {})
 
 
 async def test_execute_script_wait_for_succeeds_once_condition_is_met(

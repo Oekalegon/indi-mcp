@@ -171,16 +171,22 @@ async def execute_script(
     to a device up front — a role with no matching component, a matching
     component with no `device`, or a role matching more than one
     device-bearing component all raise `ScriptValidationError` before any
-    step runs (see `docs/ScriptSchema.md#resolving-roles-to-devices`). Also
-    warns (logs) about any resolved device not currently connected to
-    `indiserver` at all, mirroring `check_rig`'s "warn rather than fail"
-    behavior for the *whole rig* (a rig might intentionally be used
-    without one of its components), and separately, strictly, checks that
-    every device this specific run actually needs has `CONNECTION.CONNECT
-    = On` — raising `ScriptPreconditionError` if not (see
-    `_check_devices_connected`), so a run against a device that's present
-    but not yet connected fails clearly up front rather than with a raw,
-    confusing error partway through a step.
+    step runs (see `docs/ScriptSchema.md#resolving-roles-to-devices`). A
+    step's `role` may itself be a `"{{ paramName }}"` parameter reference,
+    not just a literal — resolution threads each script invocation's own
+    concrete parameter values (this run's `parameters`, and, for a
+    `run_script` call, its arguments substituted against the *caller's*
+    parameters) through the whole call tree before any step runs, so a bad
+    parameterized role fails just as fast as a bad literal one (see
+    `_collect_role_usage`). Also warns (logs) about any resolved device not
+    currently connected to `indiserver` at all, mirroring `check_rig`'s
+    "warn rather than fail" behavior for the *whole rig* (a rig might
+    intentionally be used without one of its components), and separately,
+    strictly, checks that every device this specific run actually needs has
+    `CONNECTION.CONNECT = On` — raising `ScriptPreconditionError` if not
+    (see `_check_devices_connected`), so a run against a device that's
+    present but not yet connected fails clearly up front rather than with a
+    raw, confusing error partway through a step.
 
     `cancel_event`/`pause_event` are checked between steps throughout the
     whole run, including inside nested `run_script` calls (cancellation
@@ -191,12 +197,12 @@ async def execute_script(
     script = _get_script(script_id)
     rig = _get_rig(rig_id)
     scripts = _collect_reachable_scripts(script)
-    roles = _collect_roles(scripts)
-    role_to_device = _resolve_role_to_device(rig, roles)
+    resolved_params = _resolve_parameters(script, parameters)
+    usage = _collect_role_usage(script, resolved_params, scripts)
+    role_to_device = _resolve_role_to_device(rig, usage.roles)
     known_devices = set(indi_messaging.list_devices())
     _warn_on_missing_devices(rig_id, known_devices)
-    _check_devices_connected(role_to_device, known_devices)
-    resolved_params = _resolve_parameters(script, parameters)
+    _check_devices_connected(role_to_device, known_devices, usage.connection_managed_roles)
 
     ctx = _ExecutionContext(
         role_to_device=role_to_device,
@@ -261,19 +267,6 @@ def _collect_reachable_scripts(
     return collected
 
 
-def _collect_roles(scripts: dict[str, Script]) -> set[str]:
-    """Every role referenced anywhere across `scripts` — the run's full reachable set.
-
-    `scripts` (see `_collect_reachable_scripts`) already includes every
-    script transitively reachable via `run_script`, so no further
-    recursion is needed here.
-    """
-    roles: set[str] = set()
-    for script in scripts.values():
-        roles |= script_store.referenced_roles(script)
-    return roles
-
-
 def _run_script_calls(steps: list[Step]) -> list[RunScriptStep]:
     calls: list[RunScriptStep] = []
     for step in steps:
@@ -285,6 +278,149 @@ def _run_script_calls(steps: list[Step]) -> list[RunScriptStep]:
             calls.extend(_run_script_calls(step.then))
             calls.extend(_run_script_calls(step.else_))
     return calls
+
+
+def _iter_all_steps(steps: list[Step]) -> list[Step]:
+    """Flatten `steps` and everything nested inside `repeat`/`if` bodies (not `run_script`)."""
+    flattened: list[Step] = []
+    for step in steps:
+        flattened.append(step)
+        if isinstance(step, RepeatStep):
+            flattened.extend(_iter_all_steps(step.steps))
+        elif isinstance(step, IfStep):
+            flattened.extend(_iter_all_steps(step.then))
+            flattened.extend(_iter_all_steps(step.else_))
+    return flattened
+
+
+def _substituted_role(role: str, params: dict[str, Any]) -> str:
+    """Resolve a step's `role` field against `params`, same as any other substitutable value.
+
+    A `role` may be a literal (`"mount"`) or a `"{{ paramName }}"`
+    reference — `script_store` already validates that any such reference
+    names a parameter the script itself declares (it walks *every* string
+    field, not just the ones the engine happens to substitute today, see
+    `script_store._iter_string_fields`), so `params[name]` below can't
+    `KeyError` for a script that loaded successfully. Raises
+    `ScriptValidationError` if the resolved value isn't a string — a role
+    parameter declared with a non-`"string"` type, or one whose supplied
+    value isn't a string, can't name a rig-component role.
+    """
+    resolved = _substitute(role, params)
+    if not isinstance(resolved, str):
+        raise ScriptValidationError(
+            f"role {role!r} resolved to {resolved!r}, which isn't a string; "
+            "a role parameter must be declared type: string"
+        )
+    return resolved
+
+
+def _step_role(step: Step, params: dict[str, Any]) -> str | None:
+    """The concrete role `step` targets, substituted against `params`; `None` if it has none."""
+    if isinstance(step, SetPropertyStep | CaptureFrameStep | SlewStep):
+        return _substituted_role(step.role, params)
+    if isinstance(step, WaitForStep | IfStep):
+        return _substituted_role(step.condition.role, params)
+    if isinstance(step, RepeatStep) and step.until is not None:
+        return _substituted_role(step.until.role, params)
+    return None
+
+
+@dataclass
+class _RoleUsage:
+    """The concrete roles a run needs, and which of those it manages `CONNECTION` for itself.
+
+    `connection_managed_roles` is scoped to the *run as a whole*, not to any
+    particular step or invocation within it: if some step anywhere in the
+    call tree sets/checks `CONNECTION` for role X, X is exempt from
+    `_check_devices_connected`'s "must already be connected" requirement
+    for every use of X in this run, including uses that happen to precede
+    the connecting step, or that live in an entirely different branch of
+    the call tree. This is deliberately coarse (see `_collect_role_usage`)
+    — a script that both connects a role *and* uses that role's device for
+    something else in the same run won't get a pre-flight guard for the
+    latter, and could hit a raw error mid-step instead of the clean
+    `ScriptPreconditionError` `_check_devices_connected` otherwise
+    guarantees. Not reachable by any script shipped today (`connect`/
+    `disconnect` are each a single self-contained set_property/wait_for
+    pair with nothing else in the run to protect), but a future composed
+    sequence (INDIMCP-49) that mixes a `connect` call with other steps
+    against the same role should not assume this check has its back —
+    tracked as INDIMCP-53 to revisit once composed scripts exist.
+    """
+
+    roles: set[str] = field(default_factory=set)
+    connection_managed_roles: set[str] = field(default_factory=set)
+
+
+def _params_cache_key(params: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    """A hashable key for a resolved-parameter dict — every `Parameter.type` is a scalar
+    (string/integer/number/boolean), so every value is hashable and this can't raise."""
+    return tuple(sorted(params.items()))
+
+
+def _collect_role_usage(
+    script: Script,
+    params: dict[str, Any],
+    scripts: dict[str, Script],
+    usage: _RoleUsage | None = None,
+    _visited: set[tuple[str, tuple[tuple[str, Any], ...]]] | None = None,
+) -> _RoleUsage:
+    """Walk the whole call tree rooted at `script` (run with `params`), resolving every role.
+
+    Unlike a purely structural walk (the engine's earlier approach), this
+    threads each invocation's own concrete parameter values through
+    `run_script` calls — a callee's arguments are substituted against the
+    *caller's* current `params`, then validated/defaulted against the
+    callee's own declared parameters (`_resolve_parameters`, the same
+    rules already applied to the top-level call in `execute_script`) —
+    so a role written as `"{{ paramName }}"` resolves to the real
+    rig-component role this specific run will use, and a bad one still
+    fails before any step runs, matching the guarantee for literal roles.
+
+    `connection_managed_roles` mirrors the previous `_roles_managing_own_connection`:
+    a role some step in the tree itself sets/checks `CONNECTION` for is
+    exempted, in `_check_devices_connected`, from the "must already be
+    connected" requirement — otherwise a `connect_*`/`disconnect_*` script
+    could never run against the very device it exists to connect.
+
+    `_visited` memoizes by `(script.id, resolved params)`, not just
+    `script.id` — walking a purely structural call tree could dedupe by id
+    alone (`_collect_reachable_scripts` does), but here the same script
+    called twice with *different* parameters is a different role-usage
+    result each time, so only an exact (script, params) repeat is safe to
+    skip. This still bounds the walk for a script that calls the same
+    sub-script from several call sites with the same arguments (e.g. a
+    composed sequence connecting several roles by repeatedly calling
+    `connect` — each distinct role is its own cache entry, but a role
+    connected more than once in one run is only walked once).
+    """
+    if usage is None:
+        usage = _RoleUsage()
+    if _visited is None:
+        _visited = set()
+    cache_key = (script.id, _params_cache_key(params))
+    if cache_key in _visited:
+        return usage
+    _visited.add(cache_key)
+
+    for step in _iter_all_steps(script.steps):
+        role = _step_role(step, params)
+        if role is None:
+            continue
+        usage.roles.add(role)
+        sets_connection = isinstance(step, SetPropertyStep) and step.property == "CONNECTION"
+        waits_on_connection = (
+            isinstance(step, WaitForStep) and step.condition.property == "CONNECTION"
+        )
+        if sets_connection or waits_on_connection:
+            usage.connection_managed_roles.add(role)
+    for call in _run_script_calls(script.steps):
+        callee = scripts[call.script]
+        call_args = {name: _substitute(value, params) for name, value in call.parameters.items()}
+        callee_params = _resolve_parameters(callee, call_args)
+        _collect_role_usage(callee, callee_params, scripts, usage, _visited)
+    return usage
 
 
 def _count_total_steps(script: Script, scripts: dict[str, Script]) -> int | None:
@@ -392,7 +528,9 @@ def _warn_on_missing_devices(rig_id: str, known_devices: set[str]) -> None:
         )
 
 
-def _check_devices_connected(role_to_device: dict[str, str], known_devices: set[str]) -> None:
+def _check_devices_connected(
+    role_to_device: dict[str, str], known_devices: set[str], exempt_roles: set[str]
+) -> None:
     """Raise `ScriptPreconditionError` for any resolved device that isn't confirmed connected.
 
     Checks every distinct (role, device) this run actually needs (not the
@@ -432,6 +570,18 @@ def _check_devices_connected(role_to_device: dict[str, str], known_devices: set[
     way the script never asked for, the same reasoning `slew` doesn't
     auto-unpark. Left to the script (an explicit `connect` step, see
     INDIMCP-52) or the operator.
+
+    `exempt_roles` (see `_collect_role_usage`'s `connection_managed_roles`) skips the "must
+    already be `CONNECT = On`" half of this check for roles whose own run
+    sets/checks `CONNECTION` — otherwise a `connect_*`/`disconnect_*`
+    script could never run against a not-yet-connected device, since it
+    would require the very state it exists to create. This exemption is
+    scoped to the whole run, not to "after the connecting step" — see
+    `_RoleUsage.connection_managed_roles`'s docstring for what that means
+    for a future composed script (tracked as INDIMCP-53). The "must be
+    known to indiserver at all" half stays unconditional for every device
+    regardless of exemption: no script can connect a device whose driver
+    was never started.
     """
     checked: set[str] = set()
     for role, device in role_to_device.items():
@@ -443,6 +593,12 @@ def _check_devices_connected(role_to_device: dict[str, str], known_devices: set[
                 f"device {device!r} (role {role!r}) is not known to indiserver "
                 "(not plugged in, or its driver isn't running)"
             )
+
+    checked = set()
+    for role, device in role_to_device.items():
+        if role in exempt_roles or device in checked:
+            continue
+        checked.add(device)
         values = indi_messaging.get_property_values(device, "CONNECTION")
         if values is None or values.get("CONNECT") != "On":
             raise ScriptPreconditionError(
@@ -571,7 +727,7 @@ async def _execute_set_property(
     script_id: str,
     pausable: bool,
 ) -> None:
-    device = _resolve_device(step.role, ctx)
+    device = _resolve_device(_substituted_role(step.role, params), ctx)
     elements = {name: str(_substitute(value, params)) for name, value in step.elements.items()}
     await indi_messaging.send_property(device, step.property, elements)
 
@@ -702,7 +858,7 @@ async def _execute_capture_frame_stub(
     through the `Busy`->`Ok` transition, draining the BLOB, and writing
     frame + SQLite metadata — is INDIMCP-10/11, not built yet.
     """
-    device = _resolve_device(step.role, ctx)
+    device = _resolve_device(_substituted_role(step.role, params), ctx)
     exposure = _substitute(step.exposureSeconds, params)
     logger.info(
         "capture_frame stub: device=%s exposureSeconds=%s frameType=%s "
@@ -747,7 +903,7 @@ async def _execute_slew(
     watchdog that aborts motion if the mount is ever observed below
     horizon, independent of how it got there).
     """
-    device = _resolve_device(step.role, ctx)
+    device = _resolve_device(_substituted_role(step.role, params), ctx)
     _check_not_parked(device)
     if step.target.raDec is None:
         raise ScriptExecutionError(
@@ -846,7 +1002,7 @@ schema without adding its handler here.
 def _evaluate_condition(
     condition: Condition, ctx: _ExecutionContext, params: dict[str, Any]
 ) -> bool:
-    device = _resolve_device(condition.role, ctx)
+    device = _resolve_device(_substituted_role(condition.role, params), ctx)
     target = _substitute(condition.value, params)
     if condition.element is None:
         actual = indi_messaging.get_property_state(device, condition.property)

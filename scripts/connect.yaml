@@ -1,0 +1,28 @@
+id: connect
+name: Connect a rig component by role
+description: >
+  Connects whichever device fills the given `role` in the current rig
+  (CONNECTION.CONNECT=On) and waits for it to finish connecting. One
+  generic script covers every device-bearing role — `role` is resolved
+  against the run's own parameter value before any step runs, exactly
+  like a literal role — so composed sequences can `run_script: connect`
+  with `parameters: { role: mount }` instead of a role-specific wrapper.
+  See docs/Design.md's "Composing scripts" section.
+pausable: false
+parameters:
+  role:
+    type: string
+    required: true
+    description: The rig-component role to connect, e.g. "mount" or "camera".
+steps:
+  - step: set_property
+    role: "{{ role }}"
+    property: CONNECTION
+    elements: { CONNECT: "On" }
+  - step: wait_for
+    condition:
+      role: "{{ role }}"
+      property: CONNECTION
+      operator: equals
+      value: Ok
+    timeoutSeconds: 30

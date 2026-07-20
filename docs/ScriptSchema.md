@@ -263,6 +263,16 @@ A nested `run_script` step (see "Script composition" below) does **not** repeat 
 script in a single run, top-level and nested, resolves roles against the one rig selected when
 the run started.
 
+**A `role` field is a normal substitutable field, not a special case.** Like any other step
+field, it may be a literal (`role: mount`) or a `"{{ paramName }}"` reference to one of the
+script's own declared `parameters` (see "Parameter references" above) — for example, a single
+generic script can take `role` itself as a `string` parameter instead of shipping one copy per
+role. A parameterized role is resolved against the caller's actual argument for every
+invocation in the run (including through nested `run_script` calls, each resolved against its
+own arguments) up front, before any step runs, exactly like a literal role — a role parameter
+that resolves to no matching component, an ambiguous component, or a non-`string` value is
+still a validation error at run start, not a per-step runtime failure.
+
 ## Script composition
 
 Reusing small primitive scripts (`cool_camera`, `slew`, `plate_solve`, `focus`, `capture_frame`,
