@@ -49,6 +49,7 @@ __all__ = [
     "list_scripts",
     "load_scripts",
     "referenced_roles",
+    "save_script",
 ]
 
 SCRIPTS_DIR_ENV = "INDI_MCP_SCRIPTS_DIR"
@@ -345,22 +346,35 @@ def load_scripts(directory: Path | None = None) -> list[Script]:
     """Load every `*.yaml` script from `directory`, then validate the library as a whole.
 
     Defaults to `$INDI_MCP_SCRIPTS_DIR`, falling back to `./scripts`. This is
-    a two-pass load: (1) parse and pydantic-validate each file independently,
-    exactly like `load_rigs` — a file that fails to parse or match the
-    per-script schema is logged and skipped; (2) once every valid script's
-    `id` is known, validate `run_script` references, argument schemas, and
-    check the whole library for call cycles. A script that fails a
-    library-level check is also dropped (logged) — and since dropping one
-    script can make another script's `run_script` reference dangle, this
-    repeats until no more scripts are dropped.
+    a two-pass load: (1) parse and pydantic-validate each file independently
+    (`_parse_script_files`), exactly like `load_rigs` — a file that fails to
+    parse or match the per-script schema is logged and skipped; (2) once
+    every valid script's `id` is known, validate `run_script` references,
+    argument schemas, and check the whole library for call cycles. A script
+    that fails a library-level check is also dropped (logged) — and since
+    dropping one script can make another script's `run_script` reference
+    dangle, this repeats until no more scripts are dropped.
     """
     global _scripts
     directory = directory if directory is not None else _scripts_dir()
-    scripts: dict[str, Script] = {}
     if not directory.is_dir():
         logger.info("Scripts directory does not exist, no scripts loaded: %s", directory)
-        _scripts = scripts
+        _scripts = {}
         return []
+    scripts = _drop_scripts_failing_library_checks(_parse_script_files(directory))
+    _scripts = scripts
+    logger.info("Loaded %d script(s) from %s", len(scripts), directory)
+    return list(scripts.values())
+
+
+def _parse_script_files(directory: Path) -> dict[str, Script]:
+    """Parse and per-script validate every `*.yaml` file in `directory`.
+
+    A file that fails to parse or match the per-script schema is logged and
+    skipped, same as `load_rigs`. Doesn't check anything library-wide (
+    `run_script` references, cycles) — see `_drop_scripts_failing_library_checks`.
+    """
+    scripts: dict[str, Script] = {}
     for path in sorted(directory.glob("*.yaml")):
         if not path.is_file():
             logger.warning("Skipping non-file script path %s", path)
@@ -377,11 +391,7 @@ def load_scripts(directory: Path | None = None) -> list[Script]:
             )
             continue
         scripts[script.id] = script
-
-    scripts = _drop_scripts_failing_library_checks(scripts)
-    _scripts = scripts
-    logger.info("Loaded %d script(s) from %s", len(scripts), directory)
-    return list(scripts.values())
+    return scripts
 
 
 def _drop_scripts_failing_library_checks(scripts: dict[str, Script]) -> dict[str, Script]:
@@ -517,3 +527,81 @@ def get_script(script_id: str) -> Script:
     if script is None:
         raise ValueError(f"Unknown script: {script_id!r}")
     return script
+
+
+def save_script(
+    script: Script, *, overwrite: bool = False, directory: Path | None = None
+) -> Script:
+    """Write `script` to `<directory>/<script.id>.yaml` and reload the library.
+
+    `script` is already schema-validated (pydantic validation happens when
+    it's constructed, whether hand-authored or uploaded by a client,
+    INDIMCP-9), but unlike a rig or observatory a script's validity also
+    depends on the rest of the library — a `run_script` call into or out of
+    it must resolve, argument types must line up, and no call cycle may
+    result. Those library-level checks (`_check_library_accepts`) run
+    against the currently loaded scripts *before* anything is written, so a
+    bad upload is rejected with a specific reason rather than being written
+    and then silently dropped (logged only) the way `load_scripts` handles
+    an invalid file at startup. Refuses to replace an existing
+    `<script.id>.yaml` unless `overwrite` is set, since reusing an `id`
+    could otherwise silently destroy a previously saved script. The
+    existence check and the write happen as one atomic file-open
+    (exclusive-create unless `overwrite`), so two concurrent saves of the
+    same new `id` can't both slip past the check.
+    """
+    if not script.id or script.id in (".", "..") or "/" in script.id or "\\" in script.id:
+        raise ValueError(f"Invalid script id for a filename: {script.id!r}")
+    directory = directory if directory is not None else _scripts_dir()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except NotADirectoryError as exc:
+        raise ValueError(f"Cannot create scripts directory {directory}: {exc}") from exc
+    path = directory / f"{script.id}.yaml"
+    if path.is_dir():
+        raise ValueError(f"Cannot save script {script.id!r}: {path} is a directory, not a file")
+
+    library = _drop_scripts_failing_library_checks(_parse_script_files(directory))
+    library.pop(script.id, None)
+    library[script.id] = script
+    _check_library_accepts(script, library)
+
+    content = yaml.safe_dump(script.model_dump(exclude_none=True, by_alias=True), sort_keys=False)
+    try:
+        with path.open("w" if overwrite else "x", encoding="utf-8") as f:
+            f.write(content)
+    except FileExistsError as exc:
+        raise ValueError(
+            f"A script file already exists for id {script.id!r} ({path}); "
+            "pass overwrite=True to replace it."
+        ) from exc
+    logger.info("Saved script %r to %s", script.id, path)
+    load_scripts(directory)
+    return get_script(script.id)
+
+
+def _check_library_accepts(script: Script, library: dict[str, Script]) -> None:
+    """Raise `ValueError` if saving `script` (already present in `library` by id) is unsafe.
+
+    Checks `script`'s own `run_script` calls, every other script's calls
+    *into* `script` (its parameter schema may have just changed under
+    them), and whether `script` closes a `run_script` call cycle. `library`
+    is expected to already be library-valid apart from `script` itself
+    (see `save_script`), so any failure found here is attributable to
+    `script`.
+    """
+    reason = _first_library_check_failure(script, library)
+    if reason is not None:
+        raise ValueError(f"Cannot save script {script.id!r}: {reason}")
+    for other_id, other in library.items():
+        if other_id == script.id:
+            continue
+        if not any(call.script == script.id for call in _run_script_steps(other.steps)):
+            continue
+        reason = _first_library_check_failure(other, library)
+        if reason is not None:
+            raise ValueError(
+                f"Cannot save script {script.id!r}: breaks caller {other_id!r} ({reason})"
+            )
+    if script.id in _find_cyclic_scripts(library):
+        raise ValueError(f"Cannot save script {script.id!r}: part of a run_script call cycle")
