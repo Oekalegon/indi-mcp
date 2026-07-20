@@ -150,6 +150,12 @@ def save_frame(
     `run_id`'s own `uuid4` generation in `script_runs.start_script`.
     `run_id` is `None` for a frame captured ad hoc (outside any script
     run), per Design.md's schema sketch.
+
+    If the metadata insert fails after the file has already been written
+    (a full SD card, a locked/corrupt database file), the just-written
+    file is deleted before the exception propagates — otherwise it would
+    be left on disk with no `frames` row ever pointing to it: invisible to
+    `list_frames`/`get_frame_metadata` and never cleaned up.
     """
     frame_id = str(uuid.uuid4())
     resolved_dir = _frames_dir(directory)
@@ -157,14 +163,18 @@ def save_frame(
     path = resolved_dir / f"{frame_id}{extension}"
     path.write_bytes(data)
     captured_at = _now()
-    with db.connect(db_path) as conn:
-        _ensure_schema(conn)
-        conn.execute(
-            "INSERT INTO frames (frame_id, run_id, device, path, size_bytes, captured_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (frame_id, run_id, device, str(path), len(data), captured_at),
-        )
-        conn.commit()
+    try:
+        with db.connect(db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                "INSERT INTO frames (frame_id, run_id, device, path, size_bytes, captured_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (frame_id, run_id, device, str(path), len(data), captured_at),
+            )
+            conn.commit()
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
     logger.info("Saved frame %s (%d bytes) from %s to %s", frame_id, len(data), device, path)
     return {
         "frameId": frame_id,

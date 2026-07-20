@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,26 @@ def test_save_frame_never_collides_two_frames_from_the_same_device(
     assert first["frameId"] != second["frameId"]
     assert (frames_dir / f"{first['frameId']}.fits").read_bytes() == b"one"
     assert (frames_dir / f"{second['frameId']}.fits").read_bytes() == b"two"
+
+
+def test_save_frame_deletes_the_written_file_if_the_metadata_insert_fails(
+    store_paths: tuple[Path, Path], monkeypatch
+) -> None:
+    frames_dir, db_path = store_paths
+    fixed_id = "duplicate-frame-id"
+    monkeypatch.setattr(frame_store.uuid, "uuid4", lambda: fixed_id)
+    frame_store.save_frame(
+        b"one", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    duplicate_path = frames_dir / f"{fixed_id}.fits"
+    assert duplicate_path.exists()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        frame_store.save_frame(
+            b"two", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+        )
+
+    assert not duplicate_path.exists()
 
 
 def test_get_frame_metadata_returns_the_saved_row(store_paths: tuple[Path, Path]) -> None:
