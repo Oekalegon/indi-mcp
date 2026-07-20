@@ -328,7 +328,26 @@ def _step_role(step: Step, params: dict[str, Any]) -> str | None:
 
 @dataclass
 class _RoleUsage:
-    """The concrete roles a run needs, and which of those it manages `CONNECTION` for itself."""
+    """The concrete roles a run needs, and which of those it manages `CONNECTION` for itself.
+
+    `connection_managed_roles` is scoped to the *run as a whole*, not to any
+    particular step or invocation within it: if some step anywhere in the
+    call tree sets/checks `CONNECTION` for role X, X is exempt from
+    `_check_devices_connected`'s "must already be connected" requirement
+    for every use of X in this run, including uses that happen to precede
+    the connecting step, or that live in an entirely different branch of
+    the call tree. This is deliberately coarse (see `_collect_role_usage`)
+    — a script that both connects a role *and* uses that role's device for
+    something else in the same run won't get a pre-flight guard for the
+    latter, and could hit a raw error mid-step instead of the clean
+    `ScriptPreconditionError` `_check_devices_connected` otherwise
+    guarantees. Not reachable by any script shipped today (`connect`/
+    `disconnect` are each a single self-contained set_property/wait_for
+    pair with nothing else in the run to protect), but a future composed
+    sequence (INDIMCP-49) that mixes a `connect` call with other steps
+    against the same role should not assume this check has its back —
+    tracked as INDIMCP-53 to revisit once composed scripts exist.
+    """
 
     roles: set[str] = field(default_factory=set)
     connection_managed_roles: set[str] = field(default_factory=set)
@@ -531,8 +550,11 @@ def _check_devices_connected(
     already be `CONNECT = On`" half of this check for roles whose own run
     sets/checks `CONNECTION` — otherwise a `connect_*`/`disconnect_*`
     script could never run against a not-yet-connected device, since it
-    would require the very state it exists to create. The "must be known
-    to indiserver at all" half stays unconditional for every device
+    would require the very state it exists to create. This exemption is
+    scoped to the whole run, not to "after the connecting step" — see
+    `_RoleUsage.connection_managed_roles`'s docstring for what that means
+    for a future composed script (tracked as INDIMCP-53). The "must be
+    known to indiserver at all" half stays unconditional for every device
     regardless of exemption: no script can connect a device whose driver
     was never started.
     """
