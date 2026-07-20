@@ -27,6 +27,7 @@ def _default_get_property_values(device: str, name: str) -> dict[str, str] | Non
 def _mock_indi_messaging_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(indi_messaging, "list_devices", lambda: list(_known_devices))
     monkeypatch.setattr(indi_messaging, "get_property_values", _default_get_property_values)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Idle")
 
 
 def _rig(*components: rig_store.Component, rig_id: str = "test-rig") -> rig_store.Rig:
