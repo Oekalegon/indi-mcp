@@ -519,13 +519,18 @@ def test_save_script_roundtrips_through_yaml_including_if_else_alias(tmp_path: P
         name="Has an if/else",
         pausable=False,
         steps=[
-            script_store.IfStep(
-                step="if",
-                condition=script_store.Condition(
-                    role="camera", property="CONNECTION", operator="equals", value="Ok"
-                ),
-                then=[],
-                else_=[],
+            script_store.IfStep.model_validate(
+                {
+                    "step": "if",
+                    "condition": {
+                        "role": "camera",
+                        "property": "CONNECTION",
+                        "operator": "equals",
+                        "value": "Ok",
+                    },
+                    "then": [],
+                    "else": [],
+                }
             )
         ],
     )
@@ -547,9 +552,7 @@ def test_save_script_rejects_overwriting_an_existing_file_by_default(tmp_path: P
 
 def test_save_script_allows_overwrite_when_explicitly_requested(tmp_path: Path) -> None:
     script_store.save_script(_minimal_script(), directory=tmp_path)
-    updated = script_store.Script(
-        id="minimal", name="Renamed script", pausable=False, steps=[]
-    )
+    updated = script_store.Script(id="minimal", name="Renamed script", pausable=False, steps=[])
 
     saved = script_store.save_script(updated, overwrite=True, directory=tmp_path)
 
@@ -566,9 +569,7 @@ def test_save_script_creates_the_scripts_directory_if_missing(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("bad_id", ["", ".", "..", "a/b", "a\\b", "../escape"])
-def test_save_script_rejects_ids_that_are_not_safe_filenames(
-    tmp_path: Path, bad_id: str
-) -> None:
+def test_save_script_rejects_ids_that_are_not_safe_filenames(tmp_path: Path, bad_id: str) -> None:
     with pytest.raises(ValueError, match="Invalid script id"):
         script_store.save_script(_minimal_script(bad_id), directory=tmp_path)
 
@@ -684,9 +685,12 @@ steps: []
     with pytest.raises(ValueError, match="breaks caller 'caller'"):
         script_store.save_script(incompatible_callee, overwrite=True, directory=tmp_path)
 
-    assert script_store.Script.model_validate(
-        yaml.safe_load((tmp_path / "callee.yaml").read_text())
-    ).parameters["value"].type == "number"
+    assert (
+        script_store.Script.model_validate(yaml.safe_load((tmp_path / "callee.yaml").read_text()))
+        .parameters["value"]
+        .type
+        == "number"
+    )
 
 
 def test_load_scripts_merges_builtin_and_user_directories(tmp_path: Path) -> None:
@@ -755,9 +759,7 @@ def test_save_script_accepts_a_run_script_call_into_a_builtin_script(tmp_path: P
         pausable=False,
         steps=[script_store.RunScriptStep(step="run_script", script="focus")],
     )
-    saved = script_store.save_script(
-        script, directory=user_dir, builtin_directory=builtin_dir
-    )
+    saved = script_store.save_script(script, directory=user_dir, builtin_directory=builtin_dir)
 
     assert saved == script_store.get_script("caller")
     assert script_store.get_script("focus").id == "focus"

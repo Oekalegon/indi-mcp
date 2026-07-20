@@ -356,9 +356,7 @@ def _user_scripts_dir() -> Path:
     return Path(os.environ.get(USER_SCRIPTS_DIR_ENV, _DEFAULT_USER_SCRIPTS_DIR))
 
 
-def load_scripts(
-    directory: Path | None = None, user_directory: Path | None = None
-) -> list[Script]:
+def load_scripts(directory: Path | None = None, user_directory: Path | None = None) -> list[Script]:
     """Load built-in scripts from `directory` and uploaded scripts from `user_directory`.
 
     Defaults to `$INDI_MCP_SCRIPTS_DIR` (falling back to `./scripts`) for the
