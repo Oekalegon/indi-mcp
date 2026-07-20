@@ -716,7 +716,7 @@ async def test_execute_script_wait_for_fails_fast_on_alert_vector_state(
     monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
     monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
 
-    with pytest.raises(script_engine.ScriptExecutionError, match="reported Alert"):
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
         await asyncio.wait_for(script_engine.execute_script("wait", "test-rig", {}), timeout=1.0)
 
 
@@ -756,7 +756,7 @@ async def test_execute_script_wait_for_fails_fast_on_alert_with_an_element_condi
     monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
     monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
 
-    with pytest.raises(script_engine.ScriptExecutionError, match="reported Alert"):
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
         await asyncio.wait_for(script_engine.execute_script("wait", "test-rig", {}), timeout=1.0)
 
 

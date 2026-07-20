@@ -822,12 +822,9 @@ async def _execute_wait_for(
     and the property has faulted, not on every transient non-matching
     state (`Busy` while genuinely still in progress is fine).
 
-    Fetches the vector state exactly once per poll: when `condition.element`
-    is unset the condition is itself a vector-state comparison (mirroring
-    `_evaluate_condition`'s own element-less branch, reusing the same fetch
-    here rather than calling it again) — only an element-based condition
-    (which never touches vector state) needs a second, dedicated fetch for
-    the Alert check.
+    `_evaluate_condition` fetches the vector state as part of evaluating the
+    condition either way, so this reuses that same result for the Alert
+    check rather than fetching it again.
     """
     condition = step.condition
     timeout = float(_substitute(step.timeoutSeconds, params))
@@ -835,18 +832,12 @@ async def _execute_wait_for(
     device = _resolve_device(_substituted_role(condition.role, params), ctx)
     while True:
         await _check_cancelled(ctx)
-        vector_state = indi_messaging.get_property_state(device, condition.property)
-        matched = (
-            _compare(vector_state, condition.operator, _substitute(condition.value, params))
-            if condition.element is None
-            else _evaluate_condition(condition, ctx, params)
-        )
+        matched, vector_state = _evaluate_condition(condition, ctx, params)
         if matched:
             return
         if vector_state == indi_messaging.PropertyState.ALERT:
             raise ScriptExecutionError(
-                f"{condition.property} on {device} reported Alert while waiting for "
-                "wait_for condition"
+                f"{condition.property} on {device} went to Alert while polling a wait_for condition"
             )
         if asyncio.get_running_loop().time() >= deadline:
             raise ScriptExecutionError(
@@ -926,7 +917,8 @@ async def _execute_repeat(
         )
     for iteration in range(1, step.maxIterations + 1):
         await _run_repeat_iteration(step.steps, ctx, params, script_id, pausable, iteration)
-        if _evaluate_condition(step.until, ctx, params):
+        matched, _ = _evaluate_condition(step.until, ctx, params)
+        if matched:
             return
     raise ScriptExecutionError(
         f"repeat exceeded maxIterations ({step.maxIterations}) without meeting its until condition"
@@ -954,7 +946,8 @@ async def _execute_if(
     script_id: str,
     pausable: bool,
 ) -> None:
-    branch = step.then if _evaluate_condition(step.condition, ctx, params) else step.else_
+    matched, _ = _evaluate_condition(step.condition, ctx, params)
+    branch = step.then if matched else step.else_
     await _execute_steps(branch, ctx, params, script_id, pausable)
 
 
@@ -1225,11 +1218,21 @@ schema without adding its handler here.
 
 def _evaluate_condition(
     condition: Condition, ctx: _ExecutionContext, params: dict[str, Any]
-) -> bool:
+) -> tuple[bool, indi_messaging.PropertyState | str | None]:
+    """Evaluate `condition`, returning `(matched, vector_state)`.
+
+    `vector_state` is the condition's own property's overall vector state
+    (`Idle`/`Ok`/`Busy`/`Alert`/...), fetched here regardless of whether the
+    condition itself compares the vector state or one of its elements.
+    Callers that poll (`_execute_wait_for`) use it to fail fast on `Alert`
+    without a second, separate fetch; callers that evaluate once and don't
+    poll (`_execute_if`, `_execute_repeat`'s `until`) just discard it.
+    """
     device = _resolve_device(_substituted_role(condition.role, params), ctx)
+    vector_state = indi_messaging.get_property_state(device, condition.property)
     target = _substitute(condition.value, params)
     if condition.element is None:
-        actual = indi_messaging.get_property_state(device, condition.property)
+        actual = vector_state
     else:
         values = indi_messaging.get_property_values(device, condition.property)
         if values is not None and condition.element not in values:
@@ -1249,7 +1252,7 @@ def _evaluate_condition(
                 sorted(values),
             )
         actual = values.get(condition.element) if values is not None else None
-    return _compare(actual, condition.operator, target)
+    return _compare(actual, condition.operator, target), vector_state
 
 
 def _compare(
