@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from indi_mcp import indi_driver, indi_messaging, observatory_store, rig_store, server
+from indi_mcp import indi_driver, indi_messaging, observatory_store, rig_store, script_runs, server
 
 
 async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family(
@@ -121,3 +121,80 @@ async def test_save_observatory_delegates_to_observatory_store_with_the_overwrit
 
     assert result == observatory
     assert calls == [(observatory, True)]
+
+
+async def test_run_script_delegates_to_script_runs_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    async def fake_start_script(script_id: str, rig_id: str, parameters: dict) -> dict:
+        calls.append((script_id, rig_id, parameters))
+        return {"kind": "scriptStarted", "runId": "abc"}
+
+    monkeypatch.setattr(script_runs, "start_script", fake_start_script)
+
+    result = await server.run_script("capture_sequence", "test-rig", {"count": 10})
+
+    assert result == {"kind": "scriptStarted", "runId": "abc"}
+    assert calls == [("capture_sequence", "test-rig", {"count": 10})]
+
+
+def test_get_script_status_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_get_script_status(run_id: str) -> dict:
+        calls.append(run_id)
+        return {"kind": "scriptProgress", "runId": run_id}
+
+    monkeypatch.setattr(script_runs, "get_script_status", fake_get_script_status)
+
+    result = server.get_script_status("abc")
+
+    assert result == {"kind": "scriptProgress", "runId": "abc"}
+    assert calls == ["abc"]
+
+
+async def test_cancel_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_cancel_script(run_id: str) -> dict:
+        calls.append(run_id)
+        return {"kind": "scriptCancelled", "runId": run_id}
+
+    monkeypatch.setattr(script_runs, "cancel_script", fake_cancel_script)
+
+    result = await server.cancel_script("abc")
+
+    assert result == {"kind": "scriptCancelled", "runId": "abc"}
+    assert calls == ["abc"]
+
+
+def test_pause_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_pause_script(run_id: str) -> dict:
+        calls.append(run_id)
+        return {"kind": "scriptPaused", "runId": run_id}
+
+    monkeypatch.setattr(script_runs, "pause_script", fake_pause_script)
+
+    result = server.pause_script("abc")
+
+    assert result == {"kind": "scriptPaused", "runId": "abc"}
+    assert calls == ["abc"]
+
+
+def test_resume_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_resume_script(run_id: str) -> dict:
+        calls.append(run_id)
+        return {"kind": "scriptResumed", "runId": run_id}
+
+    monkeypatch.setattr(script_runs, "resume_script", fake_resume_script)
+
+    result = server.resume_script("abc")
+
+    assert result == {"kind": "scriptResumed", "runId": "abc"}
+    assert calls == ["abc"]
