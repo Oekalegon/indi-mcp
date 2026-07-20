@@ -354,33 +354,35 @@ def purge_transferred_frames(
     `delete_frame`'s own default safety check: a frame the Client Computer
     hasn't confirmed receiving yet is never eligible, no matter how old.
 
+    Deletes every matching row in one `DELETE ... RETURNING` statement —
+    a single connection and round trip, rather than a `SELECT` followed by
+    a separate `delete_frame` call (its own row lookup plus its own
+    `DELETE`) per frame. This also makes concurrent deletion harmless by
+    construction rather than something that needs handling: the `WHERE`
+    clause is evaluated once, at execution time, so a frame some other
+    caller already deleted in the meantime simply isn't matched — there's
+    no separate "was it already gone?" case to catch. Only the files are
+    removed one at a time afterward, matching `delete_frame`'s own
+    row-then-file ordering: a dangling file nobody points to is a smaller
+    problem than a row pointing at a file that's already gone (and a file
+    already missing on disk for some other reason is tolerated the same
+    way `delete_frame` tolerates it — see `Path.unlink(missing_ok=True)`
+    below).
+
     Returns the metadata of every frame actually deleted by this call (as
     it was just before deletion), most recently captured first — useful
-    for a caller that wants to report what was purged. Deletes one frame
-    at a time via `delete_frame`, so a failure partway through (e.g. a
-    locked database file) leaves every frame processed so far actually
-    deleted rather than the whole purge silently rolling back. A candidate
-    frame that's already gone by the time its turn comes up — deleted
-    concurrently by another `delete_frame`/`purge_transferred_frames` call
-    in between this function's own initial query and reaching that frame —
-    is treated as already-purged rather than a failure: nothing here
-    serializes concurrent callers, and a caller's goal ("this frame no
-    longer takes up space") is equally satisfied either way.
+    for a caller that wants to report what was purged.
     """
     cutoff = (datetime.now(tz=UTC) - older_than).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
     with db.connect(db_path) as conn:
         _ensure_schema(conn)
         rows = conn.execute(
-            "SELECT * FROM frames WHERE transferred_at IS NOT NULL AND captured_at < ? "
-            "ORDER BY captured_at DESC",
+            "DELETE FROM frames WHERE transferred_at IS NOT NULL AND captured_at < ? RETURNING *",
             (cutoff,),
         ).fetchall()
-    candidates = [_row_to_metadata(row) for row in rows]
-    purged: list[FrameMetadata] = []
-    for frame in candidates:
-        try:
-            delete_frame(frame["frameId"], db_path=db_path)
-        except FrameNotFoundError:
-            continue
-        purged.append(frame)
-    return purged
+        conn.commit()
+    rows.sort(key=lambda row: row["captured_at"], reverse=True)
+    for row in rows:
+        Path(row["path"]).unlink(missing_ok=True)
+        logger.info("Purged frame %s (%s)", row["frame_id"], row["path"])
+    return [_row_to_metadata(row) for row in rows]
