@@ -203,6 +203,42 @@ async def test_execute_script_threads_parameterized_role_through_run_script(
     send_property.assert_awaited_once_with("Telescope Simulator", "CONNECTION", {"CONNECT": "On"})
 
 
+async def test_execute_script_calling_same_sub_script_with_different_roles_resolves_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Role-usage collection memoizes by (script id, resolved params), not script id alone —
+    two run_script calls to the same generic connect script with *different* roles must
+    each still resolve and execute correctly, not have the second call's role usage dropped
+    as if it were a repeat of the first."""
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    _script(
+        "connect_all",
+        steps=[
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+            {"step": "run_script", "script": "connect", "parameters": {"role": "camera"}},
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script("connect_all", "test-rig", {})
+
+    assert send_property.await_args_list == [
+        call("Telescope Simulator", "CONNECTION", {"CONNECT": "On"}),
+        call("CCD Simulator", "CONNECTION", {"CONNECT": "On"}),
+        call("Telescope Simulator", "CONNECTION", {"CONNECT": "On"}),
+    ]
+
+
 async def test_execute_script_generic_connect_script_is_exempt_for_its_own_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

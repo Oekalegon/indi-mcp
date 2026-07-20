@@ -353,11 +353,18 @@ class _RoleUsage:
     connection_managed_roles: set[str] = field(default_factory=set)
 
 
+def _params_cache_key(params: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    """A hashable key for a resolved-parameter dict — every `Parameter.type` is a scalar
+    (string/integer/number/boolean), so every value is hashable and this can't raise."""
+    return tuple(sorted(params.items()))
+
+
 def _collect_role_usage(
     script: Script,
     params: dict[str, Any],
     scripts: dict[str, Script],
     usage: _RoleUsage | None = None,
+    _visited: set[tuple[str, tuple[tuple[str, Any], ...]]] | None = None,
 ) -> _RoleUsage:
     """Walk the whole call tree rooted at `script` (run with `params`), resolving every role.
 
@@ -376,9 +383,27 @@ def _collect_role_usage(
     exempted, in `_check_devices_connected`, from the "must already be
     connected" requirement — otherwise a `connect_*`/`disconnect_*` script
     could never run against the very device it exists to connect.
+
+    `_visited` memoizes by `(script.id, resolved params)`, not just
+    `script.id` — walking a purely structural call tree could dedupe by id
+    alone (`_collect_reachable_scripts` does), but here the same script
+    called twice with *different* parameters is a different role-usage
+    result each time, so only an exact (script, params) repeat is safe to
+    skip. This still bounds the walk for a script that calls the same
+    sub-script from several call sites with the same arguments (e.g. a
+    composed sequence connecting several roles by repeatedly calling
+    `connect` — each distinct role is its own cache entry, but a role
+    connected more than once in one run is only walked once).
     """
     if usage is None:
         usage = _RoleUsage()
+    if _visited is None:
+        _visited = set()
+    cache_key = (script.id, _params_cache_key(params))
+    if cache_key in _visited:
+        return usage
+    _visited.add(cache_key)
+
     for step in _iter_all_steps(script.steps):
         role = _step_role(step, params)
         if role is None:
@@ -394,7 +419,7 @@ def _collect_role_usage(
         callee = scripts[call.script]
         call_args = {name: _substitute(value, params) for name, value in call.parameters.items()}
         callee_params = _resolve_parameters(callee, call_args)
-        _collect_role_usage(callee, callee_params, scripts, usage)
+        _collect_role_usage(callee, callee_params, scripts, usage, _visited)
     return usage
 
 
