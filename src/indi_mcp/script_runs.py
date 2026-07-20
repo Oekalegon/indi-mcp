@@ -445,19 +445,22 @@ def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
 
 
 def resume_script(run_id: str) -> ScriptRunResumed | ScriptRunPauseRejected:
-    """Clear a pending pause for `run_id`, if its script allows pausing at all.
+    """Clear a pending pause for `run_id`, if it's actually paused and its script allows it.
 
-    Gated the same way as `pause_script` (see there, including the
-    already-finished check) — the rejection shape is identical to what a
-    `pause_script` call on the same run would give, since the underlying
-    reason (this script has no safe point to suspend at, so it never
-    actually paused) is the same one either way.
+    Gated like `pause_script` (already-finished check, `pausable` flag —
+    see there), plus one more: `pause_event` must actually be set. Without
+    this, calling `resume_script` on a run that was never paused would
+    "succeed" — clearing an already-clear event and reporting a misleading
+    `scriptResumed` as if something had changed — while also overwriting
+    whatever real `scriptProgress`/terminal status was on file for polling.
     """
     run = _get_run(run_id)
     if _is_terminal(run):
         return _pause_rejected(run, "This run has already finished")
     if not run.pausable:
         return _pause_rejected(run, "This script has no safe point to pause at")
+    if not run.pause_event.is_set():
+        return _pause_rejected(run, "This run is not currently paused")
     run.pause_event.clear()
     resumed: ScriptRunResumed = {
         "kind": "scriptResumed",

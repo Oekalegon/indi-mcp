@@ -296,6 +296,30 @@ async def test_resume_script_rejects_when_script_is_not_pausable() -> None:
     await script_runs.cancel_script(started["runId"])
 
 
+async def test_resume_script_rejects_when_the_run_is_not_currently_paused() -> None:
+    """resume_script must not "succeed" on a pausable run that was never paused — otherwise
+    it would clear a no-op event and overwrite the run's real status with a misleading
+    scriptResumed."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "wait_forever",
+        pausable=True,
+        steps=[_wait_for("mount", "CONNECTION", "equals", "On", element="DISCONNECT", timeout=100)],
+    )
+
+    started = await script_runs.start_script("wait_forever", "test-rig", {})
+    status_before = script_runs.get_script_status(started["runId"])
+
+    result = script_runs.resume_script(started["runId"])
+
+    assert result["kind"] == "scriptPauseRejected"
+    rejected = cast(script_runs.ScriptRunPauseRejected, result)
+    assert rejected["reason"] == "This run is not currently paused"
+    assert script_runs.get_script_status(started["runId"]) == status_before
+
+    await script_runs.cancel_script(started["runId"])
+
+
 async def test_pause_then_resume_a_pausable_script_lets_it_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
