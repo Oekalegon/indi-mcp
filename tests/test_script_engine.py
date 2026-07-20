@@ -776,6 +776,82 @@ async def test_execute_script_wait_for_deliberately_waiting_for_alert_still_succ
     assert result["stepsExecuted"] == 1
 
 
+async def test_execute_script_wait_for_fetches_vector_state_once_per_poll_vector_condition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_evaluate_condition` fetches the vector state once and `_execute_wait_for` reuses that
+    same result for its Alert check — a regression guard against re-introducing a second,
+    redundant `get_property_state` call per poll iteration (an earlier draft of this fast-fail
+    did exactly that).
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("wait", steps=[_wait_for("camera", "CCD_TEMPERATURE", "equals", "Ok")])
+    calls: list[tuple[str, str]] = []
+    states = iter(["Busy", "Busy", "Ok"])
+
+    def counting_get_property_state(device: str, name: str) -> str:
+        calls.append((device, name))
+        return next(states)
+
+    monkeypatch.setattr(indi_messaging, "get_property_state", counting_get_property_state)
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    await script_engine.execute_script("wait", "test-rig", {})
+
+    # Three poll iterations (Busy, Busy, Ok) fed from `states` — one call each. If
+    # get_property_state were fetched twice per iteration, `states` would run dry
+    # (StopIteration) before "Ok" was ever reached.
+    assert len(calls) == 3
+
+
+async def test_execute_script_wait_for_fetches_vector_state_once_per_poll_element_condition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression guard, for a condition that compares an element value rather than the
+    vector state directly — `get_property_state` is only used here for the Alert check, but it
+    should still be called exactly once per poll, not twice.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "wait",
+        steps=[
+            {
+                "step": "wait_for",
+                "condition": {
+                    "role": "camera",
+                    "property": "CCD_TEMPERATURE",
+                    "element": "CCD_TEMPERATURE_VALUE",
+                    "operator": "lessThanOrEqual",
+                    "value": -10,
+                },
+                "timeoutSeconds": 5,
+            }
+        ],
+    )
+    state_calls: list[tuple[str, str]] = []
+    values = iter(["5.0", "5.0", "-12.5"])
+
+    def counting_get_property_state(device: str, name: str) -> str:
+        state_calls.append((device, name))
+        return "Busy"
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name == "CCD_TEMPERATURE":
+            return {"CCD_TEMPERATURE_VALUE": next(values)}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_state", counting_get_property_state)
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    await script_engine.execute_script("wait", "test-rig", {})
+
+    # `values` has exactly 3 items, driving exactly 3 poll iterations — one
+    # get_property_state call each, independent of how many times `values` itself
+    # is consumed.
+    assert len(state_calls) == 3
+
+
 async def test_execute_script_wait_for_compares_a_numeric_element(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
