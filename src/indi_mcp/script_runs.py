@@ -244,11 +244,21 @@ async def start_script(
 async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
     """Drive `execute_script` for `run`, recording its progress and terminal status.
 
-    The three `script_engine` exception types are all reported as
-    `scriptFailed` rather than propagated — `_run_and_record` runs inside
-    an `asyncio.Task` nobody `await`s under normal polling, so an
-    unhandled exception here would just be logged by asyncio's default
-    handler and silently strand the run in a "started" status forever.
+    `ScriptCancelled` is reported as `scriptCancelled`, and the three
+    documented `script_engine` failure exceptions
+    (`ScriptValidationError`/`ScriptPreconditionError`/`ScriptExecutionError`)
+    as `scriptFailed` — none of them propagate. Neither does anything else:
+    `_run_and_record` runs inside an `asyncio.Task` nobody `await`s under
+    normal polling (only `cancel_script` ever awaits it, and only for a run
+    it already knows about), so an exception outside that documented
+    contract — a genuine bug in `execute_script`/`on_progress`, say — would
+    otherwise propagate uncaught, get logged only by asyncio's default
+    handler (not this module's own `logger`), and leave `run.latest_status`
+    frozen at whatever it last was forever. For a system polling a run
+    controlling physical hardware, that reads as "still safely running or
+    paused" indefinitely, with nothing to say otherwise. The catch-all
+    below is a last-resort safety net for exactly that case, not part of
+    the documented exception contract itself.
     """
 
     def on_progress(progress: script_engine.ScriptProgress) -> None:
@@ -290,6 +300,15 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             "rigId": run.rig_id,
             "failedAtStep": run.latest_step,
             "error": {"message": str(exc)},
+        }
+    except Exception as exc:  # safety net for anything undocumented, see docstring above
+        logger.exception("Unexpected error while running script run %s", run.run_id)
+        run.latest_status = {
+            "kind": "scriptFailed",
+            "runId": run.run_id,
+            "rigId": run.rig_id,
+            "failedAtStep": run.latest_step,
+            "error": {"message": f"internal error: {exc}"},
         }
     else:
         run.latest_status = {

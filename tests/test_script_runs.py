@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from indi_mcp import indi_messaging, rig_store, script_runs, script_store
+from indi_mcp import indi_messaging, rig_store, script_engine, script_runs, script_store
 
 _known_devices: list[str] = []
 
@@ -147,6 +147,33 @@ async def test_run_that_fails_reports_scriptFailed(monkeypatch: pytest.MonkeyPat
     assert failed["rigId"] == "test-rig"
     assert failed["failedAtStep"] == 0
     assert "camera" in failed["error"]["message"]
+
+
+async def test_run_with_an_undocumented_exception_still_reports_scriptFailed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bug in execute_script itself (anything outside its documented exception contract)
+    must still leave the run reporting a terminal scriptFailed status, not freeze it forever
+    at whatever status was last recorded — see _run_and_record's catch-all."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool",
+        steps=[_set_property("camera", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10"})],
+    )
+
+    async def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("something unexpected broke")
+
+    monkeypatch.setattr(script_engine, "execute_script", _boom)
+
+    started = await script_runs.start_script("cool", "test-rig", {})
+    await _await_run(started["runId"])
+
+    status = script_runs.get_script_status(started["runId"])
+
+    assert status["kind"] == "scriptFailed"
+    failed = cast(script_runs.ScriptRunFailed, status)
+    assert "something unexpected broke" in failed["error"]["message"]
 
 
 async def test_get_script_status_raises_for_unknown_run_id() -> None:
