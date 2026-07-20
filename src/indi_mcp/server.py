@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -12,6 +12,7 @@ from indi_mcp import (
     indi_server,
     observatory_store,
     rig_store,
+    script_runs,
     script_store,
 )
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
@@ -19,6 +20,13 @@ from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
 from indi_mcp.observatory_store import Observatory, ObservatorySummary
 from indi_mcp.rig_store import DraftDeviceInfo, Rig, RigCheck, RigDraft, RigSuggestion, RigSummary
+from indi_mcp.script_runs import (
+    ScriptRunPaused,
+    ScriptRunPauseRejected,
+    ScriptRunResumed,
+    ScriptRunStarted,
+    ScriptRunStatus,
+)
 from indi_mcp.script_store import Script, ScriptSummary
 
 logger = logging.getLogger(__name__)
@@ -246,19 +254,66 @@ async def save_script(script: Script, overwrite: bool = False) -> Script:
     directory from the built-in scripts shipped in `scripts/`, so an
     upload can never be clobbered by a redeploy of the built-in checkout,
     or silently shadow a built-in script's id — and reloads the merged
-    library so it's immediately available by `id` to `get_script` (and to
-    running it, once that's exposed as an MCP tool — INDIMCP-13). Only
-    ever validates and stores declarative step data (`yaml.safe_load`, no
-    executable code), per the safety approach in `docs/Design.md`. Rejected
-    outright, before anything is written, if `script` doesn't fit the rest
-    of the library — an unresolved `run_script` reference, a mismatched
-    argument type, a call cycle, or an id already used by a built-in
-    script. Refuses to replace an existing uploaded script file unless
-    `overwrite` is set, since reusing an `id` could otherwise silently
-    destroy a previously saved script. The actual file I/O runs in a
-    worker thread so it doesn't block the event loop.
+    library so it's immediately available by `id` to `get_script` and to
+    `run_script`. Only ever validates and stores declarative step data
+    (`yaml.safe_load`, no executable code), per the safety approach in
+    `docs/Design.md`. Rejected outright, before anything is written, if
+    `script` doesn't fit the rest of the library — an unresolved
+    `run_script` reference, a mismatched argument type, a call cycle, or an
+    id already used by a built-in script. Refuses to replace an existing
+    uploaded script file unless `overwrite` is set, since reusing an `id`
+    could otherwise silently destroy a previously saved script. The actual
+    file I/O runs in a worker thread so it doesn't block the event loop.
     """
     return await asyncio.to_thread(script_store.save_script, script, overwrite=overwrite)
+
+
+@mcp.tool()
+async def run_script(
+    script_id: str, rig_id: str, parameters: dict[str, Any] | None = None
+) -> ScriptRunStarted:
+    """Start `script_id` running against `rig_id`, returning immediately with a `runId`.
+
+    Scripts run long sequences against physical hardware and are meant to
+    keep going even if the caller disconnects, so this never blocks until
+    the script finishes (see `docs/Design.md#calling-scripts-and-script-
+    results`) — poll `get_script_status(runId)` for progress and the
+    eventual `scriptCompleted`/`scriptFailed` outcome, or use
+    `cancel_script`/`pause_script`/`resume_script` to control the run.
+    """
+    return await script_runs.start_script(script_id, rig_id, parameters)
+
+
+@mcp.tool()
+def get_script_status(run_id: str) -> ScriptRunStatus:
+    """Return the most recently known status for a run started by `run_script`."""
+    return script_runs.get_script_status(run_id)
+
+
+@mcp.tool()
+async def cancel_script(run_id: str) -> ScriptRunStatus:
+    """Cancel a run started by `run_script`, waiting for it to actually stop.
+
+    Always applies, regardless of whether the run is pausable — unlike
+    `pause_script`/`resume_script`.
+    """
+    return await script_runs.cancel_script(run_id)
+
+
+@mcp.tool()
+def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
+    """Pause a run at its next safe point — only if its script declared itself `pausable`.
+
+    Rejected (not queued or silently ignored) if the script has no safe
+    point to suspend at.
+    """
+    return script_runs.pause_script(run_id)
+
+
+@mcp.tool()
+def resume_script(run_id: str) -> ScriptRunResumed | ScriptRunPauseRejected:
+    """Resume a run previously paused with `pause_script`."""
+    return script_runs.resume_script(run_id)
 
 
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
