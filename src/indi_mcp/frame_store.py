@@ -236,16 +236,21 @@ def list_frames(
     run_id: str | None = None,
     device: str | None = None,
     since: str | None = None,
-    transferred_only: bool = False,
+    transferred: bool | None = None,
     db_path: Path | None = None,
 ) -> list[FrameMetadata]:
     """Query frame metadata, most recently captured first, with optional filters.
 
-    Mirrors `docs/Design.md`'s `list_frames` tool filters (`runId`/
-    `device`/`since`/`transferredOnly`) at the store layer; INDIMCP-11
-    wraps this as the actual MCP tool. `since` is compared lexicographically
-    against `captured_at`'s ISO 8601 UTC text, which sorts the same as
-    chronological order.
+    Extends `docs/Design.md`'s `list_frames` tool filters (`runId`/
+    `device`/`since`/`transferredOnly`) at the store layer: `transferred`
+    is a tri-state (`None` = no filter, `True` = only transferred frames,
+    `False` = only *not yet* transferred ones) rather than the doc
+    sketch's one-directional `transferredOnly` boolean, since knowing
+    what's still waiting to be transferred (e.g. before deciding whether
+    it's safe to run `purge_transferred_frames`) is just as useful as
+    seeing what's already done. INDIMCP-11 wraps this as the actual MCP
+    tool. `since` is compared lexicographically against `captured_at`'s
+    ISO 8601 UTC text, which sorts the same as chronological order.
     """
     clauses: list[str] = []
     params: list[str] = []
@@ -258,8 +263,10 @@ def list_frames(
     if since is not None:
         clauses.append("captured_at >= ?")
         params.append(since)
-    if transferred_only:
+    if transferred is True:
         clauses.append("transferred_at IS NOT NULL")
+    elif transferred is False:
+        clauses.append("transferred_at IS NULL")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with db.connect(db_path) as conn:
         _ensure_schema(conn)

@@ -207,19 +207,54 @@ def test_list_frames_filters_by_since(store_paths: tuple[Path, Path]) -> None:
     assert [f["frameId"] for f in frames] == [recent["frameId"]]
 
 
-def test_list_frames_filters_by_transferred_only(store_paths: tuple[Path, Path]) -> None:
+def test_list_frames_filters_by_transferred_true(store_paths: tuple[Path, Path]) -> None:
     frames_dir, db_path = store_paths
-    transferred = frame_store.save_frame(
+    transferred_frame = frame_store.save_frame(
         b"one", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
     )
     frame_store.save_frame(
         b"two", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
     )
-    frame_store.confirm_frame_transfer(transferred["frameId"], db_path=db_path)
+    frame_store.confirm_frame_transfer(transferred_frame["frameId"], db_path=db_path)
 
-    frames = frame_store.list_frames(transferred_only=True, db_path=db_path)
+    frames = frame_store.list_frames(transferred=True, db_path=db_path)
 
-    assert [f["frameId"] for f in frames] == [transferred["frameId"]]
+    assert [f["frameId"] for f in frames] == [transferred_frame["frameId"]]
+
+
+def test_list_frames_filters_by_transferred_false(store_paths: tuple[Path, Path]) -> None:
+    frames_dir, db_path = store_paths
+    transferred_frame = frame_store.save_frame(
+        b"one", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    untransferred_frame = frame_store.save_frame(
+        b"two", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    frame_store.confirm_frame_transfer(transferred_frame["frameId"], db_path=db_path)
+
+    frames = frame_store.list_frames(transferred=False, db_path=db_path)
+
+    assert [f["frameId"] for f in frames] == [untransferred_frame["frameId"]]
+
+
+def test_list_frames_returns_all_frames_when_transferred_is_none(
+    store_paths: tuple[Path, Path],
+) -> None:
+    frames_dir, db_path = store_paths
+    transferred_frame = frame_store.save_frame(
+        b"one", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    untransferred_frame = frame_store.save_frame(
+        b"two", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    frame_store.confirm_frame_transfer(transferred_frame["frameId"], db_path=db_path)
+
+    frames = frame_store.list_frames(db_path=db_path)
+
+    assert {f["frameId"] for f in frames} == {
+        transferred_frame["frameId"],
+        untransferred_frame["frameId"],
+    }
 
 
 def test_confirm_frame_transfer_sets_transferred_at(store_paths: tuple[Path, Path]) -> None:
