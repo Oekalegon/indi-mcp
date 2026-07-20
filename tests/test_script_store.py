@@ -1,3 +1,5 @@
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -763,3 +765,36 @@ def test_save_script_accepts_a_run_script_call_into_a_builtin_script(tmp_path: P
 
     assert saved == script_store.get_script("caller")
     assert script_store.get_script("focus").id == "focus"
+
+
+def test_save_script_serializes_concurrent_saves(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    overlap_detected = threading.Event()
+    currently_inside = threading.Event()
+    original_check = script_store._check_library_accepts
+
+    def slow_check(script: script_store.Script, library: dict) -> None:
+        if currently_inside.is_set():
+            overlap_detected.set()
+        currently_inside.set()
+        try:
+            time.sleep(0.05)
+            original_check(script, library)
+        finally:
+            currently_inside.clear()
+
+    monkeypatch.setattr(script_store, "_check_library_accepts", slow_check)
+
+    def save(script_id: str) -> None:
+        script_store.save_script(_minimal_script(script_id), directory=tmp_path)
+
+    threads = [threading.Thread(target=save, args=(sid,)) for sid in ("script-a", "script-b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not overlap_detected.is_set()
+    saved_ids = {s.id for s in script_store.load_scripts(user_directory=tmp_path)}
+    assert saved_ids >= {"script-a", "script-b"}

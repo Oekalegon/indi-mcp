@@ -29,6 +29,7 @@ other.
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -347,6 +348,20 @@ def referenced_roles(script: Script) -> set[str]:
 
 _scripts: dict[str, Script] = {}
 
+_save_script_lock = threading.Lock()
+"""Serializes `save_script`'s validate-then-write sequence.
+
+`save_script` runs off the event loop (`asyncio.to_thread` in `server.py`),
+so two concurrent uploads could otherwise run their directory-snapshot +
+library-check + write in two different worker threads with no ordering
+between them — a classic check-then-act race. Two scripts uploaded within
+that window that `run_script`-call each other would each validate against a
+snapshot that doesn't yet include the other's file, both writes would
+succeed, and only the next `load_scripts()` reload would notice the
+resulting cycle and silently drop both — exactly the "silently dropped"
+failure mode `save_script` exists to avoid for a single bad upload.
+"""
+
 
 def _scripts_dir() -> Path:
     return Path(os.environ.get(SCRIPTS_DIR_ENV, _DEFAULT_SCRIPTS_DIR))
@@ -597,12 +612,23 @@ def save_script(
     silently destroy a previously saved script. The existence check and the
     write happen as one atomic file-open (exclusive-create unless
     `overwrite`), so two concurrent saves of the same new `id` can't both
-    slip past the check.
+    slip past the check. The whole validate-then-write sequence is
+    serialized with `_save_script_lock` (see its docstring) since this
+    function runs off the event loop, in a worker thread, where two
+    concurrent uploads could otherwise race past each other's checks.
     """
     if not script.id or script.id in (".", "..") or "/" in script.id or "\\" in script.id:
         raise ValueError(f"Invalid script id for a filename: {script.id!r}")
     directory = directory if directory is not None else _user_scripts_dir()
     builtin_directory = builtin_directory if builtin_directory is not None else _scripts_dir()
+    with _save_script_lock:
+        return _save_script_locked(script, overwrite, directory, builtin_directory)
+
+
+def _save_script_locked(
+    script: Script, overwrite: bool, directory: Path, builtin_directory: Path
+) -> Script:
+    """The validate-then-write body of `save_script`, run under `_save_script_lock`."""
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except NotADirectoryError as exc:
