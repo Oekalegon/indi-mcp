@@ -27,6 +27,9 @@ htmlcov/
 frames/
 storage/
 
+# Client-uploaded scripts (save_script, INDIMCP-9) — runtime data, not versioned
+/user_scripts/
+
 # Editors / OS
 .vscode/
 .idea/

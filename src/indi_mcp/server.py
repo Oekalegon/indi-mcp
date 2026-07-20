@@ -6,12 +6,20 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from indi_mcp import indi_driver, indi_messaging, indi_server, observatory_store, rig_store
+from indi_mcp import (
+    indi_driver,
+    indi_messaging,
+    indi_server,
+    observatory_store,
+    rig_store,
+    script_store,
+)
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
 from indi_mcp.observatory_store import Observatory, ObservatorySummary
 from indi_mcp.rig_store import DraftDeviceInfo, Rig, RigCheck, RigDraft, RigSuggestion, RigSummary
+from indi_mcp.script_store import Script, ScriptSummary
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +226,41 @@ async def save_observatory(observatory: Observatory, overwrite: bool = False) ->
     )
 
 
+@mcp.tool()
+def list_scripts() -> list[ScriptSummary]:
+    """List the id/name/description of every loaded script (see `docs/ScriptSchema.md`)."""
+    return script_store.list_scripts()
+
+
+@mcp.tool()
+def get_script(script_id: str) -> Script:
+    """Return the full definition of the script identified by `script_id`."""
+    return script_store.get_script(script_id)
+
+
+@mcp.tool()
+async def save_script(script: Script, overwrite: bool = False) -> Script:
+    """Upload and save a script written on the Client Computer.
+
+    Writes `script` to `user_scripts/<script.id>.yaml` — a separate
+    directory from the built-in scripts shipped in `scripts/`, so an
+    upload can never be clobbered by a redeploy of the built-in checkout,
+    or silently shadow a built-in script's id — and reloads the merged
+    library so it's immediately available by `id` to `get_script` (and to
+    running it, once that's exposed as an MCP tool — INDIMCP-13). Only
+    ever validates and stores declarative step data (`yaml.safe_load`, no
+    executable code), per the safety approach in `docs/Design.md`. Rejected
+    outright, before anything is written, if `script` doesn't fit the rest
+    of the library — an unresolved `run_script` reference, a mismatched
+    argument type, a call cycle, or an id already used by a built-in
+    script. Refuses to replace an existing uploaded script file unless
+    `overwrite` is set, since reusing an `id` could otherwise silently
+    destroy a previously saved script. The actual file I/O runs in a
+    worker thread so it doesn't block the event loop.
+    """
+    return await asyncio.to_thread(script_store.save_script, script, overwrite=overwrite)
+
+
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
     """Start serving the MCP server over the given transport.
 
@@ -226,6 +269,7 @@ def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 800
     logging.basicConfig(level=logging.INFO)
     rig_store.load_rigs()
     observatory_store.load_observatories()
+    script_store.load_scripts()
     if transport != "stdio":
         mcp.settings.host = host
         mcp.settings.port = port

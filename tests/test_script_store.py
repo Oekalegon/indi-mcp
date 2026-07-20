@@ -1,6 +1,9 @@
+import threading
+import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from indi_mcp import script_store
 
@@ -79,8 +82,14 @@ steps: []
 
 
 @pytest.fixture(autouse=True)
-def _reset_loaded_scripts() -> None:
+def _reset_loaded_scripts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     script_store._scripts = {}
+    # Tests below that call load_scripts()/save_script() with a single explicit `directory`
+    # are exercising per-directory parsing/validation, not the built-in/user merge — point
+    # the *other* side at an unused tmp_path subdirectory so it never picks up a stray real
+    # ./scripts or ./user_scripts directory and never merges anything in unexpectedly.
+    monkeypatch.setenv(script_store.SCRIPTS_DIR_ENV, str(tmp_path / "_unused_scripts"))
+    monkeypatch.setenv(script_store.USER_SCRIPTS_DIR_ENV, str(tmp_path / "_unused_user_scripts"))
 
 
 def test_load_scripts_returns_empty_list_when_directory_missing(tmp_path: Path) -> None:
@@ -490,3 +499,302 @@ def test_get_script_rejects_unknown_id(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unknown script"):
         script_store.get_script("does-not-exist")
+
+
+def _minimal_script(script_id: str = "minimal") -> script_store.Script:
+    return script_store.Script(id=script_id, name="Minimal script", pausable=False, steps=[])
+
+
+def test_save_script_writes_a_yaml_file_and_reloads_it(tmp_path: Path) -> None:
+    script = _minimal_script()
+
+    saved = script_store.save_script(script, directory=tmp_path)
+
+    assert saved == script
+    assert (tmp_path / "minimal.yaml").is_file()
+    assert script_store.get_script("minimal") == script
+
+
+def test_save_script_roundtrips_through_yaml_including_if_else_alias(tmp_path: Path) -> None:
+    script = script_store.Script(
+        id="with-if",
+        name="Has an if/else",
+        pausable=False,
+        steps=[
+            script_store.IfStep.model_validate(
+                {
+                    "step": "if",
+                    "condition": {
+                        "role": "camera",
+                        "property": "CONNECTION",
+                        "operator": "equals",
+                        "value": "Ok",
+                    },
+                    "then": [],
+                    "else": [],
+                }
+            )
+        ],
+    )
+
+    script_store.save_script(script, directory=tmp_path)
+
+    raw = yaml.safe_load((tmp_path / "with-if.yaml").read_text())
+    assert "else" in raw["steps"][0]
+    reloaded = script_store.Script.model_validate(raw)
+    assert reloaded == script
+
+
+def test_save_script_rejects_overwriting_an_existing_file_by_default(tmp_path: Path) -> None:
+    script_store.save_script(_minimal_script(), directory=tmp_path)
+
+    with pytest.raises(ValueError, match="already exists"):
+        script_store.save_script(_minimal_script(), directory=tmp_path)
+
+
+def test_save_script_allows_overwrite_when_explicitly_requested(tmp_path: Path) -> None:
+    script_store.save_script(_minimal_script(), directory=tmp_path)
+    updated = script_store.Script(id="minimal", name="Renamed script", pausable=False, steps=[])
+
+    saved = script_store.save_script(updated, overwrite=True, directory=tmp_path)
+
+    assert saved.name == "Renamed script"
+    assert script_store.get_script("minimal").name == "Renamed script"
+
+
+def test_save_script_creates_the_scripts_directory_if_missing(tmp_path: Path) -> None:
+    missing_dir = tmp_path / "does-not-exist-yet"
+
+    script_store.save_script(_minimal_script(), directory=missing_dir)
+
+    assert (missing_dir / "minimal.yaml").is_file()
+
+
+@pytest.mark.parametrize("bad_id", ["", ".", "..", "a/b", "a\\b", "../escape"])
+def test_save_script_rejects_ids_that_are_not_safe_filenames(tmp_path: Path, bad_id: str) -> None:
+    with pytest.raises(ValueError, match="Invalid script id"):
+        script_store.save_script(_minimal_script(bad_id), directory=tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_save_script_rejects_an_id_whose_file_path_is_already_a_directory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "minimal.yaml").mkdir()
+
+    with pytest.raises(ValueError, match="is a directory"):
+        script_store.save_script(_minimal_script(), directory=tmp_path)
+
+
+def test_save_script_uses_the_default_directory_when_none_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(script_store.USER_SCRIPTS_DIR_ENV, str(tmp_path))
+
+    script_store.save_script(_minimal_script())
+
+    assert (tmp_path / "minimal.yaml").is_file()
+
+
+def test_save_script_succeeds_despite_other_invalid_script_files_in_the_directory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "broken.yaml").write_text("id: [unterminated")
+
+    saved = script_store.save_script(_minimal_script(), directory=tmp_path)
+
+    assert saved == script_store.get_script("minimal")
+
+
+def test_save_script_rejects_a_run_script_call_to_an_unknown_script(tmp_path: Path) -> None:
+    script = script_store.Script(
+        id="caller",
+        name="Caller",
+        pausable=False,
+        steps=[script_store.RunScriptStep(step="run_script", script="does-not-exist")],
+    )
+
+    with pytest.raises(ValueError, match="unknown script"):
+        script_store.save_script(script, directory=tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_save_script_accepts_a_run_script_call_to_an_existing_script(tmp_path: Path) -> None:
+    (tmp_path / "focus.yaml").write_text(FOCUS_YAML)
+
+    script = script_store.Script(
+        id="caller",
+        name="Caller",
+        pausable=False,
+        steps=[script_store.RunScriptStep(step="run_script", script="focus")],
+    )
+    saved = script_store.save_script(script, directory=tmp_path)
+
+    assert saved == script_store.get_script("caller")
+
+
+def test_save_script_rejects_introducing_a_direct_self_call_cycle(tmp_path: Path) -> None:
+    script = script_store.Script(
+        id="self-caller",
+        name="Self caller",
+        pausable=False,
+        steps=[script_store.RunScriptStep(step="run_script", script="self-caller")],
+    )
+
+    with pytest.raises(ValueError, match="call cycle"):
+        script_store.save_script(script, directory=tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_save_script_rejects_breaking_an_existing_callers_argument_type(tmp_path: Path) -> None:
+    (tmp_path / "caller.yaml").write_text(
+        """
+id: caller
+name: Caller
+pausable: false
+steps:
+  - step: run_script
+    script: callee
+    parameters: { value: 1 }
+"""
+    )
+    (tmp_path / "callee.yaml").write_text(
+        """
+id: callee
+name: Callee
+pausable: false
+parameters:
+  value:
+    type: number
+    required: true
+steps: []
+"""
+    )
+    script_store.load_scripts(tmp_path)
+    assert {s.id for s in script_store.load_scripts(tmp_path)} == {"caller", "callee"}
+
+    incompatible_callee = script_store.Script(
+        id="callee",
+        name="Callee",
+        pausable=False,
+        parameters={"value": script_store.Parameter(type="string", required=True)},
+        steps=[],
+    )
+
+    with pytest.raises(ValueError, match="breaks caller 'caller'"):
+        script_store.save_script(incompatible_callee, overwrite=True, directory=tmp_path)
+
+    assert (
+        script_store.Script.model_validate(yaml.safe_load((tmp_path / "callee.yaml").read_text()))
+        .parameters["value"]
+        .type
+        == "number"
+    )
+
+
+def test_load_scripts_merges_builtin_and_user_directories(tmp_path: Path) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    builtin_dir.mkdir()
+    user_dir.mkdir()
+    (builtin_dir / "focus.yaml").write_text(FOCUS_YAML)
+    (user_dir / "minimal.yaml").write_text(MINIMAL_SCRIPT_YAML)
+
+    scripts = script_store.load_scripts(builtin_dir, user_dir)
+
+    assert {s.id for s in scripts} == {"focus", "minimal"}
+
+
+def test_load_scripts_prefers_the_builtin_script_when_ids_collide(tmp_path: Path) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    builtin_dir.mkdir()
+    user_dir.mkdir()
+    (builtin_dir / "minimal.yaml").write_text(MINIMAL_SCRIPT_YAML)
+    (user_dir / "minimal.yaml").write_text(
+        MINIMAL_SCRIPT_YAML.replace("Minimal script", "A user script with the same id")
+    )
+
+    script_store.load_scripts(builtin_dir, user_dir)
+
+    assert script_store.get_script("minimal").name == "Minimal script"
+
+
+def test_save_script_writes_to_the_user_directory_not_the_builtin_directory(
+    tmp_path: Path,
+) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+
+    script_store.save_script(_minimal_script(), directory=user_dir, builtin_directory=builtin_dir)
+
+    assert (user_dir / "minimal.yaml").is_file()
+    assert not builtin_dir.exists() or list(builtin_dir.iterdir()) == []
+
+
+def test_save_script_rejects_an_id_that_collides_with_a_builtin_script(tmp_path: Path) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    builtin_dir.mkdir()
+    (builtin_dir / "minimal.yaml").write_text(MINIMAL_SCRIPT_YAML)
+
+    with pytest.raises(ValueError, match="collides with a built-in script"):
+        script_store.save_script(
+            _minimal_script(), directory=user_dir, builtin_directory=builtin_dir
+        )
+
+    assert not user_dir.exists() or list(user_dir.iterdir()) == []
+
+
+def test_save_script_accepts_a_run_script_call_into_a_builtin_script(tmp_path: Path) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    builtin_dir.mkdir()
+    (builtin_dir / "focus.yaml").write_text(FOCUS_YAML)
+
+    script = script_store.Script(
+        id="caller",
+        name="Caller",
+        pausable=False,
+        steps=[script_store.RunScriptStep(step="run_script", script="focus")],
+    )
+    saved = script_store.save_script(script, directory=user_dir, builtin_directory=builtin_dir)
+
+    assert saved == script_store.get_script("caller")
+    assert script_store.get_script("focus").id == "focus"
+
+
+def test_save_script_serializes_concurrent_saves(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    overlap_detected = threading.Event()
+    currently_inside = threading.Event()
+    original_check = script_store._check_library_accepts
+
+    def slow_check(script: script_store.Script, library: dict) -> None:
+        if currently_inside.is_set():
+            overlap_detected.set()
+        currently_inside.set()
+        try:
+            time.sleep(0.05)
+            original_check(script, library)
+        finally:
+            currently_inside.clear()
+
+    monkeypatch.setattr(script_store, "_check_library_accepts", slow_check)
+
+    def save(script_id: str) -> None:
+        script_store.save_script(_minimal_script(script_id), directory=tmp_path)
+
+    threads = [threading.Thread(target=save, args=(sid,)) for sid in ("script-a", "script-b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not overlap_detected.is_set()
+    saved_ids = {s.id for s in script_store.load_scripts(user_directory=tmp_path)}
+    assert saved_ids >= {"script-a", "script-b"}

@@ -299,6 +299,34 @@ resolve correctly and safely across the whole library:
   run is whatever its currently-executing (sub-)script declares, not a single value fixed at
   `scriptStarted`. Both per [Design.md § Composing scripts](Design.md#composing-scripts).
 
+## Uploading client-authored scripts
+
+`save_script` (INDIMCP-9) lets a client write a script on the Client Computer and upload it to
+the MCP server to run, per [Design.md](Design.md#architecture-overview)'s scripting-layer intro
+and "YAML is loaded only with `yaml.safe_load`" above. Uploaded scripts are validated the same
+way as built-in ones (schema, then the library-wide `run_script`/cycle/argument checks from
+"Script composition") — a bad upload is rejected outright, before anything is written, rather
+than being written and silently dropped at the next load.
+
+* **Built-in and uploaded scripts live in separate directories on disk.** Built-in scripts ship
+  in the repo checkout (`$INDI_MCP_SCRIPTS_DIR`, falling back to `./scripts`); uploaded scripts
+  are written to a separate directory (`$INDI_MCP_USER_SCRIPTS_DIR`, falling back to
+  `./user_scripts`). This is deliberate: on the deployed Raspberry Pi, `$INDI_MCP_SCRIPTS_DIR`
+  points at the git checkout (see `deploy/indi-mcp.service`), so a redeploy overwrites it — an
+  upload written there would be silently lost on the next deploy, and any file living there could
+  be mistaken for a reviewed, version-controlled built-in.
+* **One flat `id` namespace at runtime.** The two directories are merged into a single
+  `id`-keyed library before validation, so a `run_script` step in an uploaded script can call a
+  built-in one and vice versa — same as any other `run_script` reference in "Script composition".
+* **A built-in `id` always wins.** If an uploaded script's `id` collides with a built-in one, the
+  built-in is kept and the uploaded script is dropped (logged) at load time; `save_script` itself
+  rejects an upload that reuses a built-in `id` outright, so a client can never shadow or
+  override built-in behavior by choosing the same `id`.
+* **Uploads are validated against the *whole* merged library, not just themselves.** Saving a
+  script also re-checks any existing script whose `run_script` step calls into it (its parameter
+  schema may have just changed under them) and whether it would close a call cycle — the same
+  checks "Script composition" describes for load time, run before the write instead of after.
+
 ## Design notes
 
 * **Fixed step vocabulary, no embedded expression language.** `step` is a closed enum
