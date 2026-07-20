@@ -557,6 +557,121 @@ async def test_execute_script_non_exempt_script_still_requires_connection_for_sa
         await script_engine.execute_script("park", "test-rig", {})
 
 
+async def test_execute_script_composed_sequence_exempts_role_when_connect_runs_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A composed sequence that calls `connect` for a role before using that role for
+    something else is exempt for that role — the connect call is genuinely first in
+    execution order, so it gets to run against the not-yet-connected device it exists to
+    connect (INDIMCP-53)."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    _script(
+        "connect_then_park",
+        steps=[
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+            _set_property("mount", "TELESCOPE_PARK", {"PARK": "On"}),
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    await script_engine.execute_script("connect_then_park", "test-rig", {})
+
+
+async def test_execute_script_composed_sequence_still_requires_connection_before_connect_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A composed sequence that uses a role for something else *before* calling `connect`
+    for it is not exempt: that earlier use still needs the device already connected, since
+    the connect call hasn't run yet at that point in the sequence (INDIMCP-53)."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    _script(
+        "park_then_connect",
+        steps=[
+            _set_property("mount", "TELESCOPE_PARK", {"PARK": "On"}),
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    with pytest.raises(script_engine.ScriptPreconditionError, match="mount.*not connected"):
+        await script_engine.execute_script("park_then_connect", "test-rig", {})
+
+
+async def test_execute_script_if_branch_exemption_is_coarse_across_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Documented limitation (see `_RoleUsage`): `then`/`else` are walked as if sequential,
+    `then` before `else`, even though only one runs at execution time. A role connected in
+    `then` reads as already exempt by the time `else` is walked, regardless of which branch a
+    real run takes — pinned down here so a future change to `_walk_role_usage` doesn't
+    silently make this better or worse without a test noticing (INDIMCP-53)."""
+    _rig(
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+        rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
+    )
+    _script(
+        "conditional_connect",
+        steps=[
+            {
+                "step": "if",
+                "condition": {
+                    "role": "camera",
+                    "property": "CONNECTION",
+                    "operator": "equals",
+                    "value": "On",
+                },
+                "then": [_set_property("mount", "CONNECTION", {"CONNECT": "On"})],
+                "else": [_set_property("mount", "TELESCOPE_PARK", {"PARK": "On"})],
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    # Condition false (camera reports "Off"), so only `else` actually runs — it never
+    # manages `mount`'s CONNECTION itself, but `then`'s connect step was already walked
+    # (recording `mount` as exempt) before `else` was walked, regardless of which branch
+    # executes. Camera stays reported "connected" throughout so only mount's exemption is
+    # under test here.
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Off")
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"}
+            if name == "CONNECTION" and device == "Telescope Simulator"
+            else _default_get_property_values(device, name)
+        ),
+    )
+
+    await script_engine.execute_script("conditional_connect", "test-rig", {})
+
+    send_property.assert_awaited_once_with("Telescope Simulator", "TELESCOPE_PARK", {"PARK": "On"})
+
+
 async def test_execute_script_wait_for_succeeds_once_condition_is_met(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -280,19 +280,6 @@ def _run_script_calls(steps: list[Step]) -> list[RunScriptStep]:
     return calls
 
 
-def _iter_all_steps(steps: list[Step]) -> list[Step]:
-    """Flatten `steps` and everything nested inside `repeat`/`if` bodies (not `run_script`)."""
-    flattened: list[Step] = []
-    for step in steps:
-        flattened.append(step)
-        if isinstance(step, RepeatStep):
-            flattened.extend(_iter_all_steps(step.steps))
-        elif isinstance(step, IfStep):
-            flattened.extend(_iter_all_steps(step.then))
-            flattened.extend(_iter_all_steps(step.else_))
-    return flattened
-
-
 def _substituted_role(role: str, params: dict[str, Any]) -> str:
     """Resolve a step's `role` field against `params`, same as any other substitutable value.
 
@@ -330,23 +317,27 @@ def _step_role(step: Step, params: dict[str, Any]) -> str | None:
 class _RoleUsage:
     """The concrete roles a run needs, and which of those it manages `CONNECTION` for itself.
 
-    `connection_managed_roles` is scoped to the *run as a whole*, not to any
-    particular step or invocation within it: if some step anywhere in the
-    call tree sets/checks `CONNECTION` for role X, X is exempt from
-    `_check_devices_connected`'s "must already be connected" requirement
-    for every use of X in this run, including uses that happen to precede
-    the connecting step, or that live in an entirely different branch of
-    the call tree. This is deliberately coarse (see `_collect_role_usage`)
-    — a script that both connects a role *and* uses that role's device for
-    something else in the same run won't get a pre-flight guard for the
-    latter, and could hit a raw error mid-step instead of the clean
-    `ScriptPreconditionError` `_check_devices_connected` otherwise
-    guarantees. Not reachable by any script shipped today (`connect`/
-    `disconnect` are each a single self-contained set_property/wait_for
-    pair with nothing else in the run to protect), but a future composed
-    sequence (INDIMCP-49) that mixes a `connect` call with other steps
-    against the same role should not assume this check has its back —
-    tracked as INDIMCP-53 to revisit once composed scripts exist.
+    `connection_managed_roles` is position-aware, not tree-global: a role X
+    is exempt from `_check_devices_connected`'s "must already be connected"
+    requirement only if the *first* use of X, in execution order (walking
+    `run_script` calls inline at their real position — see
+    `_collect_role_usage`), is itself a step that sets/checks `CONNECTION`
+    for X. A role used for something else first (even if some later step
+    manages `CONNECTION` for it) is not exempt — that earlier use still
+    needs the device already connected, and gets the clean
+    `ScriptPreconditionError` `_check_devices_connected` guarantees, rather
+    than a raw error mid-step. This is what makes a composed sequence
+    (INDIMCP-49) that mixes a `connect` call with other steps against the
+    same role safe: the connect call only grants the exemption if it
+    genuinely comes first for that role (INDIMCP-53).
+
+    Still deliberately coarse across `if` branches: `then`/`else` are
+    walked as if sequential (`then` first), even though only one runs at
+    execution time, so a role connected in one branch reads as already
+    exempt by the time the other branch is walked, regardless of which
+    branch a real run takes. Correctly scoping this would need per-branch,
+    path-sensitive tracking; not worth the complexity for scripts that
+    don't exist yet (no shipped script uses `if` at all today).
     """
 
     roles: set[str] = field(default_factory=set)
@@ -378,11 +369,11 @@ def _collect_role_usage(
     rig-component role this specific run will use, and a bad one still
     fails before any step runs, matching the guarantee for literal roles.
 
-    `connection_managed_roles` mirrors the previous `_roles_managing_own_connection`:
-    a role some step in the tree itself sets/checks `CONNECTION` for is
-    exempted, in `_check_devices_connected`, from the "must already be
-    connected" requirement — otherwise a `connect_*`/`disconnect_*` script
-    could never run against the very device it exists to connect.
+    Walks steps in true execution order (see `_walk_role_usage`), inlining
+    `run_script` calls at their real position rather than visiting a
+    script's own steps and its callees' steps as two separate passes — this
+    is what makes `connection_managed_roles` position-aware (see
+    `_RoleUsage`) instead of tree-global.
 
     `_visited` memoizes by `(script.id, resolved params)`, not just
     `script.id` — walking a purely structural call tree could dedupe by id
@@ -404,23 +395,55 @@ def _collect_role_usage(
         return usage
     _visited.add(cache_key)
 
-    for step in _iter_all_steps(script.steps):
-        role = _step_role(step, params)
-        if role is None:
-            continue
-        usage.roles.add(role)
-        sets_connection = isinstance(step, SetPropertyStep) and step.property == "CONNECTION"
-        waits_on_connection = (
-            isinstance(step, WaitForStep) and step.condition.property == "CONNECTION"
-        )
-        if sets_connection or waits_on_connection:
-            usage.connection_managed_roles.add(role)
-    for call in _run_script_calls(script.steps):
-        callee = scripts[call.script]
-        call_args = {name: _substitute(value, params) for name, value in call.parameters.items()}
-        callee_params = _resolve_parameters(callee, call_args)
-        _collect_role_usage(callee, callee_params, scripts, usage, _visited)
+    _walk_role_usage(script.steps, params, scripts, usage, _visited)
     return usage
+
+
+def _walk_role_usage(
+    steps: list[Step],
+    params: dict[str, Any],
+    scripts: dict[str, Script],
+    usage: _RoleUsage,
+    _visited: set[tuple[str, tuple[tuple[str, Any], ...]]],
+) -> None:
+    """Record `steps`' role usage in execution order, inlining `run_script` calls in place.
+
+    A role's *first* recorded use (across this whole walk, including into
+    callees, in true execution order) determines whether it lands in
+    `connection_managed_roles` — see `_RoleUsage`. A `run_script` step
+    recurses via `_collect_role_usage` itself (not a separate
+    call-collection pass, unlike the structural walk `_run_script_calls`
+    does for `_collect_reachable_scripts`) so its callee's steps are
+    visited at exactly the point the caller would actually run them, and so
+    the top-level (script.id, params) memoization in `_collect_role_usage`
+    still applies to nested calls.
+    """
+    for step in steps:
+        if isinstance(step, RunScriptStep):
+            callee = scripts[step.script]
+            call_args = {
+                name: _substitute(value, params) for name, value in step.parameters.items()
+            }
+            callee_params = _resolve_parameters(callee, call_args)
+            _collect_role_usage(callee, callee_params, scripts, usage, _visited)
+            continue
+
+        role = _step_role(step, params)
+        if role is not None:
+            first_use = role not in usage.roles
+            usage.roles.add(role)
+            sets_connection = isinstance(step, SetPropertyStep) and step.property == "CONNECTION"
+            waits_on_connection = (
+                isinstance(step, WaitForStep) and step.condition.property == "CONNECTION"
+            )
+            if first_use and (sets_connection or waits_on_connection):
+                usage.connection_managed_roles.add(role)
+
+        if isinstance(step, RepeatStep):
+            _walk_role_usage(step.steps, params, scripts, usage, _visited)
+        elif isinstance(step, IfStep):
+            _walk_role_usage(step.then, params, scripts, usage, _visited)
+            _walk_role_usage(step.else_, params, scripts, usage, _visited)
 
 
 def _count_total_steps(script: Script, scripts: dict[str, Script]) -> int | None:
@@ -572,16 +595,15 @@ def _check_devices_connected(
     INDIMCP-52) or the operator.
 
     `exempt_roles` (see `_collect_role_usage`'s `connection_managed_roles`) skips the "must
-    already be `CONNECT = On`" half of this check for roles whose own run
-    sets/checks `CONNECTION` — otherwise a `connect_*`/`disconnect_*`
-    script could never run against a not-yet-connected device, since it
-    would require the very state it exists to create. This exemption is
-    scoped to the whole run, not to "after the connecting step" — see
+    already be `CONNECT = On`" half of this check for roles whose *first*
+    use in the run sets/checks `CONNECTION` — otherwise a `connect_*`/
+    `disconnect_*` script could never run against a not-yet-connected
+    device, since it would require the very state it exists to create.
+    This exemption is position-aware, not whole-run — see
     `_RoleUsage.connection_managed_roles`'s docstring for what that means
-    for a future composed script (tracked as INDIMCP-53). The "must be
-    known to indiserver at all" half stays unconditional for every device
-    regardless of exemption: no script can connect a device whose driver
-    was never started.
+    for a composed script (INDIMCP-53). The "must be known to indiserver at
+    all" half stays unconditional for every device regardless of exemption:
+    no script can connect a device whose driver was never started.
     """
     checked: set[str] = set()
     for role, device in role_to_device.items():
