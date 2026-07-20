@@ -332,26 +332,50 @@ async def cancel_script(run_id: str) -> ScriptRunStatus:
     return run.latest_status
 
 
+def _is_terminal(run: _Run) -> bool:
+    """Whether `run`'s background task has already finished (successfully or not)."""
+    return run.task is not None and run.task.done()
+
+
+def _pause_rejected(run: _Run, reason: str) -> ScriptRunPauseRejected:
+    """Build a `scriptPauseRejected` envelope for `run`.
+
+    Deliberately does *not* write to `run.latest_status` — a rejection is
+    this call's own response, not a change to the run's actual state, so it
+    must never clobber whatever `scriptProgress`/terminal status is already
+    on file for polling. This is what keeps a stray `pause_script`/
+    `resume_script` call on an already-finished run from destroying its
+    recorded `scriptCompleted`/`scriptFailed`/`scriptCancelled` outcome
+    (including a completed run's `result`) — the exact thing
+    `get_script_status`'s reconnect story in `docs/Design.md` depends on
+    still being there.
+    """
+    return {
+        "kind": "scriptPauseRejected",
+        "runId": run.run_id,
+        "rigId": run.rig_id,
+        "reason": reason,
+    }
+
+
 def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
     """Request `run_id` pause at its next safe point, if its script allows it.
 
     Gated on the top-level script's `pausable` flag captured at
     `start_script` time, per Design.md ("These only succeed if the run's
-    `pausable` flag was `true`"). Doesn't wait for the run to actually reach
-    the paused state — `execute_script`'s `pause_event` is only honored
-    between steps, so `pausedAtStep` reports the last step progress is
-    known for, same as `scriptProgress` would.
+    `pausable` flag was `true`"), and on the run not having already reached
+    a terminal state — pausing a finished run makes no sense and, if
+    allowed, would silently overwrite its recorded outcome (see
+    `_pause_rejected`). Doesn't wait for the run to actually reach the
+    paused state — `execute_script`'s `pause_event` is only honored between
+    steps, so `pausedAtStep` reports the last step progress is known for,
+    same as `scriptProgress` would.
     """
     run = _get_run(run_id)
+    if _is_terminal(run):
+        return _pause_rejected(run, "This run has already finished")
     if not run.pausable:
-        rejected: ScriptRunPauseRejected = {
-            "kind": "scriptPauseRejected",
-            "runId": run.run_id,
-            "rigId": run.rig_id,
-            "reason": "This script has no safe point to pause at",
-        }
-        run.latest_status = rejected
-        return rejected
+        return _pause_rejected(run, "This script has no safe point to pause at")
     run.pause_event.set()
     paused: ScriptRunPaused = {
         "kind": "scriptPaused",
@@ -366,21 +390,17 @@ def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
 def resume_script(run_id: str) -> ScriptRunResumed | ScriptRunPauseRejected:
     """Clear a pending pause for `run_id`, if its script allows pausing at all.
 
-    Gated the same way as `pause_script` (see there) — the rejection shape
-    is identical to what a `pause_script` call on the same run would give,
-    since the underlying reason (this script has no safe point to suspend
-    at, so it never actually paused) is the same one either way.
+    Gated the same way as `pause_script` (see there, including the
+    already-finished check) — the rejection shape is identical to what a
+    `pause_script` call on the same run would give, since the underlying
+    reason (this script has no safe point to suspend at, so it never
+    actually paused) is the same one either way.
     """
     run = _get_run(run_id)
+    if _is_terminal(run):
+        return _pause_rejected(run, "This run has already finished")
     if not run.pausable:
-        rejected: ScriptRunPauseRejected = {
-            "kind": "scriptPauseRejected",
-            "runId": run.run_id,
-            "rigId": run.rig_id,
-            "reason": "This script has no safe point to pause at",
-        }
-        run.latest_status = rejected
-        return rejected
+        return _pause_rejected(run, "This script has no safe point to pause at")
     run.pause_event.clear()
     resumed: ScriptRunResumed = {
         "kind": "scriptResumed",

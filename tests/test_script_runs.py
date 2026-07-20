@@ -202,6 +202,57 @@ async def test_pause_script_rejects_when_script_is_not_pausable() -> None:
     await script_runs.cancel_script(started["runId"])
 
 
+async def test_pause_script_rejects_and_does_not_clobber_an_already_finished_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pausing a run that already completed must not overwrite its recorded outcome —
+    otherwise get_script_status would lose the real scriptCompleted result."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool",
+        pausable=True,
+        steps=[_set_property("camera", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10"})],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+
+    started = await script_runs.start_script("cool", "test-rig", {})
+    await _await_run(started["runId"])
+    completed_status = script_runs.get_script_status(started["runId"])
+    assert completed_status["kind"] == "scriptCompleted"
+
+    result = script_runs.pause_script(started["runId"])
+
+    assert result["kind"] == "scriptPauseRejected"
+    rejected = cast(script_runs.ScriptRunPauseRejected, result)
+    assert rejected["reason"] == "This run has already finished"
+
+    # The run's real outcome must still be there afterward, untouched.
+    assert script_runs.get_script_status(started["runId"]) == completed_status
+
+
+async def test_resume_script_rejects_and_does_not_clobber_an_already_finished_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool",
+        pausable=True,
+        steps=[_set_property("camera", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10"})],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+
+    started = await script_runs.start_script("cool", "test-rig", {})
+    await _await_run(started["runId"])
+    completed_status = script_runs.get_script_status(started["runId"])
+
+    result = script_runs.resume_script(started["runId"])
+
+    assert result["kind"] == "scriptPauseRejected"
+    rejected = cast(script_runs.ScriptRunPauseRejected, result)
+    assert rejected["reason"] == "This run has already finished"
+    assert script_runs.get_script_status(started["runId"]) == completed_status
+
+
 async def test_resume_script_rejects_when_script_is_not_pausable() -> None:
     _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
     _script(
