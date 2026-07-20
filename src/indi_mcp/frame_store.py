@@ -354,12 +354,18 @@ def purge_transferred_frames(
     `delete_frame`'s own default safety check: a frame the Client Computer
     hasn't confirmed receiving yet is never eligible, no matter how old.
 
-    Returns the metadata of every frame actually deleted (as it was just
-    before deletion), most recently captured first — useful for a caller
-    that wants to report what was purged. Deletes one frame at a time via
-    `delete_frame`, so a failure partway through (e.g. a locked database
-    file) leaves every frame processed so far actually deleted rather than
-    the whole purge silently rolling back.
+    Returns the metadata of every frame actually deleted by this call (as
+    it was just before deletion), most recently captured first — useful
+    for a caller that wants to report what was purged. Deletes one frame
+    at a time via `delete_frame`, so a failure partway through (e.g. a
+    locked database file) leaves every frame processed so far actually
+    deleted rather than the whole purge silently rolling back. A candidate
+    frame that's already gone by the time its turn comes up — deleted
+    concurrently by another `delete_frame`/`purge_transferred_frames` call
+    in between this function's own initial query and reaching that frame —
+    is treated as already-purged rather than a failure: nothing here
+    serializes concurrent callers, and a caller's goal ("this frame no
+    longer takes up space") is equally satisfied either way.
     """
     cutoff = (datetime.now(tz=UTC) - older_than).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
     with db.connect(db_path) as conn:
@@ -369,7 +375,12 @@ def purge_transferred_frames(
             "ORDER BY captured_at DESC",
             (cutoff,),
         ).fetchall()
-    purged = [_row_to_metadata(row) for row in rows]
-    for frame in purged:
-        delete_frame(frame["frameId"], db_path=db_path)
+    candidates = [_row_to_metadata(row) for row in rows]
+    purged: list[FrameMetadata] = []
+    for frame in candidates:
+        try:
+            delete_frame(frame["frameId"], db_path=db_path)
+        except FrameNotFoundError:
+            continue
+        purged.append(frame)
     return purged

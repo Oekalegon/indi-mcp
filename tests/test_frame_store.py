@@ -426,3 +426,41 @@ def test_purge_transferred_frames_returns_an_empty_list_when_nothing_qualifies(
 
     assert purged == []
     assert frame_store.get_frame_metadata(saved["frameId"], db_path=db_path)
+
+
+def test_purge_transferred_frames_skips_a_frame_deleted_concurrently(
+    store_paths: tuple[Path, Path], monkeypatch
+) -> None:
+    frames_dir, db_path = store_paths
+    now = datetime.now(tz=UTC)
+
+    raced_away = frame_store.save_frame(
+        b"one", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    frame_store.confirm_frame_transfer(raced_away["frameId"], db_path=db_path)
+    _backdate(db_path, raced_away["frameId"], now - timedelta(days=10))
+
+    survivor = frame_store.save_frame(
+        b"two", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    frame_store.confirm_frame_transfer(survivor["frameId"], db_path=db_path)
+    _backdate(db_path, survivor["frameId"], now - timedelta(days=9))
+
+    real_delete_frame = frame_store.delete_frame
+
+    def racy_delete_frame(frame_id: str, **kwargs: object) -> None:
+        if frame_id == raced_away["frameId"]:
+            # Simulate another caller deleting this frame first.
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("DELETE FROM frames WHERE frame_id = ?", (frame_id,))
+                conn.commit()
+            (frames_dir / f"{frame_id}.fits").unlink()
+        real_delete_frame(frame_id, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(frame_store, "delete_frame", racy_delete_frame)
+
+    purged = frame_store.purge_transferred_frames(older_than=timedelta(weeks=1), db_path=db_path)
+
+    assert [f["frameId"] for f in purged] == [survivor["frameId"]]
+    with pytest.raises(frame_store.FrameNotFoundError):
+        frame_store.get_frame_metadata(raced_away["frameId"], db_path=db_path)
