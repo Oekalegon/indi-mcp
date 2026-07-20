@@ -7,14 +7,23 @@ which run produced each one, which device captured it, when, and whether
 the Client Computer has confirmed receiving it yet.
 
 This module is the storage layer only — `save_frame`/`list_frames`/
-`get_frame_metadata`/`confirm_frame_transfer` are plain functions, not MCP
-tools. Draining a BLOB out of `indi_messaging` and calling `save_frame`
-with the result is `script_engine`'s `capture_frame` step handler
-(INDIMCP-37); exposing `list_frames`/`get_frame_metadata`/
-`confirm_frame_transfer` as MCP tools, plus a `frame://{frameId}` resource
-for the bytes themselves, is INDIMCP-11 — neither is built yet, mirroring
-how `rig_store`'s plain functions are wired up as `@mcp.tool()`s
-separately in `server.py`.
+`get_frame_metadata`/`confirm_frame_transfer`/`delete_frame` are plain
+functions, not MCP tools. Draining a BLOB out of `indi_messaging` and
+calling `save_frame` with the result is `script_engine`'s `capture_frame`
+step handler (INDIMCP-37); exposing these as MCP tools, plus a
+`frame://{frameId}` resource for the bytes themselves, is INDIMCP-11 —
+neither is built yet, mirroring how `rig_store`'s plain functions are
+wired up as `@mcp.tool()`s separately in `server.py`.
+
+`delete_frame` is deliberately never called by anything in this module or
+`script_engine` — the Raspberry Pi's storage is small enough that frames
+need cleaning up, but per `docs/Design.md#frame-storage-metadata`
+("Cleanup ... is tied to the frame's own lifecycle ... not to a fixed time
+window"), that cleanup is a client-initiated action (an explicit
+`delete_frame` MCP tool, INDIMCP-11) taken once the Client Computer has
+confirmed it safely has its own copy (`confirm_frame_transfer`) — never an
+automatic sweep run by the server itself, which could delete a frame
+before it's actually been retrieved.
 
 **Every function here is synchronous and blocking** — `save_frame` does a
 plain `Path.write_bytes` (a captured FITS frame can be tens of MB) plus a
@@ -50,6 +59,7 @@ __all__ = [
     "FrameMetadata",
     "FrameNotFoundError",
     "confirm_frame_transfer",
+    "delete_frame",
     "get_frame_metadata",
     "get_frame_path",
     "list_frames",
@@ -265,3 +275,29 @@ def confirm_frame_transfer(frame_id: str, *, db_path: Path | None = None) -> Fra
         )
         conn.commit()
     return get_frame_metadata(frame_id, db_path=db_path)
+
+
+def delete_frame(frame_id: str, *, db_path: Path | None = None) -> None:
+    """Delete `frame_id`'s file and its `frames` row. Raises `FrameNotFoundError` if unknown.
+
+    A manual, client-requested cleanup action, not an automatic sweep —
+    see this module's docstring for why (`transferred_at` being set is
+    *not* required or checked here; that policy call — e.g. an MCP tool
+    refusing to delete an unconfirmed frame — belongs at the INDIMCP-11
+    layer that decides what a client is allowed to request, not here).
+
+    Deletes the `frames` row before the file, the opposite order from
+    `save_frame`'s own failure handling: if something goes wrong partway
+    through, a metadata row surviving with no file behind it (broken for
+    `frame://{frameId}` reads) is worse than a file surviving with no row
+    pointing to it (just unused disk space, and never returned by
+    `list_frames`/`get_frame_metadata` again either way).
+    """
+    row = _get_row(frame_id, db_path)
+    path = Path(row["path"])
+    with db.connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute("DELETE FROM frames WHERE frame_id = ?", (frame_id,))
+        conn.commit()
+    path.unlink(missing_ok=True)
+    logger.info("Deleted frame %s (%s)", frame_id, path)

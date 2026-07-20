@@ -230,3 +230,57 @@ def test_confirm_frame_transfer_raises_for_an_unknown_frame_id(
 
     with pytest.raises(frame_store.FrameNotFoundError):
         frame_store.confirm_frame_transfer("does-not-exist", db_path=db_path)
+
+
+def test_delete_frame_removes_the_file_and_the_metadata_row(
+    store_paths: tuple[Path, Path],
+) -> None:
+    frames_dir, db_path = store_paths
+    saved = frame_store.save_frame(
+        b"data", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    path = frame_store.get_frame_path(saved["frameId"], db_path=db_path)
+    assert path.exists()
+
+    frame_store.delete_frame(saved["frameId"], db_path=db_path)
+
+    assert not path.exists()
+    with pytest.raises(frame_store.FrameNotFoundError):
+        frame_store.get_frame_metadata(saved["frameId"], db_path=db_path)
+
+
+def test_delete_frame_does_not_require_the_frame_to_be_transferred(
+    store_paths: tuple[Path, Path],
+) -> None:
+    frames_dir, db_path = store_paths
+    saved = frame_store.save_frame(
+        b"data", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    assert saved["transferredAt"] is None
+
+    frame_store.delete_frame(saved["frameId"], db_path=db_path)
+
+    with pytest.raises(frame_store.FrameNotFoundError):
+        frame_store.get_frame_metadata(saved["frameId"], db_path=db_path)
+
+
+def test_delete_frame_leaves_other_frames_untouched(store_paths: tuple[Path, Path]) -> None:
+    frames_dir, db_path = store_paths
+    doomed = frame_store.save_frame(
+        b"one", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    survivor = frame_store.save_frame(
+        b"two", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+
+    frame_store.delete_frame(doomed["frameId"], db_path=db_path)
+
+    assert frame_store.get_frame_metadata(survivor["frameId"], db_path=db_path) == survivor
+    assert frame_store.get_frame_path(survivor["frameId"], db_path=db_path).exists()
+
+
+def test_delete_frame_raises_for_an_unknown_frame_id(store_paths: tuple[Path, Path]) -> None:
+    _, db_path = store_paths
+
+    with pytest.raises(frame_store.FrameNotFoundError):
+        frame_store.delete_frame("does-not-exist", db_path=db_path)
