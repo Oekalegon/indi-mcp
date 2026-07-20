@@ -106,7 +106,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def _now() -> str:
-    return datetime.now(tz=UTC).isoformat()
+    """The current UTC time, ISO 8601, always including microseconds.
+
+    `datetime.isoformat()` on its own omits the fractional-seconds
+    component whenever `microsecond == 0`, which makes two `captured_at`
+    values of different lengths — plain lexicographic comparison (as
+    `list_frames`'s `since` filter and `ORDER BY captured_at` both do)
+    would then depend on '+' sorting before '.' in ASCII to stay
+    chronological. Forcing `%f` always present keeps every value the same
+    length, so that comparison is straightforwardly correct instead of
+    relying on that coincidence.
+    """
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
 def _row_to_metadata(row: sqlite3.Row) -> FrameMetadata:
