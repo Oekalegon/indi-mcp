@@ -557,6 +557,70 @@ async def test_execute_script_non_exempt_script_still_requires_connection_for_sa
         await script_engine.execute_script("park", "test-rig", {})
 
 
+async def test_execute_script_composed_sequence_exempts_role_when_connect_runs_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A composed sequence that calls `connect` for a role before using that role for
+    something else is exempt for that role — the connect call is genuinely first in
+    execution order, so it gets to run against the not-yet-connected device it exists to
+    connect (INDIMCP-53)."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    _script(
+        "connect_then_park",
+        steps=[
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+            _set_property("mount", "TELESCOPE_PARK", {"PARK": "On"}),
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    await script_engine.execute_script("connect_then_park", "test-rig", {})
+
+
+async def test_execute_script_composed_sequence_still_requires_connection_before_connect_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A composed sequence that uses a role for something else *before* calling `connect`
+    for it is not exempt: that earlier use still needs the device already connected, since
+    the connect call hasn't run yet at that point in the sequence (INDIMCP-53)."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "connect",
+        parameters={"role": {"type": "string", "required": True}},
+        steps=[_set_property("{{ role }}", "CONNECTION", {"CONNECT": "On"})],
+    )
+    _script(
+        "park_then_connect",
+        steps=[
+            _set_property("mount", "TELESCOPE_PARK", {"PARK": "On"}),
+            {"step": "run_script", "script": "connect", "parameters": {"role": "mount"}},
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CONNECT": "Off", "DISCONNECT": "On"} if name == "CONNECTION" else None
+        ),
+    )
+
+    with pytest.raises(script_engine.ScriptPreconditionError, match="mount.*not connected"):
+        await script_engine.execute_script("park_then_connect", "test-rig", {})
+
+
 async def test_execute_script_wait_for_succeeds_once_condition_is_met(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
