@@ -306,14 +306,14 @@ CREATE INDEX idx_frames_captured_at ON frames (captured_at);
 
 Two separate concerns: finding out what frames exist (metadata, cheap, queried against the `frames` table above), and getting the frame bytes themselves (potentially large FITS files). They're deliberately split into different tool calls rather than one "give me everything" call.
 
-**`list_frames`** — query frame metadata with optional filters, returning `frame_id`s and everything else in the `frames` table except the file path (an internal server-side detail, not exposed to the client):
+**`list_frames`** — query frame metadata with optional filters, returning `frame_id`s and everything else in the `frames` table except the file path (an internal server-side detail, not exposed to the client). `transferred` is tri-state (omitted/`null` = every frame, `true` = only already-transferred ones, `false` = only ones still waiting to be retrieved) rather than a one-directional `transferredOnly` flag, since knowing what's still pending is just as useful as seeing what's done — e.g. before deciding it's safe to run `purge_transferred_frames` (below):
 
 ```json
 {
   "runId": "b3f1c2d4-...",
   "device": null,
   "since": "2026-07-14T00:00:00Z",
-  "transferredOnly": false
+  "transferred": false
 }
 ```
 
@@ -340,6 +340,14 @@ Two separate concerns: finding out what frames exist (metadata, cheap, queried a
 **Explicit transfer confirmation, not read-implies-received.** `transferred_at` is *not* set just because the server sent the bytes — a network drop mid-transfer shouldn't be recorded as a successful transfer. Instead, the client calls a `confirm_frame_transfer` tool with the `frameId` once it has verified the frame is safely saved locally; only that sets `transferred_at`. This follows the same "don't trust delivery, wait for acknowledgement" principle already applied to the event log and script status.
 
 **Open question, not resolved here:** MCP's base resource-read mechanism returns the whole content in one response — there's no native chunked/range read. For typical FITS frames this is likely fine, but if frame sizes turn out to be large enough to matter (very large sensors, or long-exposure stacks) we may need our own chunking convention (e.g. `offset`/`length` parameters) layered on top. Deferred until real frame sizes from actual hardware are known rather than solved speculatively now.
+
+## Deleting frames
+
+The INDI Device's own storage is limited, so frames need cleaning up once the Client Computer has its own copy — but never automatically: the server itself never deletes a frame on its own initiative, only in direct response to one of these two client-initiated tool calls.
+
+**`delete_frame`** — deletes one frame's file and metadata row, identified by `frameId`. Refuses (raises an error) if that frame's `transferredAt` isn't set yet, unless the caller explicitly passes `requireTransferred: false` — deleting the only copy of a frame the Client Computer never actually confirmed receiving would be data loss, so this is safe by default rather than trusting every caller to check first.
+
+**`purge_transferred_frames`** — bulk-deletes every already-transferred frame captured more than a caller-supplied age ago (`olderThanDays`, always explicit — never a hardcoded default, since how much local retention makes sense depends on the Pi's actual free storage and how often the operator downloads frames). Age is measured from `capturedAt`, not `transferredAt`. Returns the metadata of every frame actually deleted, most recently captured first.
 
 ## Imaging rig metadata
 

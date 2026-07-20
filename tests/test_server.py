@@ -1,8 +1,18 @@
+from datetime import timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from indi_mcp import indi_driver, indi_messaging, observatory_store, rig_store, script_runs, server
+from indi_mcp import (
+    frame_store,
+    indi_driver,
+    indi_messaging,
+    observatory_store,
+    rig_store,
+    script_runs,
+    server,
+)
 
 
 async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family(
@@ -198,3 +208,129 @@ def test_resume_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch)
 
     assert result == {"kind": "scriptResumed", "runId": "abc"}
     assert calls == ["abc"]
+
+
+_FRAME_METADATA: frame_store.FrameMetadata = {
+    "frameId": "frame-1",
+    "runId": "run-1",
+    "device": "cam",
+    "sizeBytes": 10,
+    "capturedAt": "2026-07-20T00:00:00.000000+00:00",
+    "transferredAt": None,
+}
+
+
+async def test_list_frames_delegates_to_frame_store_with_all_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    def fake_list_frames(
+        *, run_id: str | None, device: str | None, since: str | None, transferred: bool | None
+    ) -> list[frame_store.FrameMetadata]:
+        calls.append((run_id, device, since, transferred))
+        return [_FRAME_METADATA]
+
+    monkeypatch.setattr(frame_store, "list_frames", fake_list_frames)
+
+    result = await server.list_frames(
+        run_id="run-1", device="cam", since="2026-07-19T00:00:00+00:00", transferred=False
+    )
+
+    assert result == [_FRAME_METADATA]
+    assert calls == [("run-1", "cam", "2026-07-19T00:00:00+00:00", False)]
+
+
+async def test_get_frame_metadata_delegates_to_frame_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_get_frame_metadata(frame_id: str) -> frame_store.FrameMetadata:
+        calls.append(frame_id)
+        return _FRAME_METADATA
+
+    monkeypatch.setattr(frame_store, "get_frame_metadata", fake_get_frame_metadata)
+
+    result = await server.get_frame_metadata("frame-1")
+
+    assert result == _FRAME_METADATA
+    assert calls == ["frame-1"]
+
+
+async def test_confirm_frame_transfer_delegates_to_frame_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_confirm_frame_transfer(frame_id: str) -> frame_store.FrameMetadata:
+        calls.append(frame_id)
+        return {**_FRAME_METADATA, "transferredAt": "2026-07-20T00:05:00.000000+00:00"}
+
+    monkeypatch.setattr(frame_store, "confirm_frame_transfer", fake_confirm_frame_transfer)
+
+    result = await server.confirm_frame_transfer("frame-1")
+
+    assert result["transferredAt"] == "2026-07-20T00:05:00.000000+00:00"
+    assert calls == ["frame-1"]
+
+
+async def test_delete_frame_delegates_to_frame_store_with_the_require_transferred_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    def fake_delete_frame(frame_id: str, *, require_transferred: bool = True) -> None:
+        calls.append((frame_id, require_transferred))
+
+    monkeypatch.setattr(frame_store, "delete_frame", fake_delete_frame)
+
+    await server.delete_frame("frame-1", require_transferred=False)
+
+    assert calls == [("frame-1", False)]
+
+
+async def test_purge_transferred_frames_delegates_to_frame_store_with_a_timedelta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[timedelta] = []
+
+    def fake_purge_transferred_frames(*, older_than: timedelta) -> list[frame_store.FrameMetadata]:
+        calls.append(older_than)
+        return [_FRAME_METADATA]
+
+    monkeypatch.setattr(frame_store, "purge_transferred_frames", fake_purge_transferred_frames)
+
+    result = await server.purge_transferred_frames(older_than_days=7)
+
+    assert result == [_FRAME_METADATA]
+    assert calls == [timedelta(days=7)]
+
+
+async def test_read_frame_returns_the_frames_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    calls: list[str] = []
+
+    def fake_get_frame_path(frame_id: str) -> Path:
+        calls.append(frame_id)
+        return frame_path
+
+    monkeypatch.setattr(frame_store, "get_frame_path", fake_get_frame_path)
+
+    result = await server.read_frame("frame-1")
+
+    assert result == b"fits-bytes"
+    assert calls == ["frame-1"]
+
+
+async def test_read_frame_propagates_frame_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_frame_path(frame_id: str) -> Path:
+        raise frame_store.FrameNotFoundError(f"no frame found for frameId {frame_id!r}")
+
+    monkeypatch.setattr(frame_store, "get_frame_path", fake_get_frame_path)
+
+    with pytest.raises(frame_store.FrameNotFoundError):
+        await server.read_frame("does-not-exist")
