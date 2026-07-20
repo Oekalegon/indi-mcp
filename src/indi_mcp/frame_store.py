@@ -15,6 +15,22 @@ with the result is `script_engine`'s `capture_frame` step handler
 for the bytes themselves, is INDIMCP-11 — neither is built yet, mirroring
 how `rig_store`'s plain functions are wired up as `@mcp.tool()`s
 separately in `server.py`.
+
+**Every function here is synchronous and blocking** — `save_frame` does a
+plain `Path.write_bytes` (a captured FITS frame can be tens of MB) plus a
+synchronous `sqlite3` connect/execute/commit, and the read/update
+functions do the same minus the file write. Called directly from
+`asyncio`-driven code (an `@mcp.tool()` handler, `script_engine`'s
+`capture_frame` step), that would stall the single event loop this whole
+server runs on — every other device's messaging stream and every other
+script run's pause/cancel/progress polling included — for as long as the
+write takes. Callers in async code MUST wrap every call here in
+`asyncio.to_thread(...)`, exactly as `server.py` already does for
+`rig_store.save_rig`/`observatory_store.save_observatory`:
+
+    metadata = await asyncio.to_thread(
+        frame_store.save_frame, data, device=device, extension=extension, run_id=run_id
+    )
 """
 
 import logging
