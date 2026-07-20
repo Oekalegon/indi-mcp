@@ -1060,9 +1060,7 @@ async def test_execute_script_capture_frame_sets_frame_type_and_binning_when_sup
 
     send_property.assert_any_call("CCD Simulator", "CCD_FRAME_TYPE", {"FRAME_DARK": "On"})
     send_property.assert_any_call("CCD Simulator", "CCD_BINNING", {"HOR_BIN": "2", "VER_BIN": "2"})
-    send_property.assert_any_call(
-        "CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"}
-    )
+    send_property.assert_any_call("CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"})
 
 
 async def test_execute_script_capture_frame_skips_frame_type_and_binning_when_undefined(
@@ -1117,6 +1115,51 @@ async def test_execute_script_capture_frame_times_out_waiting_for_exposure_ok(
         await script_engine.execute_script("capture", "test-rig", {})
 
 
+async def test_execute_script_capture_frame_fails_fast_on_exposure_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A driver-reported `Alert` (aborted exposure, camera fault) shouldn't be waited out for
+    the full timeout — it's not something more polling will resolve.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 0}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    # A large timeout that a correct fast-fail must not wait out.
+    monkeypatch.setattr(script_engine, "_CAPTURE_READOUT_BUFFER_SECONDS", 60.0)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
+        await asyncio.wait_for(script_engine.execute_script("capture", "test-rig", {}), timeout=1.0)
+
+
+async def test_wait_for_property_state_fails_fast_on_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    ctx = script_engine._ExecutionContext(
+        role_to_device={},
+        cancel_event=None,
+        pause_event=None,
+        on_progress=None,
+        total_steps=None,
+        scripts={},
+        run_id=None,
+    )
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
+        await asyncio.wait_for(
+            script_engine._wait_for_property_state(
+                ctx, "CCD Simulator", "CCD_EXPOSURE", indi_messaging.PropertyState.OK, 60.0
+            ),
+            timeout=1.0,
+        )
+
+
 async def test_execute_script_capture_frame_times_out_waiting_for_blob(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1133,6 +1176,40 @@ async def test_execute_script_capture_frame_times_out_waiting_for_blob(
 
     with pytest.raises(script_engine.ScriptExecutionError, match="no BLOB received"):
         await script_engine.execute_script("capture", "test-rig", {})
+
+
+async def test_execute_script_capture_frame_shares_a_single_deadline_across_both_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exposure-wait and BLOB-wait draw from one combined budget, not two independent
+    full timeouts — a driver that's slow to reach `Ok` should eat into the time left for
+    the BLOB to arrive, not get a fresh full budget on top of it.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 0}],
+    )
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+
+    def get_property_state(device: str, name: str) -> str:
+        return "Ok" if loop.time() - start >= 0.08 else "Busy"
+
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", get_property_state)
+    monkeypatch.setattr(indi_messaging, "get_latest_blob", lambda device, name: None)
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(script_engine, "_CAPTURE_READOUT_BUFFER_SECONDS", 0.1)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="no BLOB received"):
+        await script_engine.execute_script("capture", "test-rig", {})
+
+    elapsed = loop.time() - start
+    # The old (buggy) behavior gave the BLOB wait its own fresh 0.1s on top of the ~0.08s
+    # already spent reaching `Ok`, for ~0.18s total. A shared deadline caps the whole
+    # capture at ~0.1s instead.
+    assert elapsed < 0.15
 
 
 async def test_execute_script_capture_frame_ignores_a_stale_blob_from_an_earlier_capture(
@@ -1163,6 +1240,7 @@ async def test_execute_script_capture_frame_rejects_a_blob_with_more_than_one_me
         "capture",
         steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 0}],
     )
+
     def ambiguous(device: str, name: str) -> indi_messaging.BlobSnapshot:
         return {
             "values": {"CCD1": b"a", "CCD2": b"b"},

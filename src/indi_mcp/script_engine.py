@@ -836,6 +836,12 @@ async def _wait_for_property_state(
     this one is for engine-implemented primitives (`slew`, `capture_frame`)
     that need to wait for their own specific `Busy`->`Ok` transition, with
     no `Condition` for a script author to write.
+
+    Fails immediately (rather than waiting out the full timeout) if the
+    driver reports `Alert` instead of `target_state` — a driver-reported
+    hardware fault (aborted exposure, mount fault, disconnected device)
+    isn't something more polling will resolve, so there's no reason to
+    keep a caller waiting on it, unlike a genuine "still working" `Busy`.
     """
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while True:
@@ -843,6 +849,10 @@ async def _wait_for_property_state(
         state = indi_messaging.get_property_state(device, property_name)
         if state == target_state:
             return
+        if state == indi_messaging.PropertyState.ALERT and target_state != (
+            indi_messaging.PropertyState.ALERT
+        ):
+            raise ScriptExecutionError(f"{property_name} on {device} went to Alert")
         if asyncio.get_running_loop().time() >= deadline:
             raise ScriptExecutionError(
                 f"{property_name} on {device} did not reach {target_state} within "
@@ -949,14 +959,20 @@ async def _execute_capture_frame(
     await _set_binning(device, binning_x, binning_y)
 
     since = datetime.now(tz=UTC)
-    timeout = exposure + _CAPTURE_READOUT_BUFFER_SECONDS
+    deadline = asyncio.get_running_loop().time() + exposure + _CAPTURE_READOUT_BUFFER_SECONDS
     await indi_messaging.send_property(
         device, "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": str(exposure)}
     )
     await _wait_for_property_state(
-        ctx, device, "CCD_EXPOSURE", indi_messaging.PropertyState.OK, timeout
+        ctx,
+        device,
+        "CCD_EXPOSURE",
+        indi_messaging.PropertyState.OK,
+        deadline - asyncio.get_running_loop().time(),
     )
-    data, extension = await _wait_for_blob(ctx, device, _CCD_BLOB_VECTOR, since, timeout)
+    data, extension = await _wait_for_blob(
+        ctx, device, _CCD_BLOB_VECTOR, since, deadline - asyncio.get_running_loop().time()
+    )
 
     metadata = await asyncio.to_thread(
         frame_store.save_frame, data, device=device, extension=extension, run_id=ctx.run_id
