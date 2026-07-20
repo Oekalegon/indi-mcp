@@ -13,6 +13,9 @@ WorkingDirectory=/opt/indi-mcp
 # this, script_store's default `./scripts` lookup would resolve to /opt/indi-mcp/scripts
 # instead and silently find nothing.
 Environment=INDI_MCP_SCRIPTS_DIR=/opt/indi-mcp/src/scripts
+# Client-uploaded scripts (save_script, INDIMCP-9) are deliberately NOT pointed at the repo
+# checkout — they use the default `./user_scripts`, i.e. /opt/indi-mcp/user_scripts, so a
+# redeploy of the checkout above can never clobber an upload.
 ExecStart=/opt/indi-mcp/.venv/bin/indi-mcp --transport streamable-http --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=5

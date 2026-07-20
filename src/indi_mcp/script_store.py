@@ -17,6 +17,13 @@ uploaded by a client (INDIMCP-9). Unlike a rig file, a script's validity
 also depends on the rest of the library (a `run_script` step's target must
 exist and the whole library must be free of call cycles), so loading is a
 two-pass process — see `load_scripts`.
+
+Built-in scripts and user/client-uploaded scripts (`save_script`) live in
+two separate directories on disk — see `load_scripts` — so redeploying the
+built-in checkout can never clobber an upload, and an upload can never be
+mistaken for (or silently override) a built-in. They still share one flat
+`id` namespace at runtime: a `run_script` step in either can call into the
+other.
 """
 
 import logging
@@ -54,6 +61,9 @@ __all__ = [
 
 SCRIPTS_DIR_ENV = "INDI_MCP_SCRIPTS_DIR"
 _DEFAULT_SCRIPTS_DIR = Path("scripts")
+
+USER_SCRIPTS_DIR_ENV = "INDI_MCP_USER_SCRIPTS_DIR"
+_DEFAULT_USER_SCRIPTS_DIR = Path("user_scripts")
 
 PARAMETER_REFERENCE = re.compile(r"^\{\{\s*(\w+)\s*\}\}$")
 
@@ -342,28 +352,57 @@ def _scripts_dir() -> Path:
     return Path(os.environ.get(SCRIPTS_DIR_ENV, _DEFAULT_SCRIPTS_DIR))
 
 
-def load_scripts(directory: Path | None = None) -> list[Script]:
-    """Load every `*.yaml` script from `directory`, then validate the library as a whole.
+def _user_scripts_dir() -> Path:
+    return Path(os.environ.get(USER_SCRIPTS_DIR_ENV, _DEFAULT_USER_SCRIPTS_DIR))
 
-    Defaults to `$INDI_MCP_SCRIPTS_DIR`, falling back to `./scripts`. This is
-    a two-pass load: (1) parse and pydantic-validate each file independently
-    (`_parse_script_files`), exactly like `load_rigs` — a file that fails to
-    parse or match the per-script schema is logged and skipped; (2) once
-    every valid script's `id` is known, validate `run_script` references,
-    argument schemas, and check the whole library for call cycles. A script
-    that fails a library-level check is also dropped (logged) — and since
-    dropping one script can make another script's `run_script` reference
-    dangle, this repeats until no more scripts are dropped.
+
+def load_scripts(
+    directory: Path | None = None, user_directory: Path | None = None
+) -> list[Script]:
+    """Load built-in scripts from `directory` and uploaded scripts from `user_directory`.
+
+    Defaults to `$INDI_MCP_SCRIPTS_DIR` (falling back to `./scripts`) for the
+    built-in side and `$INDI_MCP_USER_SCRIPTS_DIR` (falling back to
+    `./user_scripts`) for the user/client-uploaded side — see the module
+    docstring for why these are kept separate on disk. The two are merged
+    into one `id`-keyed library before validation; if a user script's `id`
+    collides with a built-in one, the built-in wins (the user script is
+    logged and dropped) so a client can't silently override built-in
+    behavior by reusing its id.
+
+    Loading is otherwise a two-pass process: (1) parse and pydantic-validate
+    each file independently (`_parse_script_files`), exactly like
+    `load_rigs` — a file that fails to parse or match the per-script schema
+    is logged and skipped; (2) once every valid script's `id` is known,
+    validate `run_script` references, argument schemas, and check the whole
+    library for call cycles. A script that fails a library-level check is
+    also dropped (logged) — and since dropping one script can make another
+    script's `run_script` reference dangle, this repeats until no more
+    scripts are dropped.
     """
     global _scripts
     directory = directory if directory is not None else _scripts_dir()
+    user_directory = user_directory if user_directory is not None else _user_scripts_dir()
+    scripts = _parse_script_files(directory) if directory.is_dir() else {}
     if not directory.is_dir():
-        logger.info("Scripts directory does not exist, no scripts loaded: %s", directory)
-        _scripts = {}
-        return []
-    scripts = _drop_scripts_failing_library_checks(_parse_script_files(directory))
+        logger.info("Scripts directory does not exist, no built-in scripts loaded: %s", directory)
+    if user_directory.is_dir():
+        for script_id, script in _parse_script_files(user_directory).items():
+            if script_id in scripts:
+                logger.warning(
+                    "Skipping user script %r in %s: id collides with a built-in script",
+                    script_id,
+                    user_directory,
+                )
+                continue
+            scripts[script_id] = script
+    else:
+        logger.info(
+            "User scripts directory does not exist, no user scripts loaded: %s", user_directory
+        )
+    scripts = _drop_scripts_failing_library_checks(scripts)
     _scripts = scripts
-    logger.info("Loaded %d script(s) from %s", len(scripts), directory)
+    logger.info("Loaded %d script(s) from %s and %s", len(scripts), directory, user_directory)
     return list(scripts.values())
 
 
@@ -530,38 +569,57 @@ def get_script(script_id: str) -> Script:
 
 
 def save_script(
-    script: Script, *, overwrite: bool = False, directory: Path | None = None
+    script: Script,
+    *,
+    overwrite: bool = False,
+    directory: Path | None = None,
+    builtin_directory: Path | None = None,
 ) -> Script:
-    """Write `script` to `<directory>/<script.id>.yaml` and reload the library.
+    """Write `script` to `<directory>/<script.id>.yaml` and reload the merged library.
+
+    `directory` is the *user/uploaded* scripts directory (defaults to
+    `$INDI_MCP_USER_SCRIPTS_DIR`, falling back to `./user_scripts`) — never
+    the built-in one, so an upload can't land among the built-in scripts
+    shipped in the repo checkout (see the module docstring). `builtin_directory`
+    (defaults to `$INDI_MCP_SCRIPTS_DIR`, falling back to `./scripts`) is only
+    read, to check `script` against the built-in scripts too.
 
     `script` is already schema-validated (pydantic validation happens when
-    it's constructed, whether hand-authored or uploaded by a client,
-    INDIMCP-9), but unlike a rig or observatory a script's validity also
-    depends on the rest of the library — a `run_script` call into or out of
-    it must resolve, argument types must line up, and no call cycle may
-    result. Those library-level checks (`_check_library_accepts`) run
-    against the currently loaded scripts *before* anything is written, so a
-    bad upload is rejected with a specific reason rather than being written
-    and then silently dropped (logged only) the way `load_scripts` handles
-    an invalid file at startup. Refuses to replace an existing
-    `<script.id>.yaml` unless `overwrite` is set, since reusing an `id`
-    could otherwise silently destroy a previously saved script. The
-    existence check and the write happen as one atomic file-open
-    (exclusive-create unless `overwrite`), so two concurrent saves of the
-    same new `id` can't both slip past the check.
+    it's constructed), but unlike a rig or observatory a script's validity
+    also depends on the rest of the library — a `run_script` call into or
+    out of it must resolve, argument types must line up, and no call cycle
+    may result. Those library-level checks (`_check_library_accepts`) run
+    against the merged built-in + user library *before* anything is
+    written, so a bad upload is rejected with a specific reason rather than
+    being written and then silently dropped (logged only) the way
+    `load_scripts` handles an invalid file at startup. Reusing a built-in
+    `id` is rejected outright, since a client shouldn't be able to shadow
+    built-in behavior. Refuses to replace an existing `<script.id>.yaml`
+    unless `overwrite` is set, since reusing an `id` could otherwise
+    silently destroy a previously saved script. The existence check and the
+    write happen as one atomic file-open (exclusive-create unless
+    `overwrite`), so two concurrent saves of the same new `id` can't both
+    slip past the check.
     """
     if not script.id or script.id in (".", "..") or "/" in script.id or "\\" in script.id:
         raise ValueError(f"Invalid script id for a filename: {script.id!r}")
-    directory = directory if directory is not None else _scripts_dir()
+    directory = directory if directory is not None else _user_scripts_dir()
+    builtin_directory = builtin_directory if builtin_directory is not None else _scripts_dir()
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except NotADirectoryError as exc:
-        raise ValueError(f"Cannot create scripts directory {directory}: {exc}") from exc
+        raise ValueError(f"Cannot create user scripts directory {directory}: {exc}") from exc
     path = directory / f"{script.id}.yaml"
     if path.is_dir():
         raise ValueError(f"Cannot save script {script.id!r}: {path} is a directory, not a file")
 
-    library = _drop_scripts_failing_library_checks(_parse_script_files(directory))
+    builtin = _parse_script_files(builtin_directory) if builtin_directory.is_dir() else {}
+    if script.id in builtin:
+        raise ValueError(f"Cannot save script {script.id!r}: id collides with a built-in script")
+    library = dict(builtin)
+    for user_id, user_script in _parse_script_files(directory).items():
+        library.setdefault(user_id, user_script)
+    library = _drop_scripts_failing_library_checks(library)
     library.pop(script.id, None)
     library[script.id] = script
     _check_library_accepts(script, library)
@@ -576,7 +634,7 @@ def save_script(
             "pass overwrite=True to replace it."
         ) from exc
     logger.info("Saved script %r to %s", script.id, path)
-    load_scripts(directory)
+    load_scripts(builtin_directory, directory)
     return get_script(script.id)
 
 

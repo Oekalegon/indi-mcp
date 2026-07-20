@@ -240,19 +240,23 @@ def get_script(script_id: str) -> Script:
 
 @mcp.tool()
 async def save_script(script: Script, overwrite: bool = False) -> Script:
-    """Upload and save a script — hand-authored, or written on the Client Computer.
+    """Upload and save a script written on the Client Computer.
 
-    Writes `script` to `scripts/<script.id>.yaml` and reloads the library so
-    it's immediately available by `id` to `get_script` (and to running it,
-    once that's exposed as an MCP tool — INDIMCP-13). Only ever validates
-    and stores declarative step data (`yaml.safe_load`, no
+    Writes `script` to `user_scripts/<script.id>.yaml` — a separate
+    directory from the built-in scripts shipped in `scripts/`, so an
+    upload can never be clobbered by a redeploy of the built-in checkout,
+    or silently shadow a built-in script's id — and reloads the merged
+    library so it's immediately available by `id` to `get_script` (and to
+    running it, once that's exposed as an MCP tool — INDIMCP-13). Only
+    ever validates and stores declarative step data (`yaml.safe_load`, no
     executable code), per the safety approach in `docs/Design.md`. Rejected
     outright, before anything is written, if `script` doesn't fit the rest
     of the library — an unresolved `run_script` reference, a mismatched
-    argument type, or a call cycle. Refuses to replace an existing script
-    file unless `overwrite` is set, since reusing an `id` could otherwise
-    silently destroy a previously saved script. The actual file I/O runs in
-    a worker thread so it doesn't block the event loop.
+    argument type, a call cycle, or an id already used by a built-in
+    script. Refuses to replace an existing uploaded script file unless
+    `overwrite` is set, since reusing an `id` could otherwise silently
+    destroy a previously saved script. The actual file I/O runs in a
+    worker thread so it doesn't block the event loop.
     """
     return await asyncio.to_thread(script_store.save_script, script, overwrite=overwrite)
 

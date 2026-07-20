@@ -80,8 +80,14 @@ steps: []
 
 
 @pytest.fixture(autouse=True)
-def _reset_loaded_scripts() -> None:
+def _reset_loaded_scripts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     script_store._scripts = {}
+    # Tests below that call load_scripts()/save_script() with a single explicit `directory`
+    # are exercising per-directory parsing/validation, not the built-in/user merge — point
+    # the *other* side at an unused tmp_path subdirectory so it never picks up a stray real
+    # ./scripts or ./user_scripts directory and never merges anything in unexpectedly.
+    monkeypatch.setenv(script_store.SCRIPTS_DIR_ENV, str(tmp_path / "_unused_scripts"))
+    monkeypatch.setenv(script_store.USER_SCRIPTS_DIR_ENV, str(tmp_path / "_unused_user_scripts"))
 
 
 def test_load_scripts_returns_empty_list_when_directory_missing(tmp_path: Path) -> None:
@@ -581,7 +587,7 @@ def test_save_script_rejects_an_id_whose_file_path_is_already_a_directory(
 def test_save_script_uses_the_default_directory_when_none_given(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(script_store.SCRIPTS_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(script_store.USER_SCRIPTS_DIR_ENV, str(tmp_path))
 
     script_store.save_script(_minimal_script())
 
@@ -681,3 +687,77 @@ steps: []
     assert script_store.Script.model_validate(
         yaml.safe_load((tmp_path / "callee.yaml").read_text())
     ).parameters["value"].type == "number"
+
+
+def test_load_scripts_merges_builtin_and_user_directories(tmp_path: Path) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    builtin_dir.mkdir()
+    user_dir.mkdir()
+    (builtin_dir / "focus.yaml").write_text(FOCUS_YAML)
+    (user_dir / "minimal.yaml").write_text(MINIMAL_SCRIPT_YAML)
+
+    scripts = script_store.load_scripts(builtin_dir, user_dir)
+
+    assert {s.id for s in scripts} == {"focus", "minimal"}
+
+
+def test_load_scripts_prefers_the_builtin_script_when_ids_collide(tmp_path: Path) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    builtin_dir.mkdir()
+    user_dir.mkdir()
+    (builtin_dir / "minimal.yaml").write_text(MINIMAL_SCRIPT_YAML)
+    (user_dir / "minimal.yaml").write_text(
+        MINIMAL_SCRIPT_YAML.replace("Minimal script", "A user script with the same id")
+    )
+
+    script_store.load_scripts(builtin_dir, user_dir)
+
+    assert script_store.get_script("minimal").name == "Minimal script"
+
+
+def test_save_script_writes_to_the_user_directory_not_the_builtin_directory(
+    tmp_path: Path,
+) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+
+    script_store.save_script(_minimal_script(), directory=user_dir, builtin_directory=builtin_dir)
+
+    assert (user_dir / "minimal.yaml").is_file()
+    assert not builtin_dir.exists() or list(builtin_dir.iterdir()) == []
+
+
+def test_save_script_rejects_an_id_that_collides_with_a_builtin_script(tmp_path: Path) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    builtin_dir.mkdir()
+    (builtin_dir / "minimal.yaml").write_text(MINIMAL_SCRIPT_YAML)
+
+    with pytest.raises(ValueError, match="collides with a built-in script"):
+        script_store.save_script(
+            _minimal_script(), directory=user_dir, builtin_directory=builtin_dir
+        )
+
+    assert not user_dir.exists() or list(user_dir.iterdir()) == []
+
+
+def test_save_script_accepts_a_run_script_call_into_a_builtin_script(tmp_path: Path) -> None:
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    builtin_dir.mkdir()
+    (builtin_dir / "focus.yaml").write_text(FOCUS_YAML)
+
+    script = script_store.Script(
+        id="caller",
+        name="Caller",
+        pausable=False,
+        steps=[script_store.RunScriptStep(step="run_script", script="focus")],
+    )
+    saved = script_store.save_script(
+        script, directory=user_dir, builtin_directory=builtin_dir
+    )
+
+    assert saved == script_store.get_script("caller")
+    assert script_store.get_script("focus").id == "focus"
