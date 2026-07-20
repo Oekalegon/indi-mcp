@@ -239,6 +239,7 @@ def test_delete_frame_removes_the_file_and_the_metadata_row(
     saved = frame_store.save_frame(
         b"data", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
     )
+    frame_store.confirm_frame_transfer(saved["frameId"], db_path=db_path)
     path = frame_store.get_frame_path(saved["frameId"], db_path=db_path)
     assert path.exists()
 
@@ -249,7 +250,7 @@ def test_delete_frame_removes_the_file_and_the_metadata_row(
         frame_store.get_frame_metadata(saved["frameId"], db_path=db_path)
 
 
-def test_delete_frame_does_not_require_the_frame_to_be_transferred(
+def test_delete_frame_raises_if_not_transferred_by_default(
     store_paths: tuple[Path, Path],
 ) -> None:
     frames_dir, db_path = store_paths
@@ -258,7 +259,21 @@ def test_delete_frame_does_not_require_the_frame_to_be_transferred(
     )
     assert saved["transferredAt"] is None
 
-    frame_store.delete_frame(saved["frameId"], db_path=db_path)
+    with pytest.raises(frame_store.FrameNotTransferredError):
+        frame_store.delete_frame(saved["frameId"], db_path=db_path)
+
+    assert frame_store.get_frame_path(saved["frameId"], db_path=db_path).exists()
+
+
+def test_delete_frame_allows_untransferred_deletion_when_overridden(
+    store_paths: tuple[Path, Path],
+) -> None:
+    frames_dir, db_path = store_paths
+    saved = frame_store.save_frame(
+        b"data", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+
+    frame_store.delete_frame(saved["frameId"], require_transferred=False, db_path=db_path)
 
     with pytest.raises(frame_store.FrameNotFoundError):
         frame_store.get_frame_metadata(saved["frameId"], db_path=db_path)
@@ -269,6 +284,7 @@ def test_delete_frame_leaves_other_frames_untouched(store_paths: tuple[Path, Pat
     doomed = frame_store.save_frame(
         b"one", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
     )
+    frame_store.confirm_frame_transfer(doomed["frameId"], db_path=db_path)
     survivor = frame_store.save_frame(
         b"two", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
     )

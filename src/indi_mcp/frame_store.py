@@ -58,6 +58,7 @@ __all__ = [
     "FRAMES_DIR_ENV",
     "FrameMetadata",
     "FrameNotFoundError",
+    "FrameNotTransferredError",
     "confirm_frame_transfer",
     "delete_frame",
     "get_frame_metadata",
@@ -87,6 +88,11 @@ class FrameMetadata(TypedDict):
 
 class FrameNotFoundError(Exception):
     """Raised when a `frameId` doesn't match any row in the `frames` table."""
+
+
+class FrameNotTransferredError(Exception):
+    """Raised by `delete_frame` when `frame_id` hasn't been confirmed transferred yet and
+    `require_transferred` wasn't overridden."""
 
 
 def _frames_dir(directory: Path | None) -> Path:
@@ -277,14 +283,22 @@ def confirm_frame_transfer(frame_id: str, *, db_path: Path | None = None) -> Fra
     return get_frame_metadata(frame_id, db_path=db_path)
 
 
-def delete_frame(frame_id: str, *, db_path: Path | None = None) -> None:
-    """Delete `frame_id`'s file and its `frames` row. Raises `FrameNotFoundError` if unknown.
+def delete_frame(
+    frame_id: str, *, require_transferred: bool = True, db_path: Path | None = None
+) -> None:
+    """Delete `frame_id`'s file and its `frames` row.
 
     A manual, client-requested cleanup action, not an automatic sweep —
-    see this module's docstring for why (`transferred_at` being set is
-    *not* required or checked here; that policy call — e.g. an MCP tool
-    refusing to delete an unconfirmed frame — belongs at the INDIMCP-11
-    layer that decides what a client is allowed to request, not here).
+    see this module's docstring for why. Refuses (`FrameNotTransferredError`)
+    to delete a frame whose `transferred_at` isn't set unless
+    `require_transferred=False` is passed explicitly — mirroring
+    `rig_store.save_rig`'s `overwrite=False` default: a destructive action
+    on the actual science data this project exists to capture should be
+    safe by default, with the caller having to actively opt out (e.g. an
+    operator deliberately discarding a bad/aborted capture that was never
+    meant to be transferred) rather than a careless call being able to
+    delete a frame the Client Computer never actually got a copy of.
+    Raises `FrameNotFoundError` if `frame_id` is unknown.
 
     Deletes the `frames` row before the file, the opposite order from
     `save_frame`'s own failure handling: if something goes wrong partway
@@ -294,6 +308,12 @@ def delete_frame(frame_id: str, *, db_path: Path | None = None) -> None:
     `list_frames`/`get_frame_metadata` again either way).
     """
     row = _get_row(frame_id, db_path)
+    if require_transferred and row["transferred_at"] is None:
+        raise FrameNotTransferredError(
+            f"frameId {frame_id!r} has not been confirmed transferred yet; "
+            "call confirm_frame_transfer first, or pass require_transferred=False "
+            "to delete it anyway"
+        )
     path = Path(row["path"])
     with db.connect(db_path) as conn:
         _ensure_schema(conn)
