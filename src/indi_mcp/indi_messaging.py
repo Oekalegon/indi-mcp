@@ -37,9 +37,11 @@ from indi_mcp.indi_server import INDI_PORT
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "BlobSnapshot",
     "IndiEvent",
     "MessagingStatus",
     "PropertyState",
+    "get_latest_blob",
     "get_property_range",
     "get_property_state",
     "get_property_values",
@@ -125,6 +127,20 @@ class MessagingStatus(TypedDict):
     port: int
 
 
+class BlobSnapshot(TypedDict):
+    """The most recently received BLOB vector update for one `(device, vectorname)` pair.
+
+    `values` maps member name to its raw decoded bytes; `sizeformat` maps
+    the same member names to `(size, format)`, `format` being a file
+    extension (e.g. `".fits"`) reported by the driver itself — see
+    `get_latest_blob`.
+    """
+
+    values: dict[str, bytes]
+    sizeformat: dict[str, tuple[int, str]]
+    timestamp: datetime
+
+
 def _elements(event: Any) -> dict[str, str] | None:
     if isinstance(event, setBLOBVector):
         return {name: f"{size} bytes ({fmt})" for name, (size, fmt) in event.sizeformat.items()}
@@ -165,19 +181,39 @@ def _to_indi_event(event: Any) -> IndiEvent | None:
 
 
 class _MessagingClient(IPyClient):
-    """An `IPyClient` that buffers every received event as an `IndiEvent`."""
+    """An `IPyClient` that buffers every received event as an `IndiEvent`.
+
+    Also sets `enableBLOBdefault = "Also"` so BLOBs are actually
+    transmitted at all — `indipyclient` defaults this to `"Never"`, and
+    `IPyClient` auto-sends the corresponding `enableBLOB` instruction the
+    moment it learns of a `defBLOBVector`, using whatever
+    `enableBLOBdefault` is set to *at that time*; setting it here, in
+    `__init__`, guarantees it's in place before `asyncrun()` (started
+    immediately after construction by `start_messaging`) ever processes one.
+    "Also" (rather than "Only") keeps every other property flowing
+    alongside BLOBs — `capture_frame`'s `_wait_for_property_state` call for
+    `CCD_EXPOSURE` still needs ordinary property updates too.
+    """
 
     def __init__(self, host: str, port: int, buffer: deque[IndiEvent]) -> None:
         super().__init__(indihost=host, indiport=port)
         self._buffer = buffer
+        self.enableBLOBdefault = "Also"
 
     async def rxevent(self, event: Any) -> None:
         indi_event = _to_indi_event(event)
         if indi_event is not None:
             self._buffer.appendleft(indi_event)
+        if isinstance(event, setBLOBVector):
+            _latest_blobs[(event.devicename, event.vectorname)] = {
+                "values": dict(event.data),
+                "sizeformat": dict(event.sizeformat),
+                "timestamp": datetime.now(tz=UTC),
+            }
 
 
 _buffer: deque[IndiEvent] = deque(maxlen=_MAX_BUFFERED_EVENTS)
+_latest_blobs: dict[tuple[str, str], BlobSnapshot] = {}
 _client: _MessagingClient | None = None
 _task: asyncio.Task | None = None
 _host = "localhost"
@@ -197,6 +233,7 @@ async def start_messaging(host: str = "localhost", port: int = INDI_PORT) -> Mes
         await stop_messaging()
     logger.info("Starting INDI messaging client (%s:%d)", host, port)
     _buffer.clear()
+    _latest_blobs.clear()
     _client = _MessagingClient(host, port, _buffer)
     _host, _port = host, port
     _task = asyncio.create_task(_client.asyncrun())
@@ -297,6 +334,22 @@ def get_property_range(device: str, name: str, member: str) -> tuple[float, floa
         return float(member_obj.min), float(member_obj.max)
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+def get_latest_blob(device: str, name: str) -> BlobSnapshot | None:
+    """Return the most recently received BLOB vector update for `device`.`name`, if any.
+
+    `None` if no BLOB has ever arrived on this `(device, name)` pair since
+    `start_messaging` was last called (`_latest_blobs` is cleared then,
+    matching `_buffer`) — routine (e.g. before the first capture), not an
+    error, matching `get_property_values`'s own "missing is normal" style.
+    Only ever holds the single most recent update per pair — a caller that
+    needs to distinguish "this capture's BLOB" from a stale one left over
+    from an earlier capture of the same device/vector must compare the
+    returned `timestamp` against its own "since I sent the command" marker
+    itself (see `script_engine._wait_for_blob`).
+    """
+    return _latest_blobs.get((device, name))
 
 
 def list_messages(device: str | None = None, limit: int = 50) -> list[IndiEvent]:

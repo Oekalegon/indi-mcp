@@ -128,7 +128,7 @@ async def test_run_completes_and_get_script_status_reports_scriptCompleted(
     completed = cast(script_runs.ScriptRunCompleted, status)
     assert completed["runId"] == started["runId"]
     assert completed["rigId"] == "test-rig"
-    assert completed["result"] == {"scriptId": "cool", "stepsExecuted": 1}
+    assert completed["result"] == {"scriptId": "cool", "stepsExecuted": 1, "framesCaptured": 0}
     assert "finishedAt" in completed
 
 
