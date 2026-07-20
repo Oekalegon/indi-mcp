@@ -360,8 +360,8 @@ async def confirm_frame_transfer(frame_id: str) -> FrameMetadata:
 
 
 @mcp.tool()
-async def delete_frame(frame_id: str, require_transferred: bool = True) -> None:
-    """Delete a single captured frame's file and metadata.
+async def delete_frame(frame_id: str, require_transferred: bool = True) -> FrameMetadata:
+    """Delete a single captured frame's file and metadata, returning its metadata as it was.
 
     Refuses to delete a frame that hasn't been confirmed transferred yet
     (via `confirm_frame_transfer`) unless `require_transferred` is
@@ -369,7 +369,7 @@ async def delete_frame(frame_id: str, require_transferred: bool = True) -> None:
     actual science data this server exists to capture, so it's safe by
     default rather than trusting every caller to check first.
     """
-    await asyncio.to_thread(
+    return await asyncio.to_thread(
         frame_store.delete_frame, frame_id, require_transferred=require_transferred
     )
 

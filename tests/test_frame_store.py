@@ -285,12 +285,13 @@ def test_delete_frame_removes_the_file_and_the_metadata_row(
     saved = frame_store.save_frame(
         b"data", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
     )
-    frame_store.confirm_frame_transfer(saved["frameId"], db_path=db_path)
+    transferred = frame_store.confirm_frame_transfer(saved["frameId"], db_path=db_path)
     path = frame_store.get_frame_path(saved["frameId"], db_path=db_path)
     assert path.exists()
 
-    frame_store.delete_frame(saved["frameId"], db_path=db_path)
+    deleted = frame_store.delete_frame(saved["frameId"], db_path=db_path)
 
+    assert deleted == transferred
     assert not path.exists()
     with pytest.raises(frame_store.FrameNotFoundError):
         frame_store.get_frame_metadata(saved["frameId"], db_path=db_path)

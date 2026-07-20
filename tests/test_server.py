@@ -280,13 +280,17 @@ async def test_delete_frame_delegates_to_frame_store_with_the_require_transferre
 ) -> None:
     calls: list[tuple] = []
 
-    def fake_delete_frame(frame_id: str, *, require_transferred: bool = True) -> None:
+    def fake_delete_frame(
+        frame_id: str, *, require_transferred: bool = True
+    ) -> frame_store.FrameMetadata:
         calls.append((frame_id, require_transferred))
+        return _FRAME_METADATA
 
     monkeypatch.setattr(frame_store, "delete_frame", fake_delete_frame)
 
-    await server.delete_frame("frame-1", require_transferred=False)
+    result = await server.delete_frame("frame-1", require_transferred=False)
 
+    assert result == _FRAME_METADATA
     assert calls == [("frame-1", False)]
 
 
@@ -334,3 +338,34 @@ async def test_read_frame_propagates_frame_not_found(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(frame_store.FrameNotFoundError):
         await server.read_frame("does-not-exist")
+
+
+async def test_frame_resource_is_readable_through_the_real_mcp_protocol(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercises the actual `frame://{frameId}` URI-template registration and binary content
+    handling via `mcp.read_resource`, not just the bare `read_frame` function body — this is
+    what catches a broken `{frameId}`/`frameId` name match or an accidental non-`bytes` return
+    that a direct call to `server.read_frame(...)` wouldn't."""
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+
+    def fake_get_frame_path(frame_id: str) -> Path:
+        assert frame_id == "frame-1"
+        return frame_path
+
+    monkeypatch.setattr(frame_store, "get_frame_path", fake_get_frame_path)
+
+    contents = list(await server.mcp.read_resource("frame://frame-1"))
+
+    assert len(contents) == 1
+    assert contents[0].content == b"fits-bytes"
+    assert contents[0].mime_type == "application/octet-stream"
+
+
+async def test_frame_resource_uri_template_is_registered() -> None:
+    templates = await server.mcp.list_resource_templates()
+
+    matching = [t for t in templates if t.uriTemplate == "frame://{frameId}"]
+    assert len(matching) == 1
+    assert matching[0].mimeType == "application/octet-stream"

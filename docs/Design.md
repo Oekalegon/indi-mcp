@@ -306,7 +306,7 @@ CREATE INDEX idx_frames_captured_at ON frames (captured_at);
 
 Two separate concerns: finding out what frames exist (metadata, cheap, queried against the `frames` table above), and getting the frame bytes themselves (potentially large FITS files). They're deliberately split into different tool calls rather than one "give me everything" call.
 
-**`list_frames`** — query frame metadata with optional filters, returning `frame_id`s and everything else in the `frames` table except the file path (an internal server-side detail, not exposed to the client). `transferred` is tri-state (omitted/`null` = every frame, `true` = only already-transferred ones, `false` = only ones still waiting to be retrieved) rather than a one-directional `transferredOnly` flag, since knowing what's still pending is just as useful as seeing what's done — e.g. before deciding it's safe to run `purge_transferred_frames` (below):
+**`list_frames`** — query frame metadata with optional filters, returning `frame_id`s and everything else in the `frames` table except the file path (an internal server-side detail, not exposed to the client). `transferred` is tri-state (omitted/`null` = every frame, `true` = only already-transferred ones, `false` = only ones still waiting to be retrieved) rather than a one-directional `transferredOnly` flag, since knowing what's still pending is just as useful as seeing what's done — e.g. before deciding it's safe to run `purge_transferred_frames` (below). Returns a bare array, not a `kind`-tagged envelope — matching every other `list_*` tool in this codebase (`list_rigs`, `list_observatories`, `list_scripts`, ...), none of which wrap their results either; `kind` tags are for single event/status-shaped objects, not list results:
 
 ```json
 {
@@ -318,19 +318,16 @@ Two separate concerns: finding out what frames exist (metadata, cheap, queried a
 ```
 
 ```json
-{
-  "kind": "frameList",
-  "frames": [
-    {
-      "frameId": "frame-0001",
-      "runId": "b3f1c2d4-...",
-      "device": "ZWO CCD ASI2600MM Pro",
-      "sizeBytes": 33554432,
-      "capturedAt": "2026-07-14T22:04:11Z",
-      "transferredAt": null
-    }
-  ]
-}
+[
+  {
+    "frameId": "frame-0001",
+    "runId": "b3f1c2d4-...",
+    "device": "ZWO CCD ASI2600MM Pro",
+    "sizeBytes": 33554432,
+    "capturedAt": "2026-07-14T22:04:11Z",
+    "transferredAt": null
+  }
+]
 ```
 
 **`get_frame_metadata`** — the same shape for a single `frameId`, useful once a client already knows the id (e.g. from a `scriptCompleted` result's `frames` list).
