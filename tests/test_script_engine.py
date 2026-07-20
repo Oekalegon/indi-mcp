@@ -39,10 +39,15 @@ def _mock_indi_messaging_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     values (e.g. `TELESCOPE_PARK`, a `wait_for` condition's element)
     override `get_property_values` for that property while still
     delegating to `_default_get_property_values` for anything else (see
-    those tests).
+    those tests). `get_property_state` defaults to `"Idle"` — never
+    `"Alert"` — so a `wait_for`/`slew`/`capture_frame` test that doesn't
+    care about vector state (e.g. one only exercising an element-based
+    `Condition`) doesn't spuriously trip the Alert fast-fail while it
+    polls; tests exercising vector state directly override it themselves.
     """
     monkeypatch.setattr(indi_messaging, "list_devices", lambda: list(_known_devices))
     monkeypatch.setattr(indi_messaging, "get_property_values", _default_get_property_values)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Idle")
 
 
 def _rig(*components: rig_store.Component, rig_id: str = "test-rig") -> rig_store.Rig:
@@ -698,6 +703,77 @@ async def test_execute_script_wait_for_times_out(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(script_engine.ScriptExecutionError, match="timed out"):
         await script_engine.execute_script("wait", "test-rig", {})
+
+
+async def test_execute_script_wait_for_fails_fast_on_alert_vector_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `wait_for` condition comparing the vector state itself shouldn't wait out the full
+    timeout once the driver reports `Alert` — a fault isn't something more polling fixes.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("wait", steps=[_wait_for("camera", "CCD_TEMPERATURE", "equals", "Ok", timeout=60)])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="reported Alert"):
+        await asyncio.wait_for(script_engine.execute_script("wait", "test-rig", {}), timeout=1.0)
+
+
+async def test_execute_script_wait_for_fails_fast_on_alert_with_an_element_condition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same fast-fail, but for a condition that compares an element value rather than the
+    vector state directly — the vector can still be `Alert` while an element's value hasn't
+    (and never will) reach the awaited target.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "wait",
+        steps=[
+            {
+                "step": "wait_for",
+                "condition": {
+                    "role": "camera",
+                    "property": "CCD_TEMPERATURE",
+                    "element": "CCD_TEMPERATURE_VALUE",
+                    "operator": "lessThanOrEqual",
+                    "value": -10,
+                },
+                "timeoutSeconds": 60,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"CCD_TEMPERATURE_VALUE": "5.0"}
+            if name == "CCD_TEMPERATURE"
+            else _default_get_property_values(device, name)
+        ),
+    )
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="reported Alert"):
+        await asyncio.wait_for(script_engine.execute_script("wait", "test-rig", {}), timeout=1.0)
+
+
+async def test_execute_script_wait_for_deliberately_waiting_for_alert_still_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script that's explicitly waiting *for* `Alert` (e.g. a diagnostic check) isn't treated
+    as a fault — the condition is evaluated before the fast-fail check, so it wins.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("wait", steps=[_wait_for("camera", "CCD_TEMPERATURE", "equals", "Alert")])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    result = await script_engine.execute_script("wait", "test-rig", {})
+
+    assert result["stepsExecuted"] == 1
 
 
 async def test_execute_script_wait_for_compares_a_numeric_element(

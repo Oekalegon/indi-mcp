@@ -809,15 +809,48 @@ async def _execute_wait_for(
     script_id: str,
     pausable: bool,
 ) -> None:
+    """Poll `step.condition` until it's true, or time out.
+
+    Fails immediately (rather than waiting out the full timeout) if the
+    condition's own property vector reports `Alert` — same reasoning as
+    `_wait_for_property_state`'s fast-fail: a driver-reported hardware
+    fault isn't something more polling will resolve. The condition is
+    always evaluated first, so a script that's deliberately waiting for
+    an `Alert` state itself (e.g. a diagnostic `wait_for` checking
+    `property: MOUNT_PARK, operator: equals, value: "Alert"`) still
+    succeeds normally — this only fires when the condition is *not* met
+    and the property has faulted, not on every transient non-matching
+    state (`Busy` while genuinely still in progress is fine).
+
+    Fetches the vector state exactly once per poll: when `condition.element`
+    is unset the condition is itself a vector-state comparison (mirroring
+    `_evaluate_condition`'s own element-less branch, reusing the same fetch
+    here rather than calling it again) — only an element-based condition
+    (which never touches vector state) needs a second, dedicated fetch for
+    the Alert check.
+    """
+    condition = step.condition
     timeout = float(_substitute(step.timeoutSeconds, params))
     deadline = asyncio.get_running_loop().time() + timeout
+    device = _resolve_device(_substituted_role(condition.role, params), ctx)
     while True:
         await _check_cancelled(ctx)
-        if _evaluate_condition(step.condition, ctx, params):
+        vector_state = indi_messaging.get_property_state(device, condition.property)
+        matched = (
+            _compare(vector_state, condition.operator, _substitute(condition.value, params))
+            if condition.element is None
+            else _evaluate_condition(condition, ctx, params)
+        )
+        if matched:
             return
+        if vector_state == indi_messaging.PropertyState.ALERT:
+            raise ScriptExecutionError(
+                f"{condition.property} on {device} reported Alert while waiting for "
+                "wait_for condition"
+            )
         if asyncio.get_running_loop().time() >= deadline:
             raise ScriptExecutionError(
-                f"wait_for timed out after {timeout}s waiting on {step.condition.property}"
+                f"wait_for timed out after {timeout}s waiting on {condition.property}"
             )
         await asyncio.sleep(_WAIT_POLL_INTERVAL_SECONDS)
 
