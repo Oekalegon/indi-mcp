@@ -7,23 +7,27 @@ which run produced each one, which device captured it, when, and whether
 the Client Computer has confirmed receiving it yet.
 
 This module is the storage layer only — `save_frame`/`list_frames`/
-`get_frame_metadata`/`confirm_frame_transfer`/`delete_frame` are plain
-functions, not MCP tools. Draining a BLOB out of `indi_messaging` and
-calling `save_frame` with the result is `script_engine`'s `capture_frame`
-step handler (INDIMCP-37); exposing these as MCP tools, plus a
-`frame://{frameId}` resource for the bytes themselves, is INDIMCP-11 —
-neither is built yet, mirroring how `rig_store`'s plain functions are
-wired up as `@mcp.tool()`s separately in `server.py`.
+`get_frame_metadata`/`confirm_frame_transfer`/`delete_frame`/
+`purge_transferred_frames` are plain functions, not MCP tools. Draining a
+BLOB out of `indi_messaging` and calling `save_frame` with the result is
+`script_engine`'s `capture_frame` step handler (INDIMCP-37); exposing
+these as MCP tools, plus a `frame://{frameId}` resource for the bytes
+themselves, is INDIMCP-11 — neither is built yet, mirroring how
+`rig_store`'s plain functions are wired up as `@mcp.tool()`s separately in
+`server.py`.
 
-`delete_frame` is deliberately never called by anything in this module or
-`script_engine` — the Raspberry Pi's storage is small enough that frames
-need cleaning up, but per `docs/Design.md#frame-storage-metadata`
-("Cleanup ... is tied to the frame's own lifecycle ... not to a fixed time
-window"), that cleanup is a client-initiated action (an explicit
-`delete_frame` MCP tool, INDIMCP-11) taken once the Client Computer has
-confirmed it safely has its own copy (`confirm_frame_transfer`) — never an
-automatic sweep run by the server itself, which could delete a frame
-before it's actually been retrieved.
+Neither `delete_frame` nor `purge_transferred_frames` is ever called by
+anything in this module or `script_engine` — the Raspberry Pi's storage is
+small enough that frames need cleaning up, but per
+`docs/Design.md#frame-storage-metadata` ("Cleanup ... is tied to the
+frame's own lifecycle ... not to a fixed time window"), that cleanup is a
+client-initiated action (an explicit MCP tool, INDIMCP-11) taken once the
+Client Computer has confirmed it safely has its own copy
+(`confirm_frame_transfer`) — never an automatic sweep run by the server
+itself, which could delete a frame before it's actually been retrieved.
+`purge_transferred_frames` only ever bulk-applies the same
+already-transferred check `delete_frame` enforces on its own; it isn't a
+separate, looser deletion path.
 
 **Every function here is synchronous and blocking** — `save_frame` does a
 plain `Path.write_bytes` (a captured FITS frame can be tens of MB) plus a
@@ -46,7 +50,7 @@ import logging
 import os
 import sqlite3
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypedDict
 
@@ -64,6 +68,7 @@ __all__ = [
     "get_frame_metadata",
     "get_frame_path",
     "list_frames",
+    "purge_transferred_frames",
     "save_frame",
 ]
 
@@ -321,3 +326,43 @@ def delete_frame(
         conn.commit()
     path.unlink(missing_ok=True)
     logger.info("Deleted frame %s (%s)", frame_id, path)
+
+
+def purge_transferred_frames(
+    *, older_than: timedelta, db_path: Path | None = None
+) -> list[FrameMetadata]:
+    """Delete every transferred frame captured more than `older_than` ago.
+
+    A manual, client-requested bulk cleanup, not a scheduled/automatic
+    sweep — see this module's docstring. `older_than` is always an
+    explicit argument (e.g. `timedelta(weeks=1)`), never a hardcoded
+    default baked in here, since how much local retention makes sense
+    depends on the Pi's actual free storage and how often the operator
+    downloads frames, not on anything this module can know.
+
+    Age is measured against `capturedAt` (when the frame was taken), not
+    `transferredAt` (when the Client Computer confirmed receiving it) —
+    "more than a week old" is naturally about the frame's own age. Only
+    ever considers frames that are already transferred, matching
+    `delete_frame`'s own default safety check: a frame the Client Computer
+    hasn't confirmed receiving yet is never eligible, no matter how old.
+
+    Returns the metadata of every frame actually deleted (as it was just
+    before deletion), most recently captured first — useful for a caller
+    that wants to report what was purged. Deletes one frame at a time via
+    `delete_frame`, so a failure partway through (e.g. a locked database
+    file) leaves every frame processed so far actually deleted rather than
+    the whole purge silently rolling back.
+    """
+    cutoff = (datetime.now(tz=UTC) - older_than).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+    with db.connect(db_path) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            "SELECT * FROM frames WHERE transferred_at IS NOT NULL AND captured_at < ? "
+            "ORDER BY captured_at DESC",
+            (cutoff,),
+        ).fetchall()
+    purged = [_row_to_metadata(row) for row in rows]
+    for frame in purged:
+        delete_frame(frame["frameId"], db_path=db_path)
+    return purged

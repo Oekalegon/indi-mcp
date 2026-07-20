@@ -1,9 +1,20 @@
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from indi_mcp import frame_store
+
+
+def _backdate(db_path: Path, frame_id: str, captured_at: datetime) -> None:
+    """Rewrite `frame_id`'s `captured_at` directly, bypassing `frame_store` (test-only)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE frames SET captured_at = ? WHERE frame_id = ?",
+            (captured_at.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00"), frame_id),
+        )
+        conn.commit()
 
 
 @pytest.fixture()
@@ -300,3 +311,83 @@ def test_delete_frame_raises_for_an_unknown_frame_id(store_paths: tuple[Path, Pa
 
     with pytest.raises(frame_store.FrameNotFoundError):
         frame_store.delete_frame("does-not-exist", db_path=db_path)
+
+
+def test_purge_transferred_frames_deletes_only_old_transferred_frames(
+    store_paths: tuple[Path, Path],
+) -> None:
+    frames_dir, db_path = store_paths
+    now = datetime.now(tz=UTC)
+
+    old_transferred = frame_store.save_frame(
+        b"old-transferred", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    frame_store.confirm_frame_transfer(old_transferred["frameId"], db_path=db_path)
+    _backdate(db_path, old_transferred["frameId"], now - timedelta(days=10))
+
+    old_untransferred = frame_store.save_frame(
+        b"old-untransferred",
+        device="cam",
+        extension=".fits",
+        directory=frames_dir,
+        db_path=db_path,
+    )
+    _backdate(db_path, old_untransferred["frameId"], now - timedelta(days=10))
+
+    recent_transferred = frame_store.save_frame(
+        b"recent-transferred",
+        device="cam",
+        extension=".fits",
+        directory=frames_dir,
+        db_path=db_path,
+    )
+    frame_store.confirm_frame_transfer(recent_transferred["frameId"], db_path=db_path)
+
+    purged = frame_store.purge_transferred_frames(older_than=timedelta(weeks=1), db_path=db_path)
+
+    assert [f["frameId"] for f in purged] == [old_transferred["frameId"]]
+    with pytest.raises(frame_store.FrameNotFoundError):
+        frame_store.get_frame_metadata(old_transferred["frameId"], db_path=db_path)
+    assert not (frames_dir / f"{old_transferred['frameId']}.fits").exists()
+    assert frame_store.get_frame_metadata(old_untransferred["frameId"], db_path=db_path)
+    assert (frames_dir / f"{old_untransferred['frameId']}.fits").exists()
+    assert frame_store.get_frame_metadata(recent_transferred["frameId"], db_path=db_path)
+    assert (frames_dir / f"{recent_transferred['frameId']}.fits").exists()
+
+
+def test_purge_transferred_frames_returns_most_recently_captured_first(
+    store_paths: tuple[Path, Path],
+) -> None:
+    frames_dir, db_path = store_paths
+    now = datetime.now(tz=UTC)
+
+    older = frame_store.save_frame(
+        b"older", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    frame_store.confirm_frame_transfer(older["frameId"], db_path=db_path)
+    _backdate(db_path, older["frameId"], now - timedelta(days=20))
+
+    newer = frame_store.save_frame(
+        b"newer", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    frame_store.confirm_frame_transfer(newer["frameId"], db_path=db_path)
+    _backdate(db_path, newer["frameId"], now - timedelta(days=10))
+
+    purged = frame_store.purge_transferred_frames(older_than=timedelta(weeks=1), db_path=db_path)
+
+    assert [f["frameId"] for f in purged] == [newer["frameId"], older["frameId"]]
+
+
+def test_purge_transferred_frames_returns_an_empty_list_when_nothing_qualifies(
+    store_paths: tuple[Path, Path],
+) -> None:
+    frames_dir, db_path = store_paths
+    saved = frame_store.save_frame(
+        b"data", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+    frame_store.confirm_frame_transfer(saved["frameId"], db_path=db_path)
+
+    purged = frame_store.purge_transferred_frames(older_than=timedelta(weeks=1), db_path=db_path)
+
+    assert purged == []
+    assert frame_store.get_frame_metadata(saved["frameId"], db_path=db_path)
