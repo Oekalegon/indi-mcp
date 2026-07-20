@@ -297,8 +297,8 @@ def confirm_frame_transfer(frame_id: str, *, db_path: Path | None = None) -> Fra
 
 def delete_frame(
     frame_id: str, *, require_transferred: bool = True, db_path: Path | None = None
-) -> None:
-    """Delete `frame_id`'s file and its `frames` row.
+) -> FrameMetadata:
+    """Delete `frame_id`'s file and its `frames` row, returning its metadata as it was just before.
 
     A manual, client-requested cleanup action, not an automatic sweep —
     see this module's docstring for why. Refuses (`FrameNotTransferredError`)
@@ -326,6 +326,7 @@ def delete_frame(
             "call confirm_frame_transfer first, or pass require_transferred=False "
             "to delete it anyway"
         )
+    metadata = _row_to_metadata(row)
     path = Path(row["path"])
     with db.connect(db_path) as conn:
         _ensure_schema(conn)
@@ -333,6 +334,7 @@ def delete_frame(
         conn.commit()
     path.unlink(missing_ok=True)
     logger.info("Deleted frame %s (%s)", frame_id, path)
+    return metadata
 
 
 def purge_transferred_frames(

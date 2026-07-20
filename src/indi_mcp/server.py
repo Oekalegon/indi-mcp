@@ -2,11 +2,13 @@
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
 from indi_mcp import (
+    frame_store,
     indi_driver,
     indi_messaging,
     indi_server,
@@ -15,6 +17,7 @@ from indi_mcp import (
     script_runs,
     script_store,
 )
+from indi_mcp.frame_store import FrameMetadata
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
@@ -314,6 +317,96 @@ def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
 def resume_script(run_id: str) -> ScriptRunResumed | ScriptRunPauseRejected:
     """Resume a run previously paused with `pause_script`."""
     return script_runs.resume_script(run_id)
+
+
+@mcp.tool()
+async def list_frames(
+    run_id: str | None = None,
+    device: str | None = None,
+    since: str | None = None,
+    transferred: bool | None = None,
+) -> list[FrameMetadata]:
+    """List captured frame metadata, most recently captured first, with optional filters.
+
+    `transferred` is a tri-state: omitted/`None` returns every frame,
+    `true` only ones this call has already confirmed received
+    (`confirm_frame_transfer`), `false` only ones still waiting to be
+    retrieved — useful for checking what's left to download before
+    running `purge_transferred_frames`. Never returns a frame's on-disk
+    path; read its actual bytes via the `frame://{frameId}` resource.
+    """
+    return await asyncio.to_thread(
+        frame_store.list_frames, run_id=run_id, device=device, since=since, transferred=transferred
+    )
+
+
+@mcp.tool()
+async def get_frame_metadata(frame_id: str) -> FrameMetadata:
+    """Return the metadata for a single captured frame identified by `frame_id`."""
+    return await asyncio.to_thread(frame_store.get_frame_metadata, frame_id)
+
+
+@mcp.tool()
+async def confirm_frame_transfer(frame_id: str) -> FrameMetadata:
+    """Confirm the Client Computer has safely saved a copy of `frame_id`.
+
+    Sets `transferredAt`. Call this only after actually verifying the
+    bytes read from `frame://{frameId}` were received intact — this is
+    what makes a frame eligible for `delete_frame`/`purge_transferred_frames`
+    later, so confirming a transfer that didn't really complete risks
+    losing the only copy of that frame.
+    """
+    return await asyncio.to_thread(frame_store.confirm_frame_transfer, frame_id)
+
+
+@mcp.tool()
+async def delete_frame(frame_id: str, require_transferred: bool = True) -> FrameMetadata:
+    """Delete a single captured frame's file and metadata, returning its metadata as it was.
+
+    Refuses to delete a frame that hasn't been confirmed transferred yet
+    (via `confirm_frame_transfer`) unless `require_transferred` is
+    explicitly set to `false` — this is a destructive action on the
+    actual science data this server exists to capture, so it's safe by
+    default rather than trusting every caller to check first.
+    """
+    return await asyncio.to_thread(
+        frame_store.delete_frame, frame_id, require_transferred=require_transferred
+    )
+
+
+@mcp.tool()
+async def purge_transferred_frames(older_than_days: float) -> list[FrameMetadata]:
+    """Bulk-delete every already-transferred frame captured more than `older_than_days` ago.
+
+    Never runs automatically — this is the only way old frames get
+    cleaned up, since the INDI Device's own storage is limited. Only ever
+    considers frames already confirmed transferred (see
+    `confirm_frame_transfer`), regardless of age; a frame the Client
+    Computer hasn't confirmed receiving yet is never deleted by this call.
+    Returns the metadata of every frame actually deleted.
+    """
+    return await asyncio.to_thread(
+        frame_store.purge_transferred_frames, older_than=timedelta(days=older_than_days)
+    )
+
+
+# `frameId` below (not `frame_id`): FastMCP requires the parameter name to
+# match the `{frameId}` placeholder in the URI template exactly.
+@mcp.resource("frame://{frameId}", mime_type="application/octet-stream")
+async def read_frame(frameId: str) -> bytes:
+    """Read a captured frame's raw bytes (e.g. FITS data), identified by its `frameId`.
+
+    Returned as a base64 `blob` resource content, per
+    `docs/Design.md#retrieving-frames` — reuses MCP's standard binary
+    resource handling rather than a bespoke download tool. The whole frame
+    is read into memory and returned in one response: this SDK's resource
+    mechanism has no native chunked/range read, so a very large frame is
+    fully buffered here. Left as-is per Design.md's own open question on
+    this ("deferred until real frame sizes are known" rather than solved
+    speculatively) — not an oversight.
+    """
+    path = await asyncio.to_thread(frame_store.get_frame_path, frameId)
+    return await asyncio.to_thread(path.read_bytes)
 
 
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
