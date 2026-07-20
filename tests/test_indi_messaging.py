@@ -1,3 +1,4 @@
+import xml.etree.ElementTree as ET
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -423,3 +424,45 @@ async def test_messaging_client_buffers_recognised_events() -> None:
 
     assert len(buf) == 1
     assert buf[0]["kind"] == "propertyDefinition"
+
+
+def test_messaging_client_sets_enable_blob_default_to_also() -> None:
+    """Without this, `indipyclient` defaults to `"Never"` and silently drops every BLOB —
+    see the end-to-end test below for what this setting actually causes to happen on the wire.
+    """
+    buf: deque = deque(maxlen=10)
+    client = _MessagingClient("localhost", 7624, buf)
+
+    assert client.enableBLOBdefault == "Also"
+
+
+async def test_messaging_client_sends_enableblob_also_when_a_camera_defines_its_blob_vector() -> (
+    None
+):
+    """`enableBLOBdefault = "Also"` (set in `_MessagingClient.__init__`) only matters if it
+    actually causes `indiserver` to be told to send BLOBs — this exercises the real
+    `indipyclient` machinery (not our own code) that reacts to it: `IPyClient._rxhandler`,
+    on receiving a device's `defBLOBVector`, automatically calls `resend_enableBLOB`, which
+    sends an `<enableBLOB>` instruction using the vector's `_enableBLOB` — initialized from
+    `enableBLOBdefault` when the vector is created (`ipyclient.py`'s `Device.__init__`). This
+    confirms that whole chain actually reaches the wire, not just that we set an attribute.
+    """
+    buf: deque = deque(maxlen=10)
+    client = _MessagingClient("localhost", 7624, buf)
+    writer = MagicMock()
+    writer.write = MagicMock()
+    writer.drain = AsyncMock()
+    client._writer = writer  # makes `client.connected` True without a real socket
+
+    define_blob_vector = ET.fromstring(
+        '<defBLOBVector device="CCD Simulator" name="CCD1" state="Idle" perm="ro" timeout="60">'
+        '<defBLOB name="CCD1" label="Image"/>'
+        "</defBLOBVector>"
+    )
+    await client._rxhandler(define_blob_vector)
+
+    sent = [ET.fromstring(call.args[0]) for call in writer.write.call_args_list]
+    assert any(
+        el.tag == "enableBLOB" and el.get("device") == "CCD Simulator" and el.text == "Also"
+        for el in sent
+    )

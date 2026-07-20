@@ -106,13 +106,16 @@ Whether a run can be paused (see below) depends on the script itself — some sc
   "runId": "b3f1c2d4-...",
   "finishedAt": "2026-07-14T19:05:00Z",
   "result": {
-    "framesCaptured": 10,
-    "frames": [
-      { "id": "frame-0001", "path": "M31/2026-07-14/frame-0001.fits" }
-    ]
+    "scriptId": "capture_sequence",
+    "stepsExecuted": 42,
+    "framesCaptured": 10
   }
 }
 ```
+
+`result` is intentionally a summary, not a full frame listing — a client that needs the
+captured frames themselves calls `list_frames(runId=...)` (see "Retrieving frames" below),
+rather than `scriptCompleted` duplicating data that already lives in the `frames` table.
 
 ```json
 {
@@ -330,7 +333,7 @@ Two separate concerns: finding out what frames exist (metadata, cheap, queried a
 ]
 ```
 
-**`get_frame_metadata`** — the same shape for a single `frameId`, useful once a client already knows the id (e.g. from a `scriptCompleted` result's `frames` list).
+**`get_frame_metadata`** — the same shape for a single `frameId`, useful once a client already knows the id (e.g. from a `list_frames(runId=...)` call made after a `scriptCompleted` event).
 
 **Frame content is exposed as an MCP resource**, not embedded in a tool result: each frame gets a `frame://{frame_id}` URI, read via the standard `resources/read` request rather than a bespoke "download" tool — this reuses MCP's existing binary content handling (a base64 `blob` resource content) instead of inventing another transfer mechanism.
 

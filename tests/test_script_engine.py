@@ -1,10 +1,11 @@
 import asyncio
+from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
-from indi_mcp import indi_messaging, rig_store, script_engine, script_store
+from indi_mcp import frame_store, indi_messaging, rig_store, script_engine, script_store
 
 _known_devices: list[str] = []
 
@@ -96,7 +97,7 @@ async def test_execute_script_runs_set_property_against_resolved_device(
     send_property.assert_awaited_once_with(
         "CCD Simulator", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10"}
     )
-    assert result == {"scriptId": "cool", "stepsExecuted": 1}
+    assert result == {"scriptId": "cool", "stepsExecuted": 1, "framesCaptured": 0}
 
 
 async def test_execute_script_substitutes_parameter_references(
@@ -943,7 +944,62 @@ async def test_execute_script_run_script_recurses_with_substituted_parameters(
     assert result["stepsExecuted"] == 2  # the run_script step itself + the substituted set_property
 
 
-async def test_execute_script_capture_frame_is_a_stub_with_no_indi_calls(
+def _blob_snapshot(
+    data: bytes = b"fits-bytes",
+    *,
+    member: str = "CCD1",
+    fmt: str = ".fits",
+    timestamp: datetime | None = None,
+) -> indi_messaging.BlobSnapshot:
+    return {
+        "values": {member: data},
+        "sizeformat": {member: (len(data), fmt)},
+        "timestamp": timestamp if timestamp is not None else datetime.now(tz=UTC),
+    }
+
+
+def _mock_capture_frame_success(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    exposure_states: list[str] | None = None,
+    blob: indi_messaging.BlobSnapshot | None = None,
+    saved_metadata: dict[str, Any] | None = None,
+) -> tuple[AsyncMock, MagicMock]:
+    """Wire up the mocks a successful `capture_frame` run needs.
+
+    Returns `(send_property, save_frame)`.
+    """
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    states = iter(exposure_states if exposure_states is not None else ["Ok"])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: next(states))
+
+    def get_latest_blob(device: str, name: str) -> indi_messaging.BlobSnapshot:
+        # Stamped with the current time on every poll (not once, up front, when this
+        # helper runs) — the handler's `since` marker is captured live, after this
+        # helper returns, so a fixed timestamp baked in here would always predate it
+        # and the capture would spuriously time out waiting for "a newer BLOB".
+        template = blob or _blob_snapshot()
+        return {**template, "timestamp": datetime.now(tz=UTC)}
+
+    monkeypatch.setattr(indi_messaging, "get_latest_blob", get_latest_blob)
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    save_frame = MagicMock(
+        return_value=saved_metadata
+        or {
+            "frameId": "frame-1",
+            "runId": None,
+            "device": "CCD Simulator",
+            "sizeBytes": 10,
+            "capturedAt": "2026-07-20T00:00:00.000000+00:00",
+            "transferredAt": None,
+        }
+    )
+    monkeypatch.setattr(frame_store, "save_frame", save_frame)
+    return send_property, save_frame
+
+
+async def test_execute_script_capture_frame_sends_exposure_and_saves_the_drained_blob(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
@@ -958,13 +1014,247 @@ async def test_execute_script_capture_frame_is_a_stub_with_no_indi_calls(
             }
         ],
     )
-    send_property = AsyncMock()
-    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    send_property, save_frame = _mock_capture_frame_success(
+        monkeypatch, blob=_blob_snapshot(b"the-frame-bytes", fmt=".fits")
+    )
 
     result = await script_engine.execute_script("capture", "test-rig", {})
 
-    send_property.assert_not_awaited()
+    send_property.assert_awaited_once_with(
+        "CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "30.0"}
+    )
+    save_frame.assert_called_once_with(
+        b"the-frame-bytes", device="CCD Simulator", extension=".fits", run_id=None
+    )
     assert result["stepsExecuted"] == 1
+    assert result["framesCaptured"] == 1
+
+
+async def test_execute_script_capture_frame_sets_frame_type_and_binning_when_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "Dark",
+                "binningX": 2,
+                "binningY": 2,
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name in ("CCD_FRAME_TYPE", "CCD_BINNING"):
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_any_call("CCD Simulator", "CCD_FRAME_TYPE", {"FRAME_DARK": "On"})
+    send_property.assert_any_call("CCD Simulator", "CCD_BINNING", {"HOR_BIN": "2", "VER_BIN": "2"})
+    send_property.assert_any_call("CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"})
+
+
+async def test_execute_script_capture_frame_skips_frame_type_and_binning_when_undefined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CCD_FRAME_TYPE`/`CCD_BINNING` are undefined by default (`_default_get_property_values`)."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"}
+    )
+
+
+async def test_execute_script_capture_frame_tags_saved_frame_with_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _, save_frame = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {}, run_id="run-42")
+
+    save_frame.assert_called_once_with(
+        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id="run-42"
+    )
+
+
+async def test_execute_script_capture_frame_times_out_waiting_for_exposure_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 0}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Busy")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(script_engine, "_CAPTURE_READOUT_BUFFER_SECONDS", 0.01)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="did not reach"):
+        await script_engine.execute_script("capture", "test-rig", {})
+
+
+async def test_execute_script_capture_frame_fails_fast_on_exposure_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A driver-reported `Alert` (aborted exposure, camera fault) shouldn't be waited out for
+    the full timeout — it's not something more polling will resolve.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 0}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    # A large timeout that a correct fast-fail must not wait out.
+    monkeypatch.setattr(script_engine, "_CAPTURE_READOUT_BUFFER_SECONDS", 60.0)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
+        await asyncio.wait_for(script_engine.execute_script("capture", "test-rig", {}), timeout=1.0)
+
+
+async def test_wait_for_property_state_fails_fast_on_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    ctx = script_engine._ExecutionContext(
+        role_to_device={},
+        cancel_event=None,
+        pause_event=None,
+        on_progress=None,
+        total_steps=None,
+        scripts={},
+        run_id=None,
+    )
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
+        await asyncio.wait_for(
+            script_engine._wait_for_property_state(
+                ctx, "CCD Simulator", "CCD_EXPOSURE", indi_messaging.PropertyState.OK, 60.0
+            ),
+            timeout=1.0,
+        )
+
+
+async def test_execute_script_capture_frame_times_out_waiting_for_blob(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 0}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(indi_messaging, "get_latest_blob", lambda device, name: None)
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(script_engine, "_CAPTURE_READOUT_BUFFER_SECONDS", 0.01)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="no BLOB received"):
+        await script_engine.execute_script("capture", "test-rig", {})
+
+
+async def test_execute_script_capture_frame_shares_a_single_deadline_across_both_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exposure-wait and BLOB-wait draw from one combined budget, not two independent
+    full timeouts — a driver that's slow to reach `Ok` should eat into the time left for
+    the BLOB to arrive, not get a fresh full budget on top of it.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 0}],
+    )
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+
+    def get_property_state(device: str, name: str) -> str:
+        return "Ok" if loop.time() - start >= 0.08 else "Busy"
+
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", get_property_state)
+    monkeypatch.setattr(indi_messaging, "get_latest_blob", lambda device, name: None)
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(script_engine, "_CAPTURE_READOUT_BUFFER_SECONDS", 0.1)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="no BLOB received"):
+        await script_engine.execute_script("capture", "test-rig", {})
+
+    elapsed = loop.time() - start
+    # The old (buggy) behavior gave the BLOB wait its own fresh 0.1s on top of the ~0.08s
+    # already spent reaching `Ok`, for ~0.18s total. A shared deadline caps the whole
+    # capture at ~0.1s instead.
+    assert elapsed < 0.15
+
+
+async def test_execute_script_capture_frame_ignores_a_stale_blob_from_an_earlier_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BLOB already cached from before this capture's exposure command doesn't count."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 0}],
+    )
+    stale = _blob_snapshot(b"stale-bytes", timestamp=datetime(2020, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(indi_messaging, "get_latest_blob", lambda device, name: stale)
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(script_engine, "_CAPTURE_READOUT_BUFFER_SECONDS", 0.01)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="no BLOB received"):
+        await script_engine.execute_script("capture", "test-rig", {})
+
+
+async def test_execute_script_capture_frame_rejects_a_blob_with_more_than_one_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 0}],
+    )
+
+    def ambiguous(device: str, name: str) -> indi_messaging.BlobSnapshot:
+        return {
+            "values": {"CCD1": b"a", "CCD2": b"b"},
+            "sizeformat": {"CCD1": (1, ".fits"), "CCD2": (1, ".fits")},
+            "timestamp": datetime.now(tz=UTC),
+        }
+
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(indi_messaging, "get_latest_blob", ambiguous)
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="expected exactly one"):
+        await script_engine.execute_script("capture", "test-rig", {})
 
 
 async def test_execute_script_slew_sets_ra_dec_and_waits_for_ok(
@@ -1443,6 +1733,7 @@ async def test_run_one_step_rejects_a_step_type_with_no_registered_handler(
         on_progress=None,
         total_steps=None,
         scripts={},
+        run_id=None,
     )
 
     class _UnregisteredStep:

@@ -180,8 +180,8 @@ a disconnected device) would otherwise hang the run forever.
 | `binningX` / `binningY` | integer | no (default `1`) | Pixel binning, if the camera supports it. |
 
 Captured frames are stored on the INDI Device and reported back through the script result — see
-[Design.md § Frame storage metadata](Design.md#frame-storage-metadata) (a later, separate design
-task, INDIMCP-10/11).
+[Design.md § Frame storage metadata](Design.md#frame-storage-metadata) (`frame_store`, INDIMCP-10)
+and the `capture_frame` step handler itself (`script_engine`, INDIMCP-37).
 
 #### `slew`
 

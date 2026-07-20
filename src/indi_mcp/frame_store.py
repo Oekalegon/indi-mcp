@@ -10,11 +10,10 @@ This module is the storage layer only — `save_frame`/`list_frames`/
 `get_frame_metadata`/`confirm_frame_transfer`/`delete_frame`/
 `purge_transferred_frames` are plain functions, not MCP tools. Draining a
 BLOB out of `indi_messaging` and calling `save_frame` with the result is
-`script_engine`'s `capture_frame` step handler (INDIMCP-37); exposing
-these as MCP tools, plus a `frame://{frameId}` resource for the bytes
-themselves, is INDIMCP-11 — neither is built yet, mirroring how
-`rig_store`'s plain functions are wired up as `@mcp.tool()`s separately in
-`server.py`.
+`script_engine`'s `capture_frame` step handler (INDIMCP-37, built);
+exposing these as MCP tools, plus a `frame://{frameId}` resource for the
+bytes themselves, is INDIMCP-11 (also built) — mirroring how `rig_store`'s
+plain functions are wired up as `@mcp.tool()`s separately in `server.py`.
 
 Neither `delete_frame` nor `purge_transferred_frames` is ever called by
 anything in this module or `script_engine` — the Raspberry Pi's storage is

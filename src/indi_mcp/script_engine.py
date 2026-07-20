@@ -6,27 +6,27 @@ This is the internal "given a script, a rig, and parameters, run it" engine
 bookkeeping, and the `indi://scripts` event stream are INDIMCP-13/14,
 separate tickets that wrap `execute_script` below.
 
-Two things are deliberately incomplete here, both noted inline where they
-matter:
+One thing is deliberately incomplete here, noted inline where it matters:
+`slew` is implemented for a `raDec` target (INDIMCP-38); its `objectName`
+target still raises `ScriptExecutionError` pending astropy-based name
+resolution (INDIMCP-29).
 
-* `capture_frame` is still a **stub** — it logs and returns without any
-  real INDI interaction. Real frame capture needs BLOB draining plus file/
-  SQLite storage (INDIMCP-10/11), which doesn't exist yet. `slew` is
-  implemented for a `raDec` target (INDIMCP-38); its `objectName` target
-  still raises `ScriptExecutionError` pending astropy-based name
-  resolution (INDIMCP-29).
-* Pause/cancel are supported as plain hooks (`asyncio.Event`s) an eventual
-  caller passes in — this engine has no `runId`/task-tracking concept of
-  its own; that's INDIMCP-13's job.
+Pause/cancel are supported as plain hooks (`asyncio.Event`s) an eventual
+caller passes in — this engine has no `runId`/task-tracking concept of its
+own; that's INDIMCP-13's job. `run_id`, however, *is* threaded through (as
+a plain optional string, not a task-tracking concept) purely so
+`capture_frame` can tag the frames it saves with the run that produced
+them — see `execute_script`'s `run_id` parameter.
 """
 
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, TypedDict
 
-from indi_mcp import indi_messaging, rig_store, script_store
+from indi_mcp import frame_store, indi_messaging, rig_store, script_store
 from indi_mcp.script_store import (
     CaptureFrameStep,
     Condition,
@@ -64,6 +64,32 @@ depends on the mount and how far it's moving, not something a script
 author tunes per call, so this is a generous fixed engine default rather
 than something exposed in the YAML.
 """
+
+_CAPTURE_READOUT_BUFFER_SECONDS = 30.0
+"""Extra time `capture_frame` allows, beyond the exposure length itself, for `CCD_EXPOSURE`
+to reach `Ok` and for the resulting BLOB to actually arrive on `_CCD_BLOB_VECTOR`.
+
+Covers sensor readout and image download/transfer time, which varies by
+camera/driver and isn't something a script author tunes per capture (same
+reasoning as `_SLEW_TIMEOUT_SECONDS` not being a schema field).
+"""
+
+_CCD_BLOB_VECTOR = "CCD1"
+"""The INDI BLOB vector name a camera driver publishes captured image data on.
+
+Standard INDI CCD convention, same as `CCD_EXPOSURE`/`CCD_FRAME_TYPE`/
+`CCD_BINNING` below — not configurable per rig component today (every
+camera driver this project has been tested against uses it), hardcoded
+here the same way `slew` hardcodes `EQUATORIAL_EOD_COORD`.
+"""
+
+_FRAME_TYPE_ELEMENTS = {
+    "Light": "FRAME_LIGHT",
+    "Dark": "FRAME_DARK",
+    "Flat": "FRAME_FLAT",
+    "Bias": "FRAME_BIAS",
+}
+"""`CaptureFrameStep.frameType` value -> `CCD_FRAME_TYPE` switch element name (standard INDI)."""
 
 
 class ScriptValidationError(Exception):
@@ -121,13 +147,19 @@ class ScriptProgress(TypedDict):
 class ScriptResult(TypedDict):
     """The outcome of a completed `execute_script` call.
 
-    Intentionally minimal: the real `scriptCompleted`-shaped result
-    (`framesCaptured`, `frames`, ...) has nothing real to report until
-    `capture_frame` is no longer a stub (INDIMCP-10/11).
+    `framesCaptured` counts every `capture_frame` step that completed
+    during this run (including inside nested `run_script` calls and
+    `repeat` iterations, matching `stepsExecuted`'s own whole-run scope) —
+    not a full `frames` list of per-frame metadata (`docs/Design.md`'s
+    illustrative `scriptCompleted` example shows one): a caller wanting
+    that can already query `frame_store.list_frames(run_id=...)` once
+    `run_id` is threaded through (see `execute_script`), without this
+    result needing to duplicate that same data.
     """
 
     scriptId: str
     stepsExecuted: int
+    framesCaptured: int
 
 
 @dataclass
@@ -152,7 +184,9 @@ class _ExecutionContext:
     on_progress: Callable[[ScriptProgress], None] | None
     total_steps: int | None
     scripts: dict[str, Script]
+    run_id: str | None
     steps_executed: int = field(default=0)
+    frames_captured: int = field(default=0)
 
 
 async def execute_script(
@@ -163,8 +197,17 @@ async def execute_script(
     cancel_event: asyncio.Event | None = None,
     pause_event: asyncio.Event | None = None,
     on_progress: Callable[[ScriptProgress], None] | None = None,
+    run_id: str | None = None,
 ) -> ScriptResult:
     """Run the script identified by `script_id` against the rig identified by `rig_id`.
+
+    `run_id` is purely a label passed through to `capture_frame` steps
+    (which tag each frame they save with it via `frame_store.save_frame`)
+    — `None` for a run with no run identity of its own (this engine has no
+    concept of one; `script_runs.start_script` supplies its own `uuid4` for
+    every real run it starts). A frame saved with `run_id=None` is
+    indistinguishable from one captured entirely outside any script run,
+    per `frame_store`'s own "`None` for a frame captured ad hoc" convention.
 
     Resolves every rig-component role referenced anywhere in the call tree
     (this script, and every script it transitively calls via `run_script`)
@@ -210,10 +253,15 @@ async def execute_script(
         pause_event=pause_event,
         on_progress=on_progress,
         scripts=scripts,
+        run_id=run_id,
         total_steps=_count_total_steps(script, scripts),
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
-    return {"scriptId": script.id, "stepsExecuted": ctx.steps_executed}
+    return {
+        "scriptId": script.id,
+        "stepsExecuted": ctx.steps_executed,
+        "framesCaptured": ctx.frames_captured,
+    }
 
 
 def _get_script(script_id: str) -> Script:
@@ -785,9 +833,15 @@ async def _wait_for_property_state(
 
     A lower-level cousin of `_execute_wait_for`: that one evaluates an
     arbitrary script-authored `Condition` (any property/element/operator);
-    this one is for engine-implemented primitives (`slew` today, `capture_frame`
-    later) that need to wait for their own specific `Busy`->`Ok` transition,
-    with no `Condition` for a script author to write.
+    this one is for engine-implemented primitives (`slew`, `capture_frame`)
+    that need to wait for their own specific `Busy`->`Ok` transition, with
+    no `Condition` for a script author to write.
+
+    Fails immediately (rather than waiting out the full timeout) if the
+    driver reports `Alert` instead of `target_state` — a driver-reported
+    hardware fault (aborted exposure, mount fault, disconnected device)
+    isn't something more polling will resolve, so there's no reason to
+    keep a caller waiting on it, unlike a genuine "still working" `Busy`.
     """
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while True:
@@ -795,6 +849,10 @@ async def _wait_for_property_state(
         state = indi_messaging.get_property_state(device, property_name)
         if state == target_state:
             return
+        if state == indi_messaging.PropertyState.ALERT and target_state != (
+            indi_messaging.PropertyState.ALERT
+        ):
+            raise ScriptExecutionError(f"{property_name} on {device} went to Alert")
         if asyncio.get_running_loop().time() >= deadline:
             raise ScriptExecutionError(
                 f"{property_name} on {device} did not reach {target_state} within "
@@ -867,28 +925,139 @@ async def _execute_if(
     await _execute_steps(branch, ctx, params, script_id, pausable)
 
 
-async def _execute_capture_frame_stub(
+async def _execute_capture_frame(
     step: CaptureFrameStep,
     ctx: _ExecutionContext,
     params: dict[str, Any],
     script_id: str,
     pausable: bool,
 ) -> None:
-    """Stub: log the intended capture; no real INDI interaction yet.
+    """Capture a frame: set frame type/binning (best-effort), expose, drain the BLOB, and store it.
 
-    Real frame capture — setting `CCD_FRAME_TYPE`/`CCD_EXPOSURE`, waiting
-    through the `Busy`->`Ok` transition, draining the BLOB, and writing
-    frame + SQLite metadata — is INDIMCP-10/11, not built yet.
+    Sequence: set `CCD_FRAME_TYPE`/`CCD_BINNING` if the device defines them
+    (skipped, not an error, if undefined — not every driver reports frame
+    type or supports binning, mirroring `_check_not_parked`/
+    `_ensure_track_on_slew`'s "optional property" handling) — then set
+    `CCD_EXPOSURE`, wait through its `Busy`->`Ok` transition
+    (`_wait_for_property_state`, the same primitive `slew` uses for
+    `EQUATORIAL_EOD_COORD`), and drain whatever BLOB most recently arrived
+    on `_CCD_BLOB_VECTOR` *after* the exposure command was sent
+    (`_wait_for_blob` guards against draining one left over from an
+    earlier, unrelated capture of the same device). The drained bytes are
+    saved via `frame_store.save_frame` — synchronous/blocking, so wrapped
+    in `asyncio.to_thread` per that module's own contract — tagged with
+    this run's `run_id` so a captured frame can be traced back to the
+    script run that produced it.
     """
     device = _resolve_device(_substituted_role(step.role, params), ctx)
-    exposure = _substitute(step.exposureSeconds, params)
+    exposure = float(_substitute(step.exposureSeconds, params))
+    frame_type = _substitute(step.frameType, params)
+    binning_x = _substitute(step.binningX, params)
+    binning_y = _substitute(step.binningY, params)
+
+    await _set_frame_type(device, frame_type)
+    await _set_binning(device, binning_x, binning_y)
+
+    since = datetime.now(tz=UTC)
+    deadline = asyncio.get_running_loop().time() + exposure + _CAPTURE_READOUT_BUFFER_SECONDS
+    await indi_messaging.send_property(
+        device, "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": str(exposure)}
+    )
+    await _wait_for_property_state(
+        ctx,
+        device,
+        "CCD_EXPOSURE",
+        indi_messaging.PropertyState.OK,
+        deadline - asyncio.get_running_loop().time(),
+    )
+    data, extension = await _wait_for_blob(
+        ctx, device, _CCD_BLOB_VECTOR, since, deadline - asyncio.get_running_loop().time()
+    )
+
+    metadata = await asyncio.to_thread(
+        frame_store.save_frame, data, device=device, extension=extension, run_id=ctx.run_id
+    )
+    ctx.frames_captured += 1
     logger.info(
-        "capture_frame stub: device=%s exposureSeconds=%s frameType=%s "
-        "(no real capture yet, see INDIMCP-10/11)",
+        "capture_frame: device=%s exposureSeconds=%s frameType=%s -> frame %s (%d bytes)",
         device,
         exposure,
-        step.frameType,
+        frame_type,
+        metadata["frameId"],
+        metadata["sizeBytes"],
     )
+
+
+async def _set_frame_type(device: str, frame_type: str) -> None:
+    """Set `CCD_FRAME_TYPE` to `frame_type`; skipped (not an error) if undefined on this device."""
+    values = indi_messaging.get_property_values(device, "CCD_FRAME_TYPE")
+    if values is None:
+        return
+    element = _FRAME_TYPE_ELEMENTS.get(frame_type)
+    if element is None:  # pragma: no cover - schema restricts frameType to these 4 values
+        raise ScriptValidationError(f"unknown frameType {frame_type!r}")
+    await indi_messaging.send_property(device, "CCD_FRAME_TYPE", {element: "On"})
+
+
+async def _set_binning(device: str, binning_x: int, binning_y: int) -> None:
+    """Set `CCD_BINNING`'s `HOR_BIN`/`VER_BIN`; skipped (not an error) if undefined on this device.
+
+    Sent unconditionally (even for the default 1x1) when the property
+    exists, so a capture's binning is deterministic regardless of whatever
+    a previous session last left the camera set to — same reasoning as
+    `_ensure_track_on_slew` always setting `ON_COORD_SET` rather than
+    trusting leftover state.
+    """
+    values = indi_messaging.get_property_values(device, "CCD_BINNING")
+    if values is None:
+        return
+    await indi_messaging.send_property(
+        device, "CCD_BINNING", {"HOR_BIN": str(binning_x), "VER_BIN": str(binning_y)}
+    )
+
+
+async def _wait_for_blob(
+    ctx: _ExecutionContext,
+    device: str,
+    vector_name: str,
+    since: datetime,
+    timeout_seconds: float,
+) -> tuple[bytes, str]:
+    """Poll for a BLOB on `device`'s `vector_name` newer than `since`, or time out.
+
+    `since` (this capture's own "command just sent" timestamp) guards
+    against draining a stale BLOB already cached from an earlier, unrelated
+    capture of the same device/vector — `indi_messaging.get_latest_blob`
+    only ever holds the single most recent update, so without this check a
+    capture could return someone else's frame instead of timing out
+    honestly. Raises `ScriptExecutionError` if the vector doesn't report
+    exactly one member (an ambiguous shape this project has no convention
+    for) or on timeout, matching every other engine wait's exception
+    contract. Returns `(bytes, extension)`, `extension` taken from the
+    BLOB's own reported format rather than guessed (see
+    `frame_store.save_frame`'s `extension` parameter), normalized to always
+    include a leading dot.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        await _check_cancelled(ctx)
+        snapshot = indi_messaging.get_latest_blob(device, vector_name)
+        if snapshot is not None and snapshot["timestamp"] > since:
+            if len(snapshot["values"]) != 1:
+                raise ScriptExecutionError(
+                    f"expected exactly one BLOB member on {device}.{vector_name}, "
+                    f"got {sorted(snapshot['values'])}"
+                )
+            (member,) = snapshot["values"]
+            data = snapshot["values"][member]
+            _, fmt = snapshot["sizeformat"][member]
+            extension = fmt if fmt.startswith(".") else f".{fmt}"
+            return data, extension
+        if asyncio.get_running_loop().time() >= deadline:
+            raise ScriptExecutionError(
+                f"no BLOB received on {device}.{vector_name} within {timeout_seconds}s"
+            )
+        await asyncio.sleep(_WAIT_POLL_INTERVAL_SECONDS)
 
 
 async def _execute_slew(
@@ -1000,7 +1169,7 @@ async def _ensure_track_on_slew(device: str) -> None:
 STEP_HANDLERS: dict[type, StepHandler] = {
     SetPropertyStep: _execute_set_property,
     WaitForStep: _execute_wait_for,
-    CaptureFrameStep: _execute_capture_frame_stub,
+    CaptureFrameStep: _execute_capture_frame,
     SlewStep: _execute_slew,
     RunScriptStep: _execute_run_script,
     RepeatStep: _execute_repeat,

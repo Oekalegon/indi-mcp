@@ -322,6 +322,7 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             cancel_event=run.cancel_event,
             pause_event=run.pause_event,
             on_progress=on_progress,
+            run_id=run.run_id,
         )
     except script_engine.ScriptCancelled:
         run.latest_status = {
