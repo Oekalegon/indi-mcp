@@ -87,6 +87,21 @@ def test_get_events_filters_by_since_and_returns_oldest_first(tmp_path: Path) ->
     assert [e["payload"]["i"] for e in events] == [2, 3]
 
 
+def test_get_events_since_is_inclusive_of_an_event_at_exactly_that_timestamp(
+    tmp_path: Path,
+) -> None:
+    """`since` is `occurred_at >= since`, deliberately inclusive (see `get_events`'s
+    docstring) — a caller passing an existing event's own `occurredAt` must still get that
+    event back, not have it excluded."""
+    db_path = tmp_path / "events.sqlite3"
+    event_log.record_event("messages", {"kind": "message"}, db_path=db_path)
+    occurred_at = event_log.get_events("messages", db_path=db_path)[0]["occurredAt"]
+
+    events = event_log.get_events("messages", since=occurred_at, db_path=db_path)
+
+    assert len(events) == 1
+
+
 def test_purge_old_events_deletes_only_events_older_than_the_cutoff(tmp_path: Path) -> None:
     db_path = tmp_path / "events.sqlite3"
     now = datetime.now(tz=UTC)
