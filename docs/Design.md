@@ -51,7 +51,7 @@ For example, an INDI `defNumberVector` becomes:
 }
 ```
 
-and a client sending an INDI `newNumberVector` to slew becomes a `propertyCommand` with the same `type`/`elements` shape. The exact schema (naming of nested fields, how BLOBs are represented/streamed, etc.) still needs to be worked out in full — this section fixes the naming convention it should follow, not the final schema.
+and a client sending an INDI `newNumberVector` to slew becomes a `propertyCommand` with the same `type`/`elements` shape. This section fixes the naming convention the schema follows; see [MessageSchema.md](MessageSchema.md) (INDIMCP-12) for the full field-by-field reference — nested element shapes per type, how BLOBs are represented (never inlined; fetched separately), and the error/state fields, plus the scripting layer's `runId`-based status envelope which shares this same `kind`/`type` convention.
 
 ## Calling scripts and script results
 
