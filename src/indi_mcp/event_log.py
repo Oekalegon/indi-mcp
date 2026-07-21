@@ -84,7 +84,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # `idx_events_occurred_at` serves `purge_old_events`'s `DELETE ... WHERE occurred_at < ?`
+    # (no `stream` filter there — it purges across both streams at once). `get_events` always
+    # filters `stream` (a required parameter), so it's served by the composite index below
+    # instead, which covers both that filter and the `ORDER BY occurred_at` in one index.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON events (occurred_at)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_stream_occurred_at ON events (stream, occurred_at)"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_id ON events (run_id)")
 
 
