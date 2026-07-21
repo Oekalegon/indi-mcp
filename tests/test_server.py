@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -11,6 +13,7 @@ from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from indi_mcp import (
+    event_log,
     event_streams,
     frame_store,
     indi_driver,
@@ -326,6 +329,40 @@ async def test_purge_transferred_frames_delegates_to_frame_store_with_a_timedelt
     assert calls == [timedelta(days=7)]
 
 
+async def test_get_events_delegates_to_event_log_with_all_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+    record: event_log.EventRecord = {
+        "id": 1,
+        "stream": "messages",
+        "device": "CCD Simulator",
+        "runId": None,
+        "occurredAt": "2026-07-21T00:00:00.000000+00:00",
+        "payload": {"kind": "message"},
+    }
+
+    def fake_get_events(
+        stream: event_log.Stream,
+        *,
+        device: str | None,
+        run_id: str | None,
+        since: str | None,
+        db_path: Path | None = None,
+    ) -> list[event_log.EventRecord]:
+        calls.append((stream, device, run_id, since))
+        return [record]
+
+    monkeypatch.setattr(event_log, "get_events", fake_get_events)
+
+    result = await server.get_events(
+        "messages", device="CCD Simulator", run_id=None, since="2026-07-20T00:00:00Z"
+    )
+
+    assert result == [record]
+    assert calls == [("messages", "CCD Simulator", None, "2026-07-20T00:00:00Z")]
+
+
 async def test_read_frame_returns_the_frames_bytes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -486,6 +523,60 @@ async def test_subscribe_and_unsubscribe_resource_handlers_use_event_streams() -
         assert "indi://messages" not in event_streams._subscribers
     finally:
         request_ctx.reset(token)
+
+
+async def test_lifespan_starts_and_cleanly_cancels_the_purge_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_lifespan` is the one place a background task tied to the real running event loop can be
+    started (see its docstring) — this exercises the actual context manager FastMCP invokes, not
+    just `event_log.run_purge_loop` in isolation."""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def fake_run_purge_loop() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(event_log, "run_purge_loop", fake_run_purge_loop)
+
+    async with server._lifespan(server.mcp):
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+
+async def test_lifespan_drains_pending_event_streams_tasks_before_exiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable event-log write still in flight when the server shuts down must be waited
+    for, not abandoned mid-write — otherwise a reconnecting client could find the event log
+    missing exactly the event it most needs to catch up on."""
+
+    async def fake_run_purge_loop() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise
+
+    monkeypatch.setattr(event_log, "run_purge_loop", fake_run_purge_loop)
+
+    finished = threading.Event()
+
+    def slow_record_event(*args, **kwargs) -> None:
+        time.sleep(0.02)
+        finished.set()
+
+    monkeypatch.setattr(event_log, "record_event", slow_record_event)
+
+    async with server._lifespan(server.mcp):
+        event_streams.publish_message_event({"kind": "message", "device": None})
+
+    assert finished.is_set()
 
 
 async def test_subscribe_resource_handler_rejects_a_uri_that_is_not_an_event_stream() -> None:

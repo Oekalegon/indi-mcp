@@ -9,12 +9,14 @@ to MCP's `resources/subscribe` / `notifications/resources/updated` /
 (read by `resources/read`), plus a subscriber registry notified whenever a
 new event is published.
 
-**Best-effort, live-only** — matching Design.md exactly: a client that was
-disconnected when an event occurred should not assume it received every
-missed event via this route. The durable SQLite catch-up log
-(`get_events`/retention) is a separate, later concern (INDIMCP-15); this
-module only ever holds a bounded rolling window in memory, cleared on
-process restart.
+**The live `resources/subscribe` channel itself is best-effort, live-only**
+— matching Design.md exactly: a client that was disconnected when an event
+occurred should not assume it received every missed event via this route,
+and the in-memory buffers above are bounded and cleared on process restart.
+What actually lets a reconnecting client catch up is the separate, durable
+SQLite log this module also writes every event to (`event_log.record_event`,
+INDIMCP-15) — see `event_log`'s own module docstring and its `get_events`
+catch-up query.
 """
 
 import asyncio
@@ -26,10 +28,13 @@ from urllib.parse import quote
 
 from pydantic import AnyUrl
 
+from indi_mcp import event_log
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "clear_messages",
+    "drain",
     "is_subscribable_uri",
     "messages_uri",
     "publish_message_event",
@@ -56,12 +61,37 @@ _scripts: deque[Mapping] = deque(maxlen=_MAX_BUFFERED_EVENTS)
 _subscribers: dict[str, set[_NotifiableSession]] = {}
 
 _background_tasks: set[asyncio.Task] = set()
-"""Strong references to in-flight notification tasks.
+"""Strong references to in-flight notification/durable-recording tasks.
 
 `asyncio.create_task` results must be held onto somewhere or the task can be
 garbage-collected mid-execution — a well-known asyncio footgun. Each task
-removes itself once done (see `_schedule_notify`).
+removes itself once done (see `_schedule_notify`/`_schedule_record`). Also
+what `drain()` waits on at shutdown, so an in-flight event_log write isn't
+silently abandoned mid-write when the process exits.
 """
+
+
+async def drain() -> None:
+    """Wait for every currently in-flight background task to finish.
+
+    Meant to be called once, on shutdown (see `server.py`'s `_lifespan`),
+    after any periodic work (`event_log.run_purge_loop`) has already been
+    cancelled — without this, an event published right before the process
+    exits could have its `_schedule_record` write abandoned mid-flight,
+    silently losing exactly the kind of event a reconnecting client depends
+    on the durable log to still have (see this module's own docstring).
+    Only waits on tasks already scheduled at the moment it's called — a
+    publish that happens *during* drain isn't covered, since there's no
+    way to know about it in advance; that's an inherent limit of
+    fire-and-forget scheduling ending at process exit, not something this
+    can close without blocking future publishes indefinitely. Each task
+    already handles its own errors internally (`_notify` drops a failed
+    subscriber; `_record` logs and swallows a failed write), so nothing
+    here needs to re-raise on a task that failed.
+    """
+    pending = [task for task in _background_tasks if not task.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 def messages_uri(device: str | None) -> str:
@@ -152,20 +182,59 @@ def _schedule_notify(uri: str) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
+async def _record(
+    stream: event_log.Stream, payload: Mapping, *, device: str | None, run_id: str | None
+) -> None:
+    try:
+        await asyncio.to_thread(
+            event_log.record_event, stream, payload, device=device, run_id=run_id
+        )
+    except Exception:
+        logger.exception("Failed to durably record a %s event to the event log", stream)
+
+
+def _schedule_record(
+    stream: event_log.Stream, payload: Mapping, *, device: str | None, run_id: str | None
+) -> None:
+    """Fire-and-forget `event_log.record_event(...)` on a worker thread.
+
+    Unlike `_schedule_notify`, this always runs regardless of whether anyone
+    is currently subscribed — durable persistence exists to serve a client
+    that reconnects *later* (`event_log.get_events`), not to mirror live
+    delivery. `asyncio.to_thread` keeps the blocking `sqlite3` write off the
+    event loop: `indi_messaging`'s messaging-layer events in particular can
+    arrive many times a second for a "chatty" device (see
+    `docs/Design.md#event-streams`), and every other device's messaging and
+    every other script run's pause/cancel/progress polling shares this same
+    event loop.
+    """
+    task = asyncio.create_task(_record(stream, payload, device=device, run_id=run_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 def publish_message_event(event: Mapping) -> None:
-    """Record a messaging-layer event and notify `indi://messages` (and per-device) subscribers."""
+    """Record a messaging-layer event and notify `indi://messages` (and per-device) subscribers.
+
+    Also durably persisted to the event log — see `_schedule_record`.
+    """
     _messages.appendleft(event)
-    _schedule_notify(messages_uri(None))
     device = event.get("device")
+    _schedule_record("messages", event, device=device, run_id=None)
+    _schedule_notify(messages_uri(None))
     if device:
         _schedule_notify(messages_uri(device))
 
 
 def publish_script_event(event: Mapping) -> None:
-    """Record a scripting-layer event and notify `indi://scripts` (and per-run) subscribers."""
+    """Record a scripting-layer event and notify `indi://scripts` (and per-run) subscribers.
+
+    Also durably persisted to the event log — see `_schedule_record`.
+    """
     _scripts.appendleft(event)
-    _schedule_notify(scripts_uri(None))
     run_id = event.get("runId")
+    _schedule_record("scripts", event, device=None, run_id=run_id)
+    _schedule_notify(scripts_uri(None))
     if run_id:
         _schedule_notify(scripts_uri(run_id))
 

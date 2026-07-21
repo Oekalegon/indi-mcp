@@ -23,8 +23,7 @@ inside `execute_script`'s single flat step count, so `scriptProgress.step`
 already walks across nested calls, just without a separate per-sub-script
 identity. Every `kind`-tagged status this module produces is also published
 to `event_streams` (backing the `indi://scripts` subscribable resource,
-INDIMCP-14) — but there's still no durable SQLite event log here; that
-catch-up path is a separate, later concern (INDIMCP-15).
+INDIMCP-14, and the durable SQLite event log behind it, INDIMCP-15).
 """
 
 import asyncio
@@ -202,9 +201,9 @@ some bound, `_runs` would grow for as long as this service keeps running
 (it's deployed as a long-lived systemd service on a resource-constrained
 Pi, not restarted per session), accumulating every run ever started. This
 is a coarse memory-bound safety net, not a retention policy — there's no
-durability requirement for run status the way there is for the (separate,
-not-yet-built) SQLite-backed event log, so evicting the oldest terminal
-entries once the cap is exceeded is enough.
+durability requirement for run status the way there is for the (separate)
+SQLite-backed event log (`event_log`, INDIMCP-15), so evicting the oldest
+terminal entries once the cap is exceeded is enough.
 """
 
 
