@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "clear_messages",
+    "drain",
     "is_subscribable_uri",
     "messages_uri",
     "publish_message_event",
@@ -60,12 +61,37 @@ _scripts: deque[Mapping] = deque(maxlen=_MAX_BUFFERED_EVENTS)
 _subscribers: dict[str, set[_NotifiableSession]] = {}
 
 _background_tasks: set[asyncio.Task] = set()
-"""Strong references to in-flight notification tasks.
+"""Strong references to in-flight notification/durable-recording tasks.
 
 `asyncio.create_task` results must be held onto somewhere or the task can be
 garbage-collected mid-execution — a well-known asyncio footgun. Each task
-removes itself once done (see `_schedule_notify`).
+removes itself once done (see `_schedule_notify`/`_schedule_record`). Also
+what `drain()` waits on at shutdown, so an in-flight event_log write isn't
+silently abandoned mid-write when the process exits.
 """
+
+
+async def drain() -> None:
+    """Wait for every currently in-flight background task to finish.
+
+    Meant to be called once, on shutdown (see `server.py`'s `_lifespan`),
+    after any periodic work (`event_log.run_purge_loop`) has already been
+    cancelled — without this, an event published right before the process
+    exits could have its `_schedule_record` write abandoned mid-flight,
+    silently losing exactly the kind of event a reconnecting client depends
+    on the durable log to still have (see this module's own docstring).
+    Only waits on tasks already scheduled at the moment it's called — a
+    publish that happens *during* drain isn't covered, since there's no
+    way to know about it in advance; that's an inherent limit of
+    fire-and-forget scheduling ending at process exit, not something this
+    can close without blocking future publishes indefinitely. Each task
+    already handles its own errors internally (`_notify` drops a failed
+    subscriber; `_record` logs and swallows a failed write), so nothing
+    here needs to re-raise on a task that failed.
+    """
+    pending = [task for task in _background_tasks if not task.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 def messages_uri(device: str | None) -> str:

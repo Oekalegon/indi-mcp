@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 
 import pytest
 
@@ -242,3 +244,49 @@ async def test_a_failed_durable_write_does_not_raise_or_break_publishing(
     await asyncio.sleep(0.05)
 
     assert event_streams.read_messages()["events"] == [{"kind": "message", "device": None}]
+
+
+async def test_drain_waits_for_a_pending_durable_write_to_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`drain()` is what stops a server shutdown from silently abandoning an in-flight
+    event_log write mid-flight — see `server.py`'s `_lifespan`."""
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    finished = threading.Event()
+
+    def slow_record_event(*args, **kwargs) -> None:
+        # Runs on a worker thread (via asyncio.to_thread), not the test's own event loop
+        # thread — asyncio.Event isn't safe to signal cross-thread without
+        # call_soon_threadsafe, and finished only needs a thread-safe flag, not an awaitable.
+        loop.call_soon_threadsafe(started.set)
+        time.sleep(0.02)  # simulate slow disk I/O
+        finished.set()
+
+    monkeypatch.setattr(event_log, "record_event", slow_record_event)
+
+    event_streams.publish_message_event({"kind": "message", "device": None})
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert not finished.is_set()
+
+    await event_streams.drain()
+
+    assert finished.is_set()
+
+
+async def test_drain_is_a_no_op_when_nothing_is_pending() -> None:
+    await event_streams.drain()  # must not raise, even with an empty _background_tasks
+
+
+async def test_drain_does_not_raise_even_if_a_background_task_failed() -> None:
+    """A task that raised (e.g. a `_record`/`_notify` bug outside their own internal
+    try/except) must not make `drain()` itself raise and block server shutdown."""
+
+    async def _boom() -> None:
+        raise RuntimeError("something unexpected broke")
+
+    task = asyncio.create_task(_boom())
+    event_streams._background_tasks.add(task)
+    task.add_done_callback(event_streams._background_tasks.discard)
+
+    await event_streams.drain()  # must not raise

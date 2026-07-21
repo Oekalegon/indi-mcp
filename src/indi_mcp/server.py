@@ -53,6 +53,12 @@ async def _lifespan(app: FastMCP) -> AsyncIterator[None]:
     to the actual running event loop, rather than trying to from the
     synchronous `run()` function below. Cancelled and awaited on shutdown
     so the task doesn't outlive the server. See `event_log.run_purge_loop`.
+
+    Also drains `event_streams`'s in-flight background tasks (live
+    notifications and durable event-log writes) before returning — without
+    this, an event published right before shutdown could have its durable
+    write abandoned mid-flight, silently losing exactly what a reconnecting
+    client depends on the event log to still have. See `event_streams.drain`.
     """
     purge_task = asyncio.create_task(event_log.run_purge_loop())
     try:
@@ -61,6 +67,7 @@ async def _lifespan(app: FastMCP) -> AsyncIterator[None]:
         purge_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await purge_task
+        await event_streams.drain()
 
 
 mcp = FastMCP(

@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -546,6 +548,35 @@ async def test_lifespan_starts_and_cleanly_cancels_the_purge_loop(
         await asyncio.wait_for(started.wait(), timeout=1)
 
     await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+
+async def test_lifespan_drains_pending_event_streams_tasks_before_exiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable event-log write still in flight when the server shuts down must be waited
+    for, not abandoned mid-write — otherwise a reconnecting client could find the event log
+    missing exactly the event it most needs to catch up on."""
+
+    async def fake_run_purge_loop() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise
+
+    monkeypatch.setattr(event_log, "run_purge_loop", fake_run_purge_loop)
+
+    finished = threading.Event()
+
+    def slow_record_event(*args, **kwargs) -> None:
+        time.sleep(0.02)
+        finished.set()
+
+    monkeypatch.setattr(event_log, "record_event", slow_record_event)
+
+    async with server._lifespan(server.mcp):
+        event_streams.publish_message_event({"kind": "message", "device": None})
+
+    assert finished.is_set()
 
 
 async def test_subscribe_resource_handler_rejects_a_uri_that_is_not_an_event_stream() -> None:
