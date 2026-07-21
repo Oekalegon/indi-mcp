@@ -201,7 +201,16 @@ def read_scripts(run_id: str | None = None) -> dict[str, list[Mapping]]:
 
 
 def subscribe(uri: str, session: _NotifiableSession) -> None:
-    """Register `session` to be notified whenever a new event is published to `uri`."""
+    """Register `session` to be notified whenever a new event is published to `uri`.
+
+    There's no explicit cleanup for a session that disconnects without
+    sending `resources/unsubscribe` first — FastMCP gives this module no
+    session-close hook to react to. A disconnected session simply lingers
+    in `_subscribers` until the next publish tries to notify it, at which
+    point `send_resource_updated` fails and `_notify` drops it (see its
+    docstring). Best-effort, matching the rest of this module: a live-only
+    channel, not a resource one has to explicitly tear down to stay correct.
+    """
     _subscribers.setdefault(uri, set()).add(session)
 
 

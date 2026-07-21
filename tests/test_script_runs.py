@@ -143,11 +143,12 @@ async def test_run_completes_and_get_script_status_reports_scriptCompleted(
     assert "finishedAt" in completed
 
 
-async def test_run_publishes_scriptStarted_and_scriptCompleted_to_the_indi_scripts_stream(
+async def test_run_publishes_scriptStarted_scriptProgress_and_scriptCompleted_to_the_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every `kind`-tagged status this module produces also feeds `indi://scripts`
-    (INDIMCP-14), not just `get_script_status`'s polling path."""
+    (INDIMCP-14), not just `get_script_status`'s polling path — including the per-step
+    `on_progress` callback, not just the start/terminal statuses."""
     _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
     _script(
         "cool",
@@ -160,6 +161,7 @@ async def test_run_publishes_scriptStarted_and_scriptCompleted_to_the_indi_scrip
 
     kinds = [event["kind"] for event in event_streams.read_scripts(started["runId"])["events"]]
     assert "scriptStarted" in kinds
+    assert "scriptProgress" in kinds
     assert "scriptCompleted" in kinds
 
 
@@ -255,6 +257,12 @@ async def test_pause_script_rejects_when_script_is_not_pausable() -> None:
     assert rejected["runId"] == started["runId"]
     assert rejected["rigId"] == "test-rig"
     assert rejected["reason"] == "This script has no safe point to pause at"
+
+    # `_pause_rejected` deliberately never writes to `run.latest_status` (a rejection isn't a
+    # change to the run's own state — see its docstring), so the event stream is the *only*
+    # place `scriptPauseRejected` is otherwise observable; make sure it actually gets there.
+    kinds = [event["kind"] for event in event_streams.read_scripts(started["runId"])["events"]]
+    assert "scriptPauseRejected" in kinds
 
     # Clean up the still-running background task.
     await script_runs.cancel_script(started["runId"])
@@ -383,6 +391,10 @@ async def test_pause_then_resume_a_pausable_script_lets_it_complete(
     await asyncio.wait_for(_await_run(started["runId"]), timeout=2)
     status = script_runs.get_script_status(started["runId"])
     assert status["kind"] == "scriptCompleted"
+
+    kinds = [event["kind"] for event in event_streams.read_scripts(started["runId"])["events"]]
+    assert "scriptPaused" in kinds
+    assert "scriptResumed" in kinds
 
 
 async def test_evicts_the_oldest_finished_runs_once_over_the_cap(

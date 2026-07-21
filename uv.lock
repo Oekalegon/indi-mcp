@@ -542,7 +542,7 @@ dev = [
 requires-dist = [
     { name = "indipyclient", specifier = ">=0.9.1" },
     { name = "indiweb", specifier = ">=1.1.0" },
-    { name = "mcp", specifier = ">=1.28.1" },
+    { name = "mcp", specifier = ">=1.28.1,<2" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
 ]
