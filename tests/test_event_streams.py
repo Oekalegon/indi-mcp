@@ -109,6 +109,38 @@ def test_scripts_uri_percent_encodes_a_run_id_containing_reserved_characters() -
     assert event_streams.scripts_uri("run/1") == "indi://scripts/run%2F1"
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "indi://messages",
+        "indi://scripts",
+        "indi://messages/CCD%20Simulator",
+        "indi://scripts/run-1",
+        event_streams.messages_uri("CCD/Sub"),
+        event_streams.scripts_uri("run/1"),
+    ],
+)
+def test_is_subscribable_uri_accepts_every_shape_this_module_publishes_to(uri: str) -> None:
+    assert event_streams.is_subscribable_uri(uri) is True
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "indi://message",  # typo: missing the trailing 's'
+        "indi://script",
+        "frame://foo",
+        "indi://messages/",
+        "indi://scripts/",
+        "indi://messages/CCD/Sub",  # unencoded '/' splits into two segments
+        "indi://scripts/run/1",
+        "",
+    ],
+)
+def test_is_subscribable_uri_rejects_anything_else(uri: str) -> None:
+    assert event_streams.is_subscribable_uri(uri) is False
+
+
 async def test_unsubscribe_stops_further_notifications() -> None:
     session = _FakeSession()
     event_streams.subscribe("indi://messages", session)

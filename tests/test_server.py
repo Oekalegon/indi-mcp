@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from mcp.server.lowlevel.server import NotificationOptions, request_ctx
 from mcp.shared.context import RequestContext
+from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from indi_mcp import (
@@ -483,5 +484,34 @@ async def test_subscribe_and_unsubscribe_resource_handlers_use_event_streams() -
 
         await server._unsubscribe_from_event_stream(AnyUrl("indi://messages"))
         assert "indi://messages" not in event_streams._subscribers
+    finally:
+        request_ctx.reset(token)
+
+
+async def test_subscribe_resource_handler_rejects_a_uri_that_is_not_an_event_stream() -> None:
+    """A typo'd or unrelated URI (e.g. `frame://foo`) must not silently register a subscription
+    that will never fire — the client should find out immediately instead."""
+    session = _FakeSession()
+    context: RequestContext = RequestContext(
+        request_id=1, meta=None, session=cast(Any, session), lifespan_context=None
+    )
+    token = request_ctx.set(context)
+    try:
+        with pytest.raises(McpError):
+            await server._subscribe_to_event_stream(AnyUrl("frame://foo"))
+        assert event_streams._subscribers == {}
+    finally:
+        request_ctx.reset(token)
+
+
+async def test_unsubscribe_resource_handler_rejects_a_uri_that_is_not_an_event_stream() -> None:
+    session = _FakeSession()
+    context: RequestContext = RequestContext(
+        request_id=1, meta=None, session=cast(Any, session), lifespan_context=None
+    )
+    token = request_ctx.set(context)
+    try:
+        with pytest.raises(McpError):
+            await server._unsubscribe_from_event_stream(AnyUrl("indi://message"))
     finally:
         request_ctx.reset(token)

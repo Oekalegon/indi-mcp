@@ -7,6 +7,8 @@ from typing import Any, Literal, cast
 from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
+from mcp.shared.exceptions import McpError
+from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import AnyUrl
 
 from indi_mcp import (
@@ -76,6 +78,29 @@ def _get_capabilities_with_resource_subscriptions(*args: Any, **kwargs: Any) -> 
 cast(Any, mcp._mcp_server).get_capabilities = _get_capabilities_with_resource_subscriptions
 
 
+def _require_subscribable_uri(uri: AnyUrl) -> str:
+    """Return `uri` as a string, rejecting anything that isn't a real event-stream resource.
+
+    Without this, `resources/subscribe` for a typo'd URI (`indi://message`) or an unrelated
+    resource (`frame://foo`) would silently "succeed" — `event_streams` would register the
+    subscription but never publish to it, so the client would just never get a notification
+    with no indication anything was wrong. Raising here instead gives a buggy client immediate,
+    actionable feedback.
+    """
+    uri_str = str(uri)
+    if not event_streams.is_subscribable_uri(uri_str):
+        raise McpError(
+            ErrorData(
+                code=INVALID_PARAMS,
+                message=(
+                    f"{uri_str!r} is not a subscribable resource; expected "
+                    "indi://messages(/{device}) or indi://scripts(/{runId})"
+                ),
+            )
+        )
+    return uri_str
+
+
 @mcp._mcp_server.subscribe_resource()
 async def _subscribe_to_event_stream(uri: AnyUrl) -> None:
     """Handle `resources/subscribe` for `indi://messages`/`indi://scripts` (and their scoped forms).
@@ -87,14 +112,14 @@ async def _subscribe_to_event_stream(uri: AnyUrl) -> None:
     for every request regardless of which layer dispatched it.
     """
     session = mcp._mcp_server.request_context.session
-    event_streams.subscribe(str(uri), session)
+    event_streams.subscribe(_require_subscribable_uri(uri), session)
 
 
 @mcp._mcp_server.unsubscribe_resource()
 async def _unsubscribe_from_event_stream(uri: AnyUrl) -> None:
     """Handle `resources/unsubscribe`, undoing a prior `_subscribe_to_event_stream` call."""
     session = mcp._mcp_server.request_context.session
-    event_streams.unsubscribe(str(uri), session)
+    event_streams.unsubscribe(_require_subscribable_uri(uri), session)
 
 
 @mcp.tool()

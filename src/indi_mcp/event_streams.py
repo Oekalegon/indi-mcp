@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "clear_messages",
+    "is_subscribable_uri",
     "messages_uri",
     "publish_message_event",
     "publish_script_event",
@@ -81,6 +82,30 @@ def messages_uri(device: str | None) -> str:
 def scripts_uri(run_id: str | None) -> str:
     """The `indi://scripts` resource URI, scoped to `run_id` if given (see `messages_uri`)."""
     return f"indi://scripts/{quote(run_id, safe='')}" if run_id else "indi://scripts"
+
+
+_UNSCOPED_URIS = ("indi://messages", "indi://scripts")
+_SCOPED_PREFIXES = ("indi://messages/", "indi://scripts/")
+
+
+def is_subscribable_uri(uri: str) -> bool:
+    """Whether `uri` is one of the resources this module actually publishes to.
+
+    Checks the *shape* advertised by the `indi://messages`/`indi://messages/{device}`/
+    `indi://scripts`/`indi://scripts/{runId}` resources (see `server.py`) — a single
+    non-empty scope segment with no further `/` — not whether that particular device/run
+    currently exists. Subscribing ahead of a device connecting or a run starting is expected
+    and should still succeed; this only rejects URIs this module can never publish an update
+    to at all (a typo like `indi://message`, or an unrelated resource like `frame://foo`),
+    which would otherwise register a subscription that silently never fires.
+    """
+    if uri in _UNSCOPED_URIS:
+        return True
+    for prefix in _SCOPED_PREFIXES:
+        if uri.startswith(prefix):
+            scope = uri[len(prefix) :]
+            return bool(scope) and "/" not in scope
+    return False
 
 
 async def _notify(uri: str) -> None:
