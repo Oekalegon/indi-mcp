@@ -1,7 +1,10 @@
 """The INDI MCP server instance and its entrypoint."""
 
 import asyncio
+import contextlib
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, Literal, cast
 from urllib.parse import unquote
@@ -12,6 +15,7 @@ from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import AnyUrl
 
 from indi_mcp import (
+    event_log,
     event_streams,
     frame_store,
     indi_driver,
@@ -39,12 +43,33 @@ from indi_mcp.script_store import Script, ScriptSummary
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def _lifespan(app: FastMCP) -> AsyncIterator[None]:
+    """Run the event log's periodic purge for as long as the server does.
+
+    FastMCP invokes this once per process regardless of transport (stdio,
+    sse, streamable-http) — the one place to start a background task tied
+    to the actual running event loop, rather than trying to from the
+    synchronous `run()` function below. Cancelled and awaited on shutdown
+    so the task doesn't outlive the server. See `event_log.run_purge_loop`.
+    """
+    purge_task = asyncio.create_task(event_log.run_purge_loop())
+    try:
+        yield
+    finally:
+        purge_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await purge_task
+
+
 mcp = FastMCP(
     name="indi-mcp",
     instructions=(
         "Controls astrophotography equipment via INDI: manage the INDI server "
         "and its drivers, send and receive INDI messages, and run capture scripts."
     ),
+    lifespan=_lifespan,
 )
 
 Transport = Literal["stdio", "sse", "streamable-http"]
@@ -211,8 +236,8 @@ def read_indi_message_stream() -> dict[str, list[IndiEvent]]:
     streams`: a subscriber is sent `notifications/resources/updated`
     whenever a new event is published, and re-reads this resource to fetch
     it. This is a best-effort, live-only channel — a client that was
-    disconnected should use `list_indi_messages`/the (not-yet-built,
-    INDIMCP-15) durable event log to catch up, not assume it saw everything.
+    disconnected should use `list_indi_messages` or `get_events` (the
+    durable event log, INDIMCP-15) to catch up, not assume it saw everything.
     """
     return cast(dict[str, list[IndiEvent]], event_streams.read_messages())
 
@@ -440,6 +465,30 @@ def read_script_event_stream_for_run(runId: str) -> dict[str, list[ScriptRunStat
     `runId` is unquoted before filtering — see `read_indi_message_stream_for_device`.
     """
     return cast(dict[str, list[ScriptRunStatus]], event_streams.read_scripts(unquote(runId)))
+
+
+@mcp.tool()
+async def get_events(
+    stream: event_log.Stream,
+    device: str | None = None,
+    run_id: str | None = None,
+    since: str | None = None,
+) -> list[event_log.EventRecord]:
+    """Catch up on missed `indi://messages`/`indi://scripts` events from the durable event log.
+
+    Unlike the live `resources/subscribe` channel (best-effort, live-only —
+    see `docs/Design.md#event-streams`), this queries the durable SQLite
+    log every event is also written to, so a client that was disconnected
+    can reliably fetch what it missed rather than assuming the live
+    subscription caught everything. `since` should be the `occurredAt` of
+    the last event the caller actually saw, to fetch only what's new.
+    Events older than a day are purged (see `event_log.purge_old_events`),
+    so this isn't a substitute for permanent history. Returned oldest
+    first — the natural order for replaying missed events.
+    """
+    return await asyncio.to_thread(
+        event_log.get_events, stream, device=device, run_id=run_id, since=since
+    )
 
 
 @mcp.tool()

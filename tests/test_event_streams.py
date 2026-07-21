@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from indi_mcp import event_streams
+from indi_mcp import event_log, event_streams
 
 
 class _FakeSession:
@@ -26,7 +26,7 @@ def _reset_state() -> None:
     event_streams._background_tasks.clear()
 
 
-def test_read_messages_returns_newest_first_and_filters_by_device() -> None:
+async def test_read_messages_returns_newest_first_and_filters_by_device() -> None:
     event_streams.publish_message_event({"kind": "message", "device": "CCD Simulator"})
     event_streams.publish_message_event({"kind": "message", "device": "Telescope Simulator"})
 
@@ -41,7 +41,7 @@ def test_read_messages_returns_newest_first_and_filters_by_device() -> None:
     }
 
 
-def test_read_scripts_returns_newest_first_and_filters_by_run_id() -> None:
+async def test_read_scripts_returns_newest_first_and_filters_by_run_id() -> None:
     event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-1"})
     event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-2"})
 
@@ -56,7 +56,7 @@ def test_read_scripts_returns_newest_first_and_filters_by_run_id() -> None:
     }
 
 
-def test_read_messages_buffer_is_bounded() -> None:
+async def test_read_messages_buffer_is_bounded() -> None:
     for i in range(event_streams._MAX_BUFFERED_EVENTS + 10):
         event_streams.publish_message_event({"kind": "message", "device": None, "i": i})
 
@@ -177,3 +177,68 @@ async def test_a_subscriber_that_fails_to_notify_is_dropped() -> None:
 
     assert healthy.updated == ["indi://messages"]
     assert failing not in event_streams._subscribers.get("indi://messages", set())
+
+
+async def test_publish_message_event_durably_records_to_the_event_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every published event is also persisted (INDIMCP-15), not just buffered/notified —
+    this is what actually lets a reconnecting client catch up, per `docs/Design.md#event-log`."""
+    calls: list[tuple] = []
+
+    def fake_record_event(stream, payload, *, device, run_id, db_path=None) -> None:
+        calls.append((stream, payload, device, run_id))
+
+    monkeypatch.setattr(event_log, "record_event", fake_record_event)
+
+    event = {"kind": "message", "device": "CCD Simulator"}
+    event_streams.publish_message_event(event)
+    await asyncio.sleep(0.05)
+
+    assert calls == [("messages", event, "CCD Simulator", None)]
+
+
+async def test_publish_script_event_durably_records_to_the_event_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    def fake_record_event(stream, payload, *, device, run_id, db_path=None) -> None:
+        calls.append((stream, payload, device, run_id))
+
+    monkeypatch.setattr(event_log, "record_event", fake_record_event)
+
+    event = {"kind": "scriptStarted", "runId": "run-1"}
+    event_streams.publish_script_event(event)
+    await asyncio.sleep(0.05)
+
+    assert calls == [("scripts", event, None, "run-1")]
+
+
+async def test_publish_message_event_records_durably_even_with_no_subscribers() -> None:
+    """Unlike live notification (skipped when nobody's subscribed), durable persistence exists
+    to serve a client that reconnects *later* — it must always happen."""
+    assert event_streams._subscribers == {}
+
+    event_streams.publish_message_event({"kind": "message", "device": "CCD Simulator"})
+    await asyncio.sleep(0.05)
+
+    assert event_log.get_events("messages")[0]["device"] == "CCD Simulator"
+
+
+async def test_a_failed_durable_write_does_not_raise_or_break_publishing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A locked/corrupt database file must not take down message/script publishing — the live
+    in-memory buffer and notifications are the primary path; the durable log is a best-effort
+    addition on top, not a hard dependency."""
+
+    def fake_record_event(*args, **kwargs) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(event_log, "record_event", fake_record_event)
+
+    event_streams.publish_message_event({"kind": "message", "device": None})
+    await asyncio.sleep(0.05)
+
+    assert event_streams.read_messages()["events"] == [{"kind": "message", "device": None}]

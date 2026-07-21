@@ -210,7 +210,7 @@ async def test_get_status_reports_disconnected_state_before_starting() -> None:
     assert status == {"running": False, "host": "localhost", "port": indi_messaging.INDI_PORT}
 
 
-def test_list_messages_returns_newest_first_and_filters_by_device() -> None:
+async def test_list_messages_returns_newest_first_and_filters_by_device() -> None:
     event_streams.publish_message_event(
         {
             "kind": "message",
@@ -243,7 +243,7 @@ def test_list_messages_returns_newest_first_and_filters_by_device() -> None:
     assert [m["message"] for m in filtered] == ["first"]
 
 
-def test_list_messages_respects_limit() -> None:
+async def test_list_messages_respects_limit() -> None:
     for i in range(5):
         event_streams.publish_message_event(
             {

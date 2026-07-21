@@ -2,9 +2,9 @@
 
 One embedded database file for this device's operational data — not one
 per concern — per `docs/Design.md`'s "Event log" and "Frame storage
-metadata" sections: frame metadata (`frame_store`, INDIMCP-10) and the
-(separate, not-yet-built) event log (INDIMCP-15) are both short-retention/
-long-retention *tables* in this one file, not separate databases. A single
+metadata" sections: frame metadata (`frame_store`, INDIMCP-10, long-
+retention) and the event log (`event_log`, INDIMCP-15, short-retention)
+are both *tables* in this one file, not separate databases. A single
 Raspberry Pi running one MCP server process is a single-writer, mostly-
 local workload, so SQLite in WAL mode (not a separate database service)
 is enough — see Design.md's "Why SQLite, not Postgres" for the full
@@ -51,6 +51,16 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(resolved)
     conn.row_factory = sqlite3.Row
     try:
+        # `auto_vacuum` can only take effect on a brand-new (table-free) database file — SQLite
+        # silently no-ops this on one that already has tables in a different mode, *and* on one
+        # where `journal_mode` was already switched to WAL first (empirically: setting
+        # `auto_vacuum` after `journal_mode=WAL` silently fails to take even on an otherwise
+        # empty file — order matters here, not just table-emptiness). Harmless to set on every
+        # connection: it's what lets the event log's periodic `PRAGMA incremental_vacuum` (see
+        # `event_log.purge_old_events`) actually reclaim freed pages instead of being a no-op
+        # itself, per docs/Design.md#event-log ("followed by an incremental VACUUM to reclaim
+        # space and limit SD-card write wear").
+        conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         conn.execute("PRAGMA journal_mode=WAL")
         yield conn
     finally:
