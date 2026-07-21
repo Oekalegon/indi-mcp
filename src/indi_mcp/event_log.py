@@ -149,13 +149,18 @@ def get_events(
     This is the reconnect story from `docs/Design.md#event-log`: a client
     that was offline calls this with `since` set to the last `occurredAt`
     it actually saw (from a prior `get_events` call, or from before it
-    dropped off `indi://messages`/`indi://scripts`) to fetch exactly what
-    it missed, rather than assuming the live subscription caught
-    everything. Oldest first (the opposite order from `list_messages`/
-    `list_frames`'s newest-first) since catching up is naturally about
-    replaying events in the order they happened, not about "what just
-    happened" — a client folding these into its own view processes them
-    front-to-back.
+    dropped off `indi://messages`/`indi://scripts`) to fetch what it
+    missed, rather than assuming the live subscription caught everything.
+    `since` is inclusive (`occurred_at >= since`): the event at exactly
+    `since` is returned again if one exists, rather than being excluded —
+    deliberately, since a strict `>` could silently skip a *different*
+    event that happens to share the same microsecond-precision timestamp.
+    A caller polling repeatedly should dedupe by `id` rather than assume
+    no overlap with the previous call. Oldest first (the opposite order
+    from `list_messages`/`list_frames`'s newest-first) since catching up
+    is naturally about replaying events in the order they happened, not
+    about "what just happened" — a client folding these into its own view
+    processes them front-to-back.
     """
     clauses = ["stream = ?"]
     params: list[str] = [stream]

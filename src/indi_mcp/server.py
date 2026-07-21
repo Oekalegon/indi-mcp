@@ -488,7 +488,9 @@ async def get_events(
     log every event is also written to, so a client that was disconnected
     can reliably fetch what it missed rather than assuming the live
     subscription caught everything. `since` should be the `occurredAt` of
-    the last event the caller actually saw, to fetch only what's new.
+    the last event the caller actually saw — but the filter is inclusive,
+    so that same event is returned again rather than excluded (see
+    `event_log.get_events` for why); dedupe by `id` if polling repeatedly.
     Events older than a day are purged (see `event_log.purge_old_events`),
     so this isn't a substitute for permanent history. Returned oldest
     first — the natural order for replaying missed events.
