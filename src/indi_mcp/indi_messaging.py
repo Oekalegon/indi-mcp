@@ -32,6 +32,7 @@ from indipyclient import (
     setTextVector,
 )
 
+from indi_mcp import event_streams
 from indi_mcp.indi_server import INDI_PORT
 
 logger = logging.getLogger(__name__)
@@ -204,6 +205,7 @@ class _MessagingClient(IPyClient):
         indi_event = _to_indi_event(event)
         if indi_event is not None:
             self._buffer.appendleft(indi_event)
+            event_streams.publish_message_event(indi_event)
         if isinstance(event, setBLOBVector):
             _latest_blobs[(event.devicename, event.vectorname)] = {
                 "values": dict(event.data),
@@ -384,4 +386,5 @@ async def send_property(device: str, name: str, elements: dict[str, str]) -> Ind
         "timestamp": datetime.now(tz=UTC).isoformat(),
     }
     _buffer.appendleft(event)
+    event_streams.publish_message_event(event)
     return event

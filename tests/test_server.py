@@ -1,10 +1,16 @@
+import asyncio
 from datetime import timedelta
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from mcp.server.lowlevel.server import NotificationOptions, request_ctx
+from mcp.shared.context import RequestContext
+from pydantic import AnyUrl
 
 from indi_mcp import (
+    event_streams,
     frame_store,
     indi_driver,
     indi_messaging,
@@ -13,6 +19,14 @@ from indi_mcp import (
     script_runs,
     server,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_event_streams() -> None:
+    event_streams._messages.clear()
+    event_streams._scripts.clear()
+    event_streams._subscribers.clear()
+    event_streams._background_tasks.clear()
 
 
 async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family(
@@ -369,3 +383,94 @@ async def test_frame_resource_uri_template_is_registered() -> None:
     matching = [t for t in templates if t.uriTemplate == "frame://{frameId}"]
     assert len(matching) == 1
     assert matching[0].mimeType == "application/octet-stream"
+
+
+class _FakeSession:
+    """A minimal stand-in for `mcp.server.session.ServerSession`."""
+
+    def __init__(self) -> None:
+        self.updated: list[str] = []
+
+    async def send_resource_updated(self, uri: AnyUrl) -> None:
+        self.updated.append(str(uri))
+
+
+async def test_indi_message_stream_resource_is_readable_through_the_real_mcp_protocol() -> None:
+    event_streams.publish_message_event({"kind": "message", "device": "CCD Simulator"})
+
+    contents = list(await server.mcp.read_resource("indi://messages"))
+
+    assert len(contents) == 1
+    assert contents[0].mime_type == "application/json"
+    assert "CCD Simulator" in cast(str, contents[0].content)
+
+
+async def test_indi_message_stream_resource_is_scoped_to_one_device() -> None:
+    event_streams.publish_message_event({"kind": "message", "device": "CCD Simulator"})
+    event_streams.publish_message_event({"kind": "message", "device": "Telescope Simulator"})
+
+    contents = list(await server.mcp.read_resource("indi://messages/CCD Simulator"))
+    content = cast(str, contents[0].content)
+
+    assert "CCD Simulator" in content
+    assert "Telescope Simulator" not in content
+
+
+async def test_script_event_stream_resource_is_readable_through_the_real_mcp_protocol() -> None:
+    event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-1"})
+
+    contents = list(await server.mcp.read_resource("indi://scripts"))
+
+    assert "run-1" in cast(str, contents[0].content)
+
+
+async def test_script_event_stream_resource_is_scoped_to_one_run() -> None:
+    event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-1"})
+    event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-2"})
+
+    contents = list(await server.mcp.read_resource("indi://scripts/run-1"))
+    content = cast(str, contents[0].content)
+
+    assert "run-1" in content
+    assert "run-2" not in content
+
+
+async def test_event_stream_resources_are_registered() -> None:
+    resources = await server.mcp.list_resources()
+    templates = await server.mcp.list_resource_templates()
+
+    static_uris = {str(r.uri) for r in resources}
+    template_uris = {t.uriTemplate for t in templates}
+    assert "indi://messages" in static_uris
+    assert "indi://scripts" in static_uris
+    assert "indi://messages/{device}" in template_uris
+    assert "indi://scripts/{runId}" in template_uris
+
+
+async def test_resource_subscription_capability_is_advertised() -> None:
+    """The installed MCP SDK hardcodes `subscribe=False`; `server.py` patches this after
+    construction so real MCP clients know they can `resources/subscribe` to the event streams."""
+    capabilities = server.mcp._mcp_server.get_capabilities(NotificationOptions(), {})
+
+    assert capabilities.resources is not None
+    assert capabilities.resources.subscribe is True
+
+
+async def test_subscribe_and_unsubscribe_resource_handlers_use_event_streams() -> None:
+    session = _FakeSession()
+    context: RequestContext = RequestContext(
+        request_id=1, meta=None, session=cast(Any, session), lifespan_context=None
+    )
+    token = request_ctx.set(context)
+    try:
+        await server._subscribe_to_event_stream(AnyUrl("indi://messages"))
+        assert session in event_streams._subscribers["indi://messages"]
+
+        event_streams.publish_message_event({"kind": "message", "device": None})
+        await asyncio.sleep(0)
+        assert session.updated == ["indi://messages"]
+
+        await server._unsubscribe_from_event_stream(AnyUrl("indi://messages"))
+        assert "indi://messages" not in event_streams._subscribers
+    finally:
+        request_ctx.reset(token)

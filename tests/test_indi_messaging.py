@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from indi_mcp import indi_messaging
+from indi_mcp import event_streams, indi_messaging
 from indi_mcp.indi_messaging import (
     Message,
     _MessagingClient,
@@ -62,6 +62,9 @@ class Mocks:
 @pytest.fixture(autouse=True)
 def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
     indi_messaging._buffer.clear()
+    event_streams._messages.clear()
+    event_streams._subscribers.clear()
+    event_streams._background_tasks.clear()
     monkeypatch.setattr(indi_messaging, "_client", None)
     monkeypatch.setattr(indi_messaging, "_task", None)
 
@@ -301,6 +304,7 @@ async def test_send_property_sends_new_vector_and_records_event(mocks: Mocks) ->
     assert event["device"] == "CCD Simulator"
     assert event["elements"] == {"CONNECT": "On"}
     assert indi_messaging.list_messages()[0] == event
+    assert event_streams.read_messages()["events"][0] == event
 
 
 def test_list_devices_rejects_when_not_started() -> None:
@@ -424,6 +428,28 @@ async def test_messaging_client_buffers_recognised_events() -> None:
 
     assert len(buf) == 1
     assert buf[0]["kind"] == "propertyDefinition"
+
+
+async def test_messaging_client_publishes_recognised_events_to_the_indi_messages_stream() -> None:
+    """`rxevent` feeds the `indi://messages` event stream (INDIMCP-14), not just `_buffer`."""
+    buf: deque = deque(maxlen=10)
+    client = _MessagingClient.__new__(_MessagingClient)
+    client._buffer = buf
+
+    event = _make_event(defNumberVector, vectorname="EQUATORIAL_EOD_COORD")
+    await client.rxevent(event)
+
+    assert event_streams.read_messages()["events"][0]["name"] == "EQUATORIAL_EOD_COORD"
+
+
+async def test_messaging_client_ignores_unrecognised_events_in_the_stream_too() -> None:
+    buf: deque = deque(maxlen=10)
+    client = _MessagingClient.__new__(_MessagingClient)
+    client._buffer = buf
+
+    await client.rxevent(object())
+
+    assert event_streams.read_messages()["events"] == []
 
 
 def test_messaging_client_sets_enable_blob_default_to_also() -> None:

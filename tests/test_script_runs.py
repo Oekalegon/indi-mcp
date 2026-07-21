@@ -4,7 +4,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from indi_mcp import indi_messaging, rig_store, script_engine, script_runs, script_store
+from indi_mcp import (
+    event_streams,
+    indi_messaging,
+    rig_store,
+    script_engine,
+    script_runs,
+    script_store,
+)
 
 _known_devices: list[str] = []
 
@@ -14,6 +21,9 @@ def _reset_stores() -> None:
     rig_store._rigs = {}
     script_store._scripts = {}
     script_runs._runs = {}
+    event_streams._scripts.clear()
+    event_streams._subscribers.clear()
+    event_streams._background_tasks.clear()
     _known_devices.clear()
 
 
@@ -131,6 +141,26 @@ async def test_run_completes_and_get_script_status_reports_scriptCompleted(
     assert completed["rigId"] == "test-rig"
     assert completed["result"] == {"scriptId": "cool", "stepsExecuted": 1, "framesCaptured": 0}
     assert "finishedAt" in completed
+
+
+async def test_run_publishes_scriptStarted_and_scriptCompleted_to_the_indi_scripts_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every `kind`-tagged status this module produces also feeds `indi://scripts`
+    (INDIMCP-14), not just `get_script_status`'s polling path."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool",
+        steps=[_set_property("camera", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10"})],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+
+    started = await script_runs.start_script("cool", "test-rig", {})
+    await _await_run(started["runId"])
+
+    kinds = [event["kind"] for event in event_streams.read_scripts(started["runId"])["events"]]
+    assert "scriptStarted" in kinds
+    assert "scriptCompleted" in kinds
 
 
 async def test_run_that_fails_reports_scriptFailed(monkeypatch: pytest.MonkeyPatch) -> None:
