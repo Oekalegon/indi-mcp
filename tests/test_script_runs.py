@@ -4,7 +4,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from indi_mcp import indi_messaging, rig_store, script_engine, script_runs, script_store
+from indi_mcp import (
+    event_streams,
+    indi_messaging,
+    rig_store,
+    script_engine,
+    script_runs,
+    script_store,
+)
 
 _known_devices: list[str] = []
 
@@ -14,6 +21,9 @@ def _reset_stores() -> None:
     rig_store._rigs = {}
     script_store._scripts = {}
     script_runs._runs = {}
+    event_streams._scripts.clear()
+    event_streams._subscribers.clear()
+    event_streams._background_tasks.clear()
     _known_devices.clear()
 
 
@@ -133,6 +143,28 @@ async def test_run_completes_and_get_script_status_reports_scriptCompleted(
     assert "finishedAt" in completed
 
 
+async def test_run_publishes_scriptStarted_scriptProgress_and_scriptCompleted_to_the_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every `kind`-tagged status this module produces also feeds `indi://scripts`
+    (INDIMCP-14), not just `get_script_status`'s polling path — including the per-step
+    `on_progress` callback, not just the start/terminal statuses."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool",
+        steps=[_set_property("camera", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10"})],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+
+    started = await script_runs.start_script("cool", "test-rig", {})
+    await _await_run(started["runId"])
+
+    kinds = [event["kind"] for event in event_streams.read_scripts(started["runId"])["events"]]
+    assert "scriptStarted" in kinds
+    assert "scriptProgress" in kinds
+    assert "scriptCompleted" in kinds
+
+
 async def test_run_that_fails_reports_scriptFailed(monkeypatch: pytest.MonkeyPatch) -> None:
     _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
     _script("connect", steps=[_set_property("camera", "CONNECTION", {"CONNECT": "On"})])
@@ -225,6 +257,12 @@ async def test_pause_script_rejects_when_script_is_not_pausable() -> None:
     assert rejected["runId"] == started["runId"]
     assert rejected["rigId"] == "test-rig"
     assert rejected["reason"] == "This script has no safe point to pause at"
+
+    # `_pause_rejected` deliberately never writes to `run.latest_status` (a rejection isn't a
+    # change to the run's own state — see its docstring), so the event stream is the *only*
+    # place `scriptPauseRejected` is otherwise observable; make sure it actually gets there.
+    kinds = [event["kind"] for event in event_streams.read_scripts(started["runId"])["events"]]
+    assert "scriptPauseRejected" in kinds
 
     # Clean up the still-running background task.
     await script_runs.cancel_script(started["runId"])
@@ -353,6 +391,10 @@ async def test_pause_then_resume_a_pausable_script_lets_it_complete(
     await asyncio.wait_for(_await_run(started["runId"]), timeout=2)
     status = script_runs.get_script_status(started["runId"])
     assert status["kind"] == "scriptCompleted"
+
+    kinds = [event["kind"] for event in event_streams.read_scripts(started["runId"])["events"]]
+    assert "scriptPaused" in kinds
+    assert "scriptResumed" in kinds
 
 
 async def test_evicts_the_oldest_finished_runs_once_over_the_cap(

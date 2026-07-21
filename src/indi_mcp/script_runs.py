@@ -21,10 +21,10 @@ Deliberately out of scope here (left for later tickets, per Design.md's
 own `runId`/`parentRunId` — a composed script's `run_script` sub-calls stay
 inside `execute_script`'s single flat step count, so `scriptProgress.step`
 already walks across nested calls, just without a separate per-sub-script
-identity. There's likewise no `indi://scripts` subscribable resource or
-SQLite event log here — this module only serves the synchronous "start a
-run" call and the `runId`-based polling tools; the push channel and durable
-log are separate, later concerns.
+identity. Every `kind`-tagged status this module produces is also published
+to `event_streams` (backing the `indi://scripts` subscribable resource,
+INDIMCP-14) — but there's still no durable SQLite event log here; that
+catch-up path is a separate, later concern (INDIMCP-15).
 """
 
 import asyncio
@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
-from indi_mcp import script_engine, script_store
+from indi_mcp import event_streams, script_engine, script_store
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +279,7 @@ async def start_script(
         latest_status=started,
     )
     _runs[run_id] = run
+    event_streams.publish_script_event(started)
     run.task = asyncio.create_task(_run_and_record(run, parameters or {}))
     return started
 
@@ -313,6 +314,7 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             "totalSteps": progress["totalSteps"],
             "message": progress["message"],
         }
+        event_streams.publish_script_event(run.latest_status)
 
     try:
         result = await script_engine.execute_script(
@@ -361,6 +363,7 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             "finishedAt": _now(),
             "result": result,
         }
+    event_streams.publish_script_event(run.latest_status)
     _evict_finished_runs()
 
 
@@ -408,12 +411,14 @@ def _pause_rejected(run: _Run, reason: str) -> ScriptRunPauseRejected:
     `get_script_status`'s reconnect story in `docs/Design.md` depends on
     still being there.
     """
-    return {
+    rejected: ScriptRunPauseRejected = {
         "kind": "scriptPauseRejected",
         "runId": run.run_id,
         "rigId": run.rig_id,
         "reason": reason,
     }
+    event_streams.publish_script_event(rejected)
+    return rejected
 
 
 def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
@@ -442,6 +447,7 @@ def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
         "pausedAtStep": run.latest_step,
     }
     run.latest_status = paused
+    event_streams.publish_script_event(paused)
     return paused
 
 
@@ -470,4 +476,5 @@ def resume_script(run_id: str) -> ScriptRunResumed | ScriptRunPauseRejected:
         "resumedAtStep": run.latest_step,
     }
     run.latest_status = resumed
+    event_streams.publish_script_event(resumed)
     return resumed

@@ -3,11 +3,16 @@
 import asyncio
 import logging
 from datetime import timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
+from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
+from mcp.shared.exceptions import McpError
+from mcp.types import INVALID_PARAMS, ErrorData
+from pydantic import AnyUrl
 
 from indi_mcp import (
+    event_streams,
     frame_store,
     indi_driver,
     indi_messaging,
@@ -43,6 +48,78 @@ mcp = FastMCP(
 )
 
 Transport = Literal["stdio", "sse", "streamable-http"]
+
+
+_original_get_capabilities = mcp._mcp_server.get_capabilities
+
+
+def _get_capabilities_with_resource_subscriptions(*args: Any, **kwargs: Any) -> Any:
+    """Advertise resource subscription support for `indi://messages`/`indi://scripts`.
+
+    The installed MCP SDK hardcodes `ResourcesCapability(subscribe=False,
+    ...)` in `Server.get_capabilities` regardless of whether a
+    `subscribe_resource`/`unsubscribe_resource` handler is registered (see
+    `mcp.server.lowlevel.server.Server.get_capabilities`) — there's no
+    documented way to opt into `subscribe=True` short of overriding this
+    method, so it's patched here after construction, once, rather than
+    every server instance silently under-advertising a capability it
+    actually supports (see the `subscribe_resource`/`unsubscribe_resource`
+    handlers below, and `docs/Design.md#event-streams`).
+    """
+    capabilities = _original_get_capabilities(*args, **kwargs)
+    if capabilities.resources is not None:
+        capabilities.resources.subscribe = True
+    return capabilities
+
+
+# `get_capabilities` is a bound method with a fixed signature on the `Server` class; assigning a
+# replacement is inherently a type hole a static checker can't see through, so it's routed
+# through an `Any`-typed reference rather than pretending otherwise.
+cast(Any, mcp._mcp_server).get_capabilities = _get_capabilities_with_resource_subscriptions
+
+
+def _require_subscribable_uri(uri: AnyUrl) -> str:
+    """Return `uri` as a string, rejecting anything that isn't a real event-stream resource.
+
+    Without this, `resources/subscribe` for a typo'd URI (`indi://message`) or an unrelated
+    resource (`frame://foo`) would silently "succeed" — `event_streams` would register the
+    subscription but never publish to it, so the client would just never get a notification
+    with no indication anything was wrong. Raising here instead gives a buggy client immediate,
+    actionable feedback.
+    """
+    uri_str = str(uri)
+    if not event_streams.is_subscribable_uri(uri_str):
+        raise McpError(
+            ErrorData(
+                code=INVALID_PARAMS,
+                message=(
+                    f"{uri_str!r} is not a subscribable resource; expected "
+                    "indi://messages(/{device}) or indi://scripts(/{runId})"
+                ),
+            )
+        )
+    return uri_str
+
+
+@mcp._mcp_server.subscribe_resource()
+async def _subscribe_to_event_stream(uri: AnyUrl) -> None:
+    """Handle `resources/subscribe` for `indi://messages`/`indi://scripts` (and their scoped forms).
+
+    FastMCP itself has no subscription mechanism, so this is registered
+    directly on the underlying low-level `Server` rather than via
+    `@mcp.resource(...)`. The current request's session comes from the
+    low-level server's own request context, which FastMCP shares — it's set
+    for every request regardless of which layer dispatched it.
+    """
+    session = mcp._mcp_server.request_context.session
+    event_streams.subscribe(_require_subscribable_uri(uri), session)
+
+
+@mcp._mcp_server.unsubscribe_resource()
+async def _unsubscribe_from_event_stream(uri: AnyUrl) -> None:
+    """Handle `resources/unsubscribe`, undoing a prior `_subscribe_to_event_stream` call."""
+    session = mcp._mcp_server.request_context.session
+    event_streams.unsubscribe(_require_subscribable_uri(uri), session)
 
 
 @mcp.tool()
@@ -124,6 +201,33 @@ async def list_indi_messages(device: str | None = None, limit: int = 50) -> list
 async def send_indi_property(device: str, name: str, elements: dict[str, str]) -> IndiEvent:
     """Send a command to an INDI device, setting `elements` on its property `name`."""
     return await indi_messaging.send_property(device, name, elements)
+
+
+@mcp.resource("indi://messages", mime_type="application/json")
+def read_indi_message_stream() -> dict[str, list[IndiEvent]]:
+    """The rolling window of recent INDI messaging-layer events, newest first.
+
+    Subscribable via `resources/subscribe`, per `docs/Design.md#event-
+    streams`: a subscriber is sent `notifications/resources/updated`
+    whenever a new event is published, and re-reads this resource to fetch
+    it. This is a best-effort, live-only channel — a client that was
+    disconnected should use `list_indi_messages`/the (not-yet-built,
+    INDIMCP-15) durable event log to catch up, not assume it saw everything.
+    """
+    return cast(dict[str, list[IndiEvent]], event_streams.read_messages())
+
+
+@mcp.resource("indi://messages/{device}", mime_type="application/json")
+def read_indi_message_stream_for_device(device: str) -> dict[str, list[IndiEvent]]:
+    """Same as `read_indi_message_stream`, scoped to events from one `device`.
+
+    `device` arrives as the raw, still-percent-encoded path segment — FastMCP
+    matches resource templates against the literal URI text and doesn't
+    decode it — so it's unquoted here to recover the real device name before
+    filtering, mirroring the encoding `event_streams.messages_uri` applies
+    when building this same URI for subscription/notification purposes.
+    """
+    return cast(dict[str, list[IndiEvent]], event_streams.read_messages(unquote(device)))
 
 
 @mcp.tool()
@@ -317,6 +421,25 @@ def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
 def resume_script(run_id: str) -> ScriptRunResumed | ScriptRunPauseRejected:
     """Resume a run previously paused with `pause_script`."""
     return script_runs.resume_script(run_id)
+
+
+@mcp.resource("indi://scripts", mime_type="application/json")
+def read_script_event_stream() -> dict[str, list[ScriptRunStatus]]:
+    """The rolling window of recent scripting-layer events, newest first.
+
+    Same subscription mechanism and best-effort caveat as
+    `read_indi_message_stream` — see `docs/Design.md#event-streams`.
+    """
+    return cast(dict[str, list[ScriptRunStatus]], event_streams.read_scripts())
+
+
+@mcp.resource("indi://scripts/{runId}", mime_type="application/json")
+def read_script_event_stream_for_run(runId: str) -> dict[str, list[ScriptRunStatus]]:
+    """Same as `read_script_event_stream`, scoped to events from one `runId`.
+
+    `runId` is unquoted before filtering — see `read_indi_message_stream_for_device`.
+    """
+    return cast(dict[str, list[ScriptRunStatus]], event_streams.read_scripts(unquote(runId)))
 
 
 @mcp.tool()
