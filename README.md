@@ -19,6 +19,8 @@ An [MCP](https://modelcontextprotocol.io) server that controls astrophotography 
   `observatories/*.yaml` location definitions
 * [Script YAML Schema](docs/ScriptSchema.md) — field reference for the YAML scripting layer;
   built-in primitive/composed scripts ship under [`scripts/`](scripts/)
+* [Property/Message JSON Payload Schema](docs/MessageSchema.md) — field reference for the
+  `kind`/`type`-tagged JSON carried inside MCP tool results and event streams
 
 ## Debug CLI
 
