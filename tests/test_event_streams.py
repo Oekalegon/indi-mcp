@@ -67,9 +67,9 @@ def test_read_messages_buffer_is_bounded() -> None:
 
 async def test_publishing_a_message_notifies_the_unscoped_and_device_scoped_subscribers() -> None:
     session = _FakeSession()
-    event_streams.subscribe("indi://messages", session)
-    event_streams.subscribe("indi://messages/CCD Simulator", session)
-    event_streams.subscribe("indi://messages/Telescope Simulator", session)
+    event_streams.subscribe(event_streams.messages_uri(None), session)
+    event_streams.subscribe(event_streams.messages_uri("CCD Simulator"), session)
+    event_streams.subscribe(event_streams.messages_uri("Telescope Simulator"), session)
 
     event_streams.publish_message_event({"kind": "message", "device": "CCD Simulator"})
     await asyncio.sleep(0)
@@ -79,8 +79,8 @@ async def test_publishing_a_message_notifies_the_unscoped_and_device_scoped_subs
 
 async def test_publishing_a_script_event_notifies_the_unscoped_and_run_scoped_subscribers() -> None:
     session = _FakeSession()
-    event_streams.subscribe("indi://scripts", session)
-    event_streams.subscribe("indi://scripts/run-1", session)
+    event_streams.subscribe(event_streams.scripts_uri(None), session)
+    event_streams.subscribe(event_streams.scripts_uri("run-1"), session)
 
     event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-1"})
     await asyncio.sleep(0)
@@ -90,12 +90,23 @@ async def test_publishing_a_script_event_notifies_the_unscoped_and_run_scoped_su
 
 async def test_publishing_does_not_notify_subscribers_of_a_different_scope() -> None:
     session = _FakeSession()
-    event_streams.subscribe("indi://messages/Telescope Simulator", session)
+    event_streams.subscribe(event_streams.messages_uri("Telescope Simulator"), session)
 
     event_streams.publish_message_event({"kind": "message", "device": "CCD Simulator"})
     await asyncio.sleep(0)
 
     assert session.updated == []
+
+
+def test_messages_uri_percent_encodes_a_device_name_containing_reserved_characters() -> None:
+    """A literal `/` in a device name must not add an extra path segment — the resource
+    template `indi://messages/{device}` (see server.py) only matches a single segment, so an
+    unencoded `/` would make that device's scoped stream unreachable via `resources/read`."""
+    assert event_streams.messages_uri("CCD/Sub") == "indi://messages/CCD%2FSub"
+
+
+def test_scripts_uri_percent_encodes_a_run_id_containing_reserved_characters() -> None:
+    assert event_streams.scripts_uri("run/1") == "indi://scripts/run%2F1"
 
 
 async def test_unsubscribe_stops_further_notifications() -> None:

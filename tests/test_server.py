@@ -416,6 +416,17 @@ async def test_indi_message_stream_resource_is_scoped_to_one_device() -> None:
     assert "Telescope Simulator" not in content
 
 
+async def test_indi_message_stream_resource_is_reachable_for_a_device_name_with_a_slash() -> None:
+    """A device name containing `/` used to add an extra path segment that the single-segment
+    `indi://messages/{device}` resource template could never match, making that device's scoped
+    stream permanently unreachable. `event_streams.messages_uri` now percent-encodes it."""
+    event_streams.publish_message_event({"kind": "message", "device": "CCD/Sub"})
+
+    contents = list(await server.mcp.read_resource(event_streams.messages_uri("CCD/Sub")))
+
+    assert "CCD/Sub" in cast(str, contents[0].content)
+
+
 async def test_script_event_stream_resource_is_readable_through_the_real_mcp_protocol() -> None:
     event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-1"})
 

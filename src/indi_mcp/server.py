@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import timedelta
 from typing import Any, Literal, cast
+from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import AnyUrl
@@ -193,8 +194,15 @@ def read_indi_message_stream() -> dict[str, list[IndiEvent]]:
 
 @mcp.resource("indi://messages/{device}", mime_type="application/json")
 def read_indi_message_stream_for_device(device: str) -> dict[str, list[IndiEvent]]:
-    """Same as `read_indi_message_stream`, scoped to events from one `device`."""
-    return cast(dict[str, list[IndiEvent]], event_streams.read_messages(device))
+    """Same as `read_indi_message_stream`, scoped to events from one `device`.
+
+    `device` arrives as the raw, still-percent-encoded path segment — FastMCP
+    matches resource templates against the literal URI text and doesn't
+    decode it — so it's unquoted here to recover the real device name before
+    filtering, mirroring the encoding `event_streams.messages_uri` applies
+    when building this same URI for subscription/notification purposes.
+    """
+    return cast(dict[str, list[IndiEvent]], event_streams.read_messages(unquote(device)))
 
 
 @mcp.tool()
@@ -402,8 +410,11 @@ def read_script_event_stream() -> dict[str, list[ScriptRunStatus]]:
 
 @mcp.resource("indi://scripts/{runId}", mime_type="application/json")
 def read_script_event_stream_for_run(runId: str) -> dict[str, list[ScriptRunStatus]]:
-    """Same as `read_script_event_stream`, scoped to events from one `runId`."""
-    return cast(dict[str, list[ScriptRunStatus]], event_streams.read_scripts(runId))
+    """Same as `read_script_event_stream`, scoped to events from one `runId`.
+
+    `runId` is unquoted before filtering — see `read_indi_message_stream_for_device`.
+    """
+    return cast(dict[str, list[ScriptRunStatus]], event_streams.read_scripts(unquote(runId)))
 
 
 @mcp.tool()

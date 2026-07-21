@@ -22,16 +22,19 @@ import logging
 from collections import deque
 from collections.abc import Mapping
 from typing import Protocol
+from urllib.parse import quote
 
 from pydantic import AnyUrl
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "messages_uri",
     "publish_message_event",
     "publish_script_event",
     "read_messages",
     "read_scripts",
+    "scripts_uri",
     "subscribe",
     "unsubscribe",
 ]
@@ -59,12 +62,24 @@ removes itself once done (see `_schedule_notify`).
 """
 
 
-def _messages_uri(device: str | None) -> str:
-    return f"indi://messages/{device}" if device else "indi://messages"
+def messages_uri(device: str | None) -> str:
+    """The `indi://messages` resource URI, scoped to `device` if given.
+
+    `device` is percent-encoded (`safe=""`) per RFC 6570 URI-template rules
+    for substituted values: an unencoded `/` in a device name would add an
+    extra path segment that the single-segment `indi://messages/{device}`
+    resource template (see `server.py`) can never match, silently making
+    that device's scoped stream unreachable via `resources/read`. A
+    compliant client subscribing to this scoped resource is expected to
+    encode the value the same way when building the URI it subscribes to,
+    so the two sides agree on the same string.
+    """
+    return f"indi://messages/{quote(device, safe='')}" if device else "indi://messages"
 
 
-def _scripts_uri(run_id: str | None) -> str:
-    return f"indi://scripts/{run_id}" if run_id else "indi://scripts"
+def scripts_uri(run_id: str | None) -> str:
+    """The `indi://scripts` resource URI, scoped to `run_id` if given (see `messages_uri`)."""
+    return f"indi://scripts/{quote(run_id, safe='')}" if run_id else "indi://scripts"
 
 
 async def _notify(uri: str) -> None:
@@ -114,19 +129,19 @@ def _schedule_notify(uri: str) -> None:
 def publish_message_event(event: Mapping) -> None:
     """Record a messaging-layer event and notify `indi://messages` (and per-device) subscribers."""
     _messages.appendleft(event)
-    _schedule_notify(_messages_uri(None))
+    _schedule_notify(messages_uri(None))
     device = event.get("device")
     if device:
-        _schedule_notify(_messages_uri(device))
+        _schedule_notify(messages_uri(device))
 
 
 def publish_script_event(event: Mapping) -> None:
     """Record a scripting-layer event and notify `indi://scripts` (and per-run) subscribers."""
     _scripts.appendleft(event)
-    _schedule_notify(_scripts_uri(None))
+    _schedule_notify(scripts_uri(None))
     run_id = event.get("runId")
     if run_id:
-        _schedule_notify(_scripts_uri(run_id))
+        _schedule_notify(scripts_uri(run_id))
 
 
 def read_messages(device: str | None = None) -> dict[str, list[Mapping]]:
