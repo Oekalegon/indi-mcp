@@ -2,19 +2,22 @@
 
 An `indipyclient.IPyClient` subclass connects to `indiserver` as a plain INDI
 client, translating every `def*Vector`/`set*Vector`/`message`/`delProperty`
-event it receives into a small `kind`/`type`-tagged dict (see `IndiEvent`) and
-buffering the most recent ones in memory. Sending a property command
-(`new*Vector`) is likewise recorded into the same buffer as a `propertyCommand`
-event, so a client can observe both directions of traffic with one call.
+event it receives into a small `kind`/`type`-tagged dict (see `IndiEvent`).
+Sending a property command (`new*Vector`) is likewise recorded as a
+`propertyCommand` event, so a client can observe both directions of traffic
+with one call. `event_streams` is the single source of truth for the
+resulting rolling window of recent events — both `list_messages` (this
+module's own polling tool) and the `indi://messages` subscribable resource
+(INDIMCP-14) read from the same buffer there, rather than each maintaining
+an independent copy that could silently drift out of sync.
 """
 
 import asyncio
 import contextlib
 import logging
-from collections import deque
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from indipyclient import (
     IPyClient,
@@ -53,8 +56,6 @@ __all__ = [
     "start_messaging",
     "stop_messaging",
 ]
-
-_MAX_BUFFERED_EVENTS = 200
 
 _STARTUP_POLL_TIMEOUT = 2.0
 _STARTUP_POLL_INTERVAL = 0.1
@@ -182,7 +183,7 @@ def _to_indi_event(event: Any) -> IndiEvent | None:
 
 
 class _MessagingClient(IPyClient):
-    """An `IPyClient` that buffers every received event as an `IndiEvent`.
+    """An `IPyClient` that publishes every received event as an `IndiEvent` to `event_streams`.
 
     Also sets `enableBLOBdefault = "Also"` so BLOBs are actually
     transmitted at all — `indipyclient` defaults this to `"Never"`, and
@@ -196,15 +197,13 @@ class _MessagingClient(IPyClient):
     `CCD_EXPOSURE` still needs ordinary property updates too.
     """
 
-    def __init__(self, host: str, port: int, buffer: deque[IndiEvent]) -> None:
+    def __init__(self, host: str, port: int) -> None:
         super().__init__(indihost=host, indiport=port)
-        self._buffer = buffer
         self.enableBLOBdefault = "Also"
 
     async def rxevent(self, event: Any) -> None:
         indi_event = _to_indi_event(event)
         if indi_event is not None:
-            self._buffer.appendleft(indi_event)
             event_streams.publish_message_event(indi_event)
         if isinstance(event, setBLOBVector):
             _latest_blobs[(event.devicename, event.vectorname)] = {
@@ -214,7 +213,6 @@ class _MessagingClient(IPyClient):
             }
 
 
-_buffer: deque[IndiEvent] = deque(maxlen=_MAX_BUFFERED_EVENTS)
 _latest_blobs: dict[tuple[str, str], BlobSnapshot] = {}
 _client: _MessagingClient | None = None
 _task: asyncio.Task | None = None
@@ -234,9 +232,9 @@ async def start_messaging(host: str = "localhost", port: int = INDI_PORT) -> Mes
     if _client is not None:
         await stop_messaging()
     logger.info("Starting INDI messaging client (%s:%d)", host, port)
-    _buffer.clear()
+    event_streams.clear_messages()
     _latest_blobs.clear()
-    _client = _MessagingClient(host, port, _buffer)
+    _client = _MessagingClient(host, port)
     _host, _port = host, port
     _task = asyncio.create_task(_client.asyncrun())
     return await _wait_until_connected()
@@ -343,8 +341,9 @@ def get_latest_blob(device: str, name: str) -> BlobSnapshot | None:
 
     `None` if no BLOB has ever arrived on this `(device, name)` pair since
     `start_messaging` was last called (`_latest_blobs` is cleared then,
-    matching `_buffer`) — routine (e.g. before the first capture), not an
-    error, matching `get_property_values`'s own "missing is normal" style.
+    matching `event_streams.clear_messages()`) — routine (e.g. before the
+    first capture), not an error, matching `get_property_values`'s own
+    "missing is normal" style.
     Only ever holds the single most recent update per pair — a caller that
     needs to distinguish "this capture's BLOB" from a stale one left over
     from an earlier capture of the same device/vector must compare the
@@ -355,14 +354,15 @@ def get_latest_blob(device: str, name: str) -> BlobSnapshot | None:
 
 
 def list_messages(device: str | None = None, limit: int = 50) -> list[IndiEvent]:
-    """List the most recently seen INDI events, newest first, optionally filtered to one device."""
-    matching = (event for event in _buffer if device is None or event["device"] == device)
-    result = []
-    for event in matching:
-        if len(result) >= limit:
-            break
-        result.append(event)
-    return result
+    """List the most recently seen INDI events, newest first, optionally filtered to one device.
+
+    Reads from `event_streams`, the single source of truth for buffered
+    messaging events (also backing the `indi://messages` resource) — this
+    is purely a filtered/limited view over the same underlying window, not
+    a separate copy of it.
+    """
+    events = cast("list[IndiEvent]", event_streams.read_messages(device)["events"])
+    return events[:limit]
 
 
 async def send_property(device: str, name: str, elements: dict[str, str]) -> IndiEvent:
@@ -385,6 +385,5 @@ async def send_property(device: str, name: str, elements: dict[str, str]) -> Ind
         "elements": dict(elements),
         "timestamp": datetime.now(tz=UTC).isoformat(),
     }
-    _buffer.appendleft(event)
     event_streams.publish_message_event(event)
     return event

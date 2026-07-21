@@ -29,6 +29,7 @@ from pydantic import AnyUrl
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "clear_messages",
     "messages_uri",
     "publish_message_event",
     "publish_script_event",
@@ -142,6 +143,19 @@ def publish_script_event(event: Mapping) -> None:
     run_id = event.get("runId")
     if run_id:
         _schedule_notify(scripts_uri(run_id))
+
+
+def clear_messages() -> None:
+    """Discard every buffered messaging-layer event.
+
+    Called by `indi_messaging.start_messaging` on (re)connect: this is the
+    single source of truth for messaging events (there's no longer a
+    separate buffer in `indi_messaging` itself), so starting a fresh session
+    clears it here, the same way `_latest_blobs` is cleared alongside it.
+    Subscriptions/notifications are untouched — only the rolling read
+    buffer is reset.
+    """
+    _messages.clear()
 
 
 def read_messages(device: str | None = None) -> dict[str, list[Mapping]]:

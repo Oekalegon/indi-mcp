@@ -1,5 +1,4 @@
 import xml.etree.ElementTree as ET
-from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -61,7 +60,6 @@ class Mocks:
 
 @pytest.fixture(autouse=True)
 def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
-    indi_messaging._buffer.clear()
     event_streams._messages.clear()
     event_streams._subscribers.clear()
     event_streams._background_tasks.clear()
@@ -73,7 +71,7 @@ def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
     client.asyncrun = AsyncMock()
     client.send_newVector = AsyncMock()
 
-    def _fake_client(host: str, port: int, buffer: object) -> MagicMock:
+    def _fake_client(host: str, port: int) -> MagicMock:
         return client
 
     monkeypatch.setattr(indi_messaging, "_MessagingClient", _fake_client)
@@ -213,7 +211,7 @@ async def test_get_status_reports_disconnected_state_before_starting() -> None:
 
 
 def test_list_messages_returns_newest_first_and_filters_by_device() -> None:
-    indi_messaging._buffer.appendleft(
+    event_streams.publish_message_event(
         {
             "kind": "message",
             "type": None,
@@ -225,7 +223,7 @@ def test_list_messages_returns_newest_first_and_filters_by_device() -> None:
             "timestamp": "t1",
         }
     )
-    indi_messaging._buffer.appendleft(
+    event_streams.publish_message_event(
         {
             "kind": "message",
             "type": None,
@@ -247,7 +245,7 @@ def test_list_messages_returns_newest_first_and_filters_by_device() -> None:
 
 def test_list_messages_respects_limit() -> None:
     for i in range(5):
-        indi_messaging._buffer.appendleft(
+        event_streams.publish_message_event(
             {
                 "kind": "message",
                 "type": None,
@@ -418,23 +416,10 @@ async def test_get_property_range_returns_none_for_an_undefined_member(mocks: Mo
     assert focus_range is None
 
 
-async def test_messaging_client_buffers_recognised_events() -> None:
-    buf: deque = deque(maxlen=10)
-    client = _MessagingClient.__new__(_MessagingClient)
-    client._buffer = buf
-
-    event = _make_event(defNumberVector, vectorname="EQUATORIAL_EOD_COORD")
-    await client.rxevent(event)
-
-    assert len(buf) == 1
-    assert buf[0]["kind"] == "propertyDefinition"
-
-
 async def test_messaging_client_publishes_recognised_events_to_the_indi_messages_stream() -> None:
-    """`rxevent` feeds the `indi://messages` event stream (INDIMCP-14), not just `_buffer`."""
-    buf: deque = deque(maxlen=10)
+    """`rxevent` feeds the `indi://messages` event stream (INDIMCP-14) — the module's only
+    buffer of recent messaging events now that `event_streams` is the single source of truth."""
     client = _MessagingClient.__new__(_MessagingClient)
-    client._buffer = buf
 
     event = _make_event(defNumberVector, vectorname="EQUATORIAL_EOD_COORD")
     await client.rxevent(event)
@@ -443,9 +428,7 @@ async def test_messaging_client_publishes_recognised_events_to_the_indi_messages
 
 
 async def test_messaging_client_ignores_unrecognised_events_in_the_stream_too() -> None:
-    buf: deque = deque(maxlen=10)
     client = _MessagingClient.__new__(_MessagingClient)
-    client._buffer = buf
 
     await client.rxevent(object())
 
@@ -456,8 +439,7 @@ def test_messaging_client_sets_enable_blob_default_to_also() -> None:
     """Without this, `indipyclient` defaults to `"Never"` and silently drops every BLOB —
     see the end-to-end test below for what this setting actually causes to happen on the wire.
     """
-    buf: deque = deque(maxlen=10)
-    client = _MessagingClient("localhost", 7624, buf)
+    client = _MessagingClient("localhost", 7624)
 
     assert client.enableBLOBdefault == "Also"
 
@@ -473,8 +455,7 @@ async def test_messaging_client_sends_enableblob_also_when_a_camera_defines_its_
     `enableBLOBdefault` when the vector is created (`ipyclient.py`'s `Device.__init__`). This
     confirms that whole chain actually reaches the wire, not just that we set an attribute.
     """
-    buf: deque = deque(maxlen=10)
-    client = _MessagingClient("localhost", 7624, buf)
+    client = _MessagingClient("localhost", 7624)
     writer = MagicMock()
     writer.write = MagicMock()
     writer.drain = AsyncMock()
