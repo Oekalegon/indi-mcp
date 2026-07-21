@@ -74,14 +74,19 @@ async def _notify(uri: str) -> None:
     dropped from the registry rather than left to fail again on every future
     event — this is exactly the kind of client the "best-effort" channel is
     allowed to lose events for; the durable catch-up path is `get_events`
-    (INDIMCP-15), not this one.
+    (INDIMCP-15), not this one. `uri` is parsed into an `AnyUrl` once, outside
+    the per-subscriber loop: it's the same value for every subscriber, and
+    parsing it inside the loop's `try` would misattribute a genuine
+    URI-construction failure as every subscriber's connection having failed,
+    dropping them all rather than surfacing the real bug.
     """
     subscribers = _subscribers.get(uri)
     if not subscribers:
         return
+    parsed_uri = AnyUrl(uri)
     for session in list(subscribers):
         try:
-            await session.send_resource_updated(AnyUrl(uri))
+            await session.send_resource_updated(parsed_uri)
         except Exception:
             logger.exception("Failed to notify subscriber of %s; dropping it", uri)
             subscribers.discard(session)
