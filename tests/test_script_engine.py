@@ -2008,6 +2008,31 @@ async def test_execute_script_set_focus_position_skips_range_check_when_rig_decl
     )
 
 
+async def test_execute_script_set_focus_position_skips_range_check_when_rig_declares_only_one_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A focuser component declaring only minPosition (or only maxPosition) has no *complete*
+    range to check against — same as declaring neither, not a crash on a None bound."""
+    _rig(
+        rig_store.Component(
+            role="focuser", id="focuser-1", device="Focuser Simulator", minPosition=0
+        )
+    )
+    _script(
+        "focus",
+        steps=[{"step": "set_focus_position", "role": "focuser", "position": 999999}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("focus", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "Focuser Simulator", "ABS_FOCUS_POSITION", {"FOCUS_ABSOLUTE_POSITION": "999999"}
+    )
+
+
 async def test_execute_script_set_focus_position_times_out_waiting_for_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
