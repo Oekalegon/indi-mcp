@@ -250,7 +250,15 @@ async def execute_script(
     scripts = _collect_reachable_scripts(script)
     resolved_params = _resolve_parameters(script, parameters)
     usage = _collect_role_usage(script, resolved_params, scripts)
-    role_to_device = _resolve_role_to_device(rig, usage.roles)
+    role_to_component = _resolve_role_to_component(rig, usage.roles)
+    # `_resolve_role_to_component` only ever matches components with `device is not None`
+    # (see its docstring), so this is always a `str`, never `None`, despite `Component.device`'s
+    # own `str | None` type.
+    role_to_device = {
+        role: component.device
+        for role, component in role_to_component.items()
+        if component.device is not None
+    }
     known_devices = set(indi_messaging.list_devices())
     _warn_on_missing_devices(rig_id, known_devices)
     _check_devices_connected(role_to_device, known_devices, usage.connection_managed_roles)
@@ -263,7 +271,9 @@ async def execute_script(
         scripts=scripts,
         run_id=run_id,
         total_steps=_count_total_steps(script, scripts),
-        role_to_slots=_resolve_role_to_slots(rig, usage.roles),
+        role_to_slots={
+            role: component.slots or {} for role, component in role_to_component.items()
+        },
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
     return {
@@ -568,7 +578,9 @@ def _count_one_step(step: Step, scripts: dict[str, Script]) -> int | None:
     return 1
 
 
-def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, str]:
+def _resolve_role_to_component(
+    rig: rig_store.Rig, roles: set[str]
+) -> dict[str, rig_store.Component]:
     """Resolve every role in `roles` to exactly one device-bearing rig component.
 
     A role with no matching component, or matching only components with no
@@ -579,11 +591,17 @@ def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, st
     rig components by `id`, not by a script's generic role reference, so
     resolving to more than one device is ambiguous rather than a case to
     silently pick one from.
+
+    The single source of truth for "which component does this role mean" —
+    `execute_script` derives both `role_to_device` (every step's `role` →
+    `device`) and `role_to_slots` (`select_filter`'s `filterName` lookup)
+    from this same result, so the two can never silently disagree about
+    which component a role resolved to.
     """
-    role_to_device: dict[str, str] = {}
+    role_to_component: dict[str, rig_store.Component] = {}
     for role in roles:
         matches = [
-            (component, component.device)
+            component
             for component in rig.components
             if component.role == role and component.device is not None
         ]
@@ -593,36 +611,12 @@ def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, st
                 "(no matching component, or the matching component has no device)"
             )
         if len(matches) > 1:
-            ids = ", ".join(component.id for component, _ in matches)
+            ids = ", ".join(component.id for component in matches)
             raise ScriptValidationError(
                 f"role {role!r} is ambiguous in rig {rig.id!r}: matches components {ids}"
             )
-        _, device = matches[0]
-        role_to_device[role] = device
-    return role_to_device
-
-
-def _resolve_role_to_slots(rig: rig_store.Rig, roles: set[str]) -> dict[str, dict[int, str]]:
-    """Each role's rig-component `slots` map (empty if it has none or doesn't define one).
-
-    Only feeds `select_filter`'s `filterName` resolution (`_resolve_filter_slot`)
-    — every other step ignores `_ExecutionContext.role_to_slots`. Doesn't
-    re-validate `roles` against `rig.components` the way `_resolve_role_to_device`
-    does (no matching component / ambiguous role / no device) — this always
-    runs right after that function already raised for any such problem, so by
-    the time this runs every role in `roles` is known to resolve to exactly
-    one device-bearing component.
-    """
-    role_to_slots: dict[str, dict[int, str]] = {}
-    for role in roles:
-        matches = [
-            component
-            for component in rig.components
-            if component.role == role and component.device is not None
-        ]
-        if matches:
-            role_to_slots[role] = matches[0].slots or {}
-    return role_to_slots
+        role_to_component[role] = matches[0]
+    return role_to_component
 
 
 def _warn_on_missing_devices(rig_id: str, known_devices: set[str]) -> None:
