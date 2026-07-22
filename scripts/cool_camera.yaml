@@ -1,0 +1,21 @@
+id: cool_camera
+name: Cool camera
+description: >
+  Cools the rig's camera to a target sensor temperature and waits for it to
+  stabilize. A thin, reusable wrapper around the engine-implemented
+  `cool_camera` step (turns on CCD_COOLER if the camera has one, sets
+  CCD_TEMPERATURE, waits for Ok — see docs/ScriptSchema.md's `cool_camera`
+  step reference, INDIMCP-56) so composed sequences can `run_script:
+  cool_camera` instead of repeating the step directly. Pausable since
+  cooling to a large deltaT can take several minutes.
+pausable: true
+parameters:
+  targetTempC:
+    type: number
+    required: false
+    default: -10
+    description: Target sensor temperature, in degrees Celsius.
+steps:
+  - step: cool_camera
+    role: camera
+    targetTempC: "{{ targetTempC }}"
