@@ -1,7 +1,7 @@
 # Script YAML Schema
 
 A **script** is a declarative sequence of INDI steps — set a property, wait for a condition,
-capture a frame, slew, cool the camera, or call another script — used to run imaging sequences on the INDI Device
+capture a frame, slew, cool the camera, select a filter, or call another script — used to run imaging sequences on the INDI Device
 without an embedded expression language. See
 [Design.md § INDI scripting layer](Design.md#architecture-overview),
 [§ Calling scripts and script results](Design.md#calling-scripts-and-script-results), and
@@ -19,7 +19,7 @@ across the whole library, since `run_script` steps resolve by `id` within that s
 see "Script composition" below.
 
 This is deliberately a **closed, fixed vocabulary of step primitives** (`set_property`,
-`wait_for`, `capture_frame`, `slew`, `cool_camera`, `run_script`, `repeat`, `if`) — unlike a rig component's
+`wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`, `run_script`, `repeat`, `if`) — unlike a rig component's
 `role`, which accepts any string for extensibility, a step's `step` field must be one of these
 exact values. There is no embedded expression language: conditionals are a fixed, closed set of
 comparison operators over known INDI property state, not arbitrary code — see "Design notes"
@@ -125,19 +125,23 @@ can express in YAML alone — not just a stylistic choice:
   (`send_property` / property polling, after `role` → `device` resolution); `run_script`/`repeat`/
   `if` are pure control flow with no INDI interaction of their own. Nothing about these needs
   device- or operation-specific code — the same handler serves every script.
-* **Engine-implemented primitives** — `capture_frame`, `slew`, `cool_camera` — each bundle a
-  *sequence* of INDI commands (and sometimes non-INDI work) that isn't reducible to a single
-  `set_property`/`wait_for` pair. `capture_frame`, for example, is really "set frame type, set
-  exposure, wait through the `Busy`→`Ok` transition, drain the BLOB, write it to frame storage,
-  return metadata" — several INDI commands plus a file write. `slew` similarly bundles "set
-  target coordinates, wait for the mount's `Busy`→`Ok` transition." `cool_camera` bundles "turn
-  on `CCD_COOLER` if the device has one (best-effort — not every camera has active cooling), set
-  the target temperature, wait for `CCD_TEMPERATURE` to stabilize at `Ok`" — the "best-effort,
-  skip if the device doesn't define this property" step is exactly what a script author can't
-  express in a plain `set_property`/`wait_for` composition (INDIMCP-56). Each of these has its
-  own dedicated Python function in the execution engine (INDIMCP-7); the YAML step only declares
-  *what* should happen (`role`, `exposureSeconds`, ...), never *how* — the handler owns the
-  actual INDI command sequence.
+* **Engine-implemented primitives** — `capture_frame`, `slew`, `cool_camera`, `select_filter` —
+  each bundle a *sequence* of INDI commands (and sometimes non-INDI work) that isn't reducible to
+  a single `set_property`/`wait_for` pair. `capture_frame`, for example, is really "set frame
+  type, set exposure, wait through the `Busy`→`Ok` transition, drain the BLOB, write it to frame
+  storage, return metadata" — several INDI commands plus a file write. `slew` similarly bundles
+  "set target coordinates, wait for the mount's `Busy`→`Ok` transition." `cool_camera` bundles
+  "turn on `CCD_COOLER` if the device has one (best-effort — not every camera has active
+  cooling), set the target temperature, wait for `CCD_TEMPERATURE` to stabilize at `Ok`" — the
+  "best-effort, skip if the device doesn't define this property" step is exactly what a script
+  author can't express in a plain `set_property`/`wait_for` composition (INDIMCP-56).
+  `select_filter` similarly needs rig configuration a plain `set_property` step has no access to:
+  it accepts either a numeric `slot` or a `filterName`, resolving a name to its numeric
+  `FILTER_SLOT_VALUE` via the rig's own filter-wheel `slots` map (`docs/RigSchema.md`) before
+  setting `FILTER_SLOT` and waiting for `Ok` (INDIMCP-61). Each of these has its own dedicated
+  Python function in the execution engine (INDIMCP-7); the YAML step only declares *what* should
+  happen (`role`, `exposureSeconds`, ...), never *how* — the handler owns the actual INDI command
+  sequence.
 
 This second tier is also where anything requiring computation beyond a raw property read has to
 live — e.g. a future `plate_solve` step (see [Design.md § Composing scripts](Design.md#composing-scripts)'s
@@ -208,6 +212,18 @@ and the `capture_frame` step handler itself (`script_engine`, INDIMCP-37).
 Turns `CCD_COOLER` on (best-effort — skipped if the device doesn't define it), sets
 `CCD_TEMPERATURE`'s `CCD_TEMPERATURE_VALUE` element to `targetTempC`, and waits for the vector to
 reach `Ok` — see "Execution model" above.
+
+#### `select_filter`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `role` | string | yes | Typically `"filterWheel"`. |
+| `slot` | integer | one of `slot`/`filterName` | The filter wheel's numeric slot to select directly. |
+| `filterName` | string | one of `slot`/`filterName` | A filter name (e.g. `"Luminance"`) resolved to its numeric slot via the rig component's own `slots` map (`docs/RigSchema.md`) — resolved when this step runs, raising a `scriptFailed` result if the name isn't in that map (not caught upfront at `run_script` time). |
+| `timeoutSeconds` | number | no (default `30`) | Maximum time to wait for `FILTER_SLOT` to reach `Ok` before failing this step. |
+
+Sets `FILTER_SLOT`'s `FILTER_SLOT_VALUE` element to the resolved slot number and waits for the
+vector to reach `Ok` — see "Execution model" above.
 
 #### `run_script`
 
@@ -346,7 +362,7 @@ than being written and silently dropped at the next load.
 ## Design notes
 
 * **Fixed step vocabulary, no embedded expression language.** `step` is a closed enum
-  (`set_property`, `wait_for`, `capture_frame`, `slew`, `cool_camera`, `run_script`, `repeat`, `if`); condition
+  (`set_property`, `wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`, `run_script`, `repeat`, `if`); condition
   `operator`s are a closed enum; parameter substitution (`"{{ name }}"`) is plain value lookup,
   never code to evaluate. A script is declarative data, safe to author on the Client Computer and
   upload, consistent with [Design.md](Design.md#architecture-overview)'s scripting-layer intro.

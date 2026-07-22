@@ -36,6 +36,7 @@ from indi_mcp.script_store import (
     RepeatStep,
     RunScriptStep,
     Script,
+    SelectFilterStep,
     SetPropertyStep,
     SlewStep,
     Step,
@@ -177,6 +178,11 @@ class _ExecutionContext:
     different version of a sub-script than the one that was validated
     (role resolution, `totalSteps`, cycle/argument checks) at the start of
     this same run — or finding it gone entirely.
+
+    `role_to_slots` is each resolved role's rig-component `slots` map
+    (empty if it has none) — only consulted by `select_filter`'s
+    `filterName` resolution (`_resolve_filter_slot`); every other step
+    ignores it.
     """
 
     role_to_device: dict[str, str]
@@ -188,6 +194,7 @@ class _ExecutionContext:
     run_id: str | None
     steps_executed: int = field(default=0)
     frames_captured: int = field(default=0)
+    role_to_slots: dict[str, dict[int, str]] = field(default_factory=dict)
 
 
 async def execute_script(
@@ -243,7 +250,15 @@ async def execute_script(
     scripts = _collect_reachable_scripts(script)
     resolved_params = _resolve_parameters(script, parameters)
     usage = _collect_role_usage(script, resolved_params, scripts)
-    role_to_device = _resolve_role_to_device(rig, usage.roles)
+    role_to_component = _resolve_role_to_component(rig, usage.roles)
+    # `_resolve_role_to_component` only ever matches components with `device is not None`
+    # (see its docstring), so this is always a `str`, never `None`, despite `Component.device`'s
+    # own `str | None` type.
+    role_to_device = {
+        role: component.device
+        for role, component in role_to_component.items()
+        if component.device is not None
+    }
     known_devices = set(indi_messaging.list_devices())
     _warn_on_missing_devices(rig_id, known_devices)
     _check_devices_connected(role_to_device, known_devices, usage.connection_managed_roles)
@@ -256,6 +271,9 @@ async def execute_script(
         scripts=scripts,
         run_id=run_id,
         total_steps=_count_total_steps(script, scripts),
+        role_to_slots={
+            role: component.slots or {} for role, component in role_to_component.items()
+        },
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
     return {
@@ -353,7 +371,9 @@ def _substituted_role(role: str, params: dict[str, Any]) -> str:
 
 def _step_role(step: Step, params: dict[str, Any]) -> str | None:
     """The concrete role `step` targets, substituted against `params`; `None` if it has none."""
-    if isinstance(step, SetPropertyStep | CaptureFrameStep | SlewStep | CoolCameraStep):
+    if isinstance(
+        step, SetPropertyStep | CaptureFrameStep | SlewStep | CoolCameraStep | SelectFilterStep
+    ):
         return _substituted_role(step.role, params)
     if isinstance(step, WaitForStep | IfStep):
         return _substituted_role(step.condition.role, params)
@@ -558,7 +578,9 @@ def _count_one_step(step: Step, scripts: dict[str, Script]) -> int | None:
     return 1
 
 
-def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, str]:
+def _resolve_role_to_component(
+    rig: rig_store.Rig, roles: set[str]
+) -> dict[str, rig_store.Component]:
     """Resolve every role in `roles` to exactly one device-bearing rig component.
 
     A role with no matching component, or matching only components with no
@@ -569,11 +591,17 @@ def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, st
     rig components by `id`, not by a script's generic role reference, so
     resolving to more than one device is ambiguous rather than a case to
     silently pick one from.
+
+    The single source of truth for "which component does this role mean" —
+    `execute_script` derives both `role_to_device` (every step's `role` →
+    `device`) and `role_to_slots` (`select_filter`'s `filterName` lookup)
+    from this same result, so the two can never silently disagree about
+    which component a role resolved to.
     """
-    role_to_device: dict[str, str] = {}
+    role_to_component: dict[str, rig_store.Component] = {}
     for role in roles:
         matches = [
-            (component, component.device)
+            component
             for component in rig.components
             if component.role == role and component.device is not None
         ]
@@ -583,13 +611,12 @@ def _resolve_role_to_device(rig: rig_store.Rig, roles: set[str]) -> dict[str, st
                 "(no matching component, or the matching component has no device)"
             )
         if len(matches) > 1:
-            ids = ", ".join(component.id for component, _ in matches)
+            ids = ", ".join(component.id for component in matches)
             raise ScriptValidationError(
                 f"role {role!r} is ambiguous in rig {rig.id!r}: matches components {ids}"
             )
-        _, device = matches[0]
-        role_to_device[role] = device
-    return role_to_device
+        role_to_component[role] = matches[0]
+    return role_to_component
 
 
 def _warn_on_missing_devices(rig_id: str, known_devices: set[str]) -> None:
@@ -1244,12 +1271,76 @@ async def _ensure_cooler_on(device: str) -> None:
     await indi_messaging.send_property(device, "CCD_COOLER", {"COOLER_ON": "On"})
 
 
+async def _execute_select_filter(
+    step: SelectFilterStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    """Select a filter wheel slot and wait through the `Busy`->`Ok` transition.
+
+    `step.slot` (a literal or substituted numeric slot) is used directly if
+    set; otherwise `step.filterName` is resolved to a slot number via the
+    rig component's own `slots` map (`_resolve_filter_slot`) — a lookup only
+    the execution engine can do, since it needs the rig's own configuration,
+    not just this step's fields (see `SelectFilterStep`'s docstring for why
+    this makes `select_filter` an engine-implemented primitive rather than a
+    plain `set_property`/`wait_for` composition).
+    """
+    role = _substituted_role(step.role, params)
+    device = _resolve_device(role, ctx)
+    slot = _resolve_filter_slot(step, ctx, role, params)
+    timeout = float(_substitute(step.timeoutSeconds, params))
+    await indi_messaging.send_property(device, "FILTER_SLOT", {"FILTER_SLOT_VALUE": str(slot)})
+    await _wait_for_property_state(
+        ctx, device, "FILTER_SLOT", indi_messaging.PropertyState.OK, timeout
+    )
+
+
+def _resolve_filter_slot(
+    step: SelectFilterStep, ctx: _ExecutionContext, role: str, params: dict[str, Any]
+) -> int:
+    """The numeric `FILTER_SLOT_VALUE` `step` targets: `step.slot` directly, or `step.filterName`
+    looked up against `role`'s rig-component `slots` map.
+
+    Raises `ScriptExecutionError` for an unknown filter name — resolved
+    lazily here (not pre-validated up front the way role-to-device
+    resolution is), matching `slew`'s `objectName` resolution, which is the
+    other case of a step field that depends on more than its own value and
+    fails at execution time rather than validation time. Also raises if
+    `filterName` matches more than one slot — `docs/RigSchema.md`'s `slots`
+    map doesn't enforce name uniqueness, so a misconfigured rig could
+    otherwise have this silently resolve to whichever slot happens to come
+    first in iteration order, rotating the physical wheel to the wrong slot
+    with no error at all. Matches `_resolve_role_to_component`'s own
+    precedent of treating an ambiguous match as a hard error rather than
+    silently picking one.
+    """
+    if step.slot is not None:
+        return int(_substitute(step.slot, params))
+    filter_name = _substitute(step.filterName, params)
+    slots = ctx.role_to_slots.get(role, {})
+    matches = [slot_number for slot_number, name in slots.items() if name == filter_name]
+    if not matches:
+        raise ScriptExecutionError(
+            f"role {role!r}'s filter wheel has no slot named {filter_name!r} (known slots: {slots})"
+        )
+    if len(matches) > 1:
+        raise ScriptExecutionError(
+            f"role {role!r}'s filter wheel has more than one slot named {filter_name!r}: "
+            f"{sorted(matches)} — fix the rig's slots map"
+        )
+    return matches[0]
+
+
 STEP_HANDLERS: dict[type, StepHandler] = {
     SetPropertyStep: _execute_set_property,
     WaitForStep: _execute_wait_for,
     CaptureFrameStep: _execute_capture_frame,
     SlewStep: _execute_slew,
     CoolCameraStep: _execute_cool_camera,
+    SelectFilterStep: _execute_select_filter,
     RunScriptStep: _execute_run_script,
     RepeatStep: _execute_repeat,
     IfStep: _execute_if,
@@ -1260,7 +1351,7 @@ Every step type `script_store.Script` can produce must have a handler
 registered here — `_run_one_step` looks up `type(step)` in this dict and
 raises `ScriptValidationError` (rather than silently no-op'ing) if a step's
 runtime type isn't registered. Since `script_store`'s `Step` union is
-already closed to these same 8 types (INDIMCP-6's "no embedded expression
+already closed to these same 9 types (INDIMCP-6's "no embedded expression
 language" rule — see `docs/ScriptSchema.md`), this can't actually be missed
 for a script that loaded successfully; it exists as an explicit,
 inspectable whitelist rather than an implicit if/elif chain, and as a
