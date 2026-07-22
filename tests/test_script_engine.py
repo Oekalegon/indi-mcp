@@ -1714,6 +1714,27 @@ async def test_execute_script_cool_camera_times_out_waiting_for_ok(
         await script_engine.execute_script("cool_camera", "test-rig", {})
 
 
+async def test_execute_script_cool_camera_fails_fast_on_temperature_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A driver-reported `Alert` (e.g. a cooler fault) shouldn't be waited out for the full
+    timeout — it's not something more polling will resolve.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool_camera",
+        steps=[{"step": "cool_camera", "role": "camera", "targetTempC": -10.0}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
+        await asyncio.wait_for(
+            script_engine.execute_script("cool_camera", "test-rig", {}), timeout=1.0
+        )
+
+
 async def test_execute_script_reports_progress_for_each_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
