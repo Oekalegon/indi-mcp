@@ -277,6 +277,54 @@ def test_referenced_roles_includes_a_select_filter_steps_role() -> None:
     assert script_store.referenced_roles(script) == {"filterWheel"}
 
 
+def test_set_focus_position_step_parses_with_default_timeout() -> None:
+    step = script_store.SetFocusPositionStep(
+        step="set_focus_position", role="focuser", position=7000
+    )
+
+    assert step.role == "focuser"
+    assert step.position == 7000
+    assert step.timeoutSeconds == 60
+
+
+def test_load_scripts_parses_a_set_focus_position_step(tmp_path: Path) -> None:
+    (tmp_path / "focus_mid.yaml").write_text(
+        """
+        id: focus_mid
+        name: Focus to mid travel
+        pausable: false
+        steps:
+          - step: set_focus_position
+            role: focuser
+            position: 7000
+        """
+    )
+
+    scripts = script_store.load_scripts(tmp_path)
+
+    assert len(scripts) == 1
+    (step,) = scripts[0].steps
+    assert isinstance(step, script_store.SetFocusPositionStep)
+    assert step.role == "focuser"
+    assert step.position == 7000
+    assert step.timeoutSeconds == 60
+
+
+def test_referenced_roles_includes_a_set_focus_position_steps_role() -> None:
+    script = script_store.Script(
+        id="focus_mid",
+        name="Focus to mid travel",
+        pausable=False,
+        steps=[
+            script_store.SetFocusPositionStep(
+                step="set_focus_position", role="focuser", position=7000
+            )
+        ],
+    )
+
+    assert script_store.referenced_roles(script) == {"focuser"}
+
+
 def test_repeat_step_rejects_both_count_and_until() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         script_store.RepeatStep(

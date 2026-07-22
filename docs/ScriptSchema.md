@@ -19,7 +19,8 @@ across the whole library, since `run_script` steps resolve by `id` within that s
 see "Script composition" below.
 
 This is deliberately a **closed, fixed vocabulary of step primitives** (`set_property`,
-`wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`, `run_script`, `repeat`, `if`) — unlike a rig component's
+`wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`, `set_focus_position`,
+`run_script`, `repeat`, `if`) — unlike a rig component's
 `role`, which accepts any string for extensibility, a step's `step` field must be one of these
 exact values. There is no embedded expression language: conditionals are a fixed, closed set of
 comparison operators over known INDI property state, not arbitrary code — see "Design notes"
@@ -125,7 +126,8 @@ can express in YAML alone — not just a stylistic choice:
   (`send_property` / property polling, after `role` → `device` resolution); `run_script`/`repeat`/
   `if` are pure control flow with no INDI interaction of their own. Nothing about these needs
   device- or operation-specific code — the same handler serves every script.
-* **Engine-implemented primitives** — `capture_frame`, `slew`, `cool_camera`, `select_filter` —
+* **Engine-implemented primitives** — `capture_frame`, `slew`, `cool_camera`, `select_filter`,
+  `set_focus_position` —
   each bundle a *sequence* of INDI commands (and sometimes non-INDI work) that isn't reducible to
   a single `set_property`/`wait_for` pair. `capture_frame`, for example, is really "set frame
   type, set exposure, wait through the `Busy`→`Ok` transition, drain the BLOB, write it to frame
@@ -138,7 +140,12 @@ can express in YAML alone — not just a stylistic choice:
   `select_filter` similarly needs rig configuration a plain `set_property` step has no access to:
   it accepts either a numeric `slot` or a `filterName`, resolving a name to its numeric
   `FILTER_SLOT_VALUE` via the rig's own filter-wheel `slots` map (`docs/RigSchema.md`) before
-  setting `FILTER_SLOT` and waiting for `Ok` (INDIMCP-61). Each of these has its own dedicated
+  setting `FILTER_SLOT` and waiting for `Ok` (INDIMCP-61). `set_focus_position` similarly needs
+  rig configuration a plain `set_property` step has no access to: it checks its target `position`
+  against the rig's own focuser `minPosition`/`maxPosition` (`docs/RigSchema.md`) before setting
+  `ABS_FOCUS_POSITION` and waiting for `Ok` — not every focuser driver rejects an out-of-range
+  position consistently, so failing fast against the declared range is more useful than waiting
+  out a timeout to discover the same thing (INDIMCP-62). Each of these has its own dedicated
   Python function in the execution engine (INDIMCP-7); the YAML step only declares *what* should
   happen (`role`, `exposureSeconds`, ...), never *how* — the handler owns the actual INDI command
   sequence.
@@ -224,6 +231,22 @@ reach `Ok` — see "Execution model" above.
 
 Sets `FILTER_SLOT`'s `FILTER_SLOT_VALUE` element to the resolved slot number and waits for the
 vector to reach `Ok` — see "Execution model" above.
+
+#### `set_focus_position`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `role` | string | yes | Typically `"focuser"`. |
+| `position` | integer | yes | Target absolute focuser position, in the focuser's native position units (matching INDI's `ABS_FOCUS_POSITION` `FOCUS_ABSOLUTE_POSITION` element). |
+| `timeoutSeconds` | number | no (default `60`) | Maximum time to wait for `ABS_FOCUS_POSITION` to reach `Ok` before failing this step. |
+
+Checks `position` against the rig component's own `minPosition`/`maxPosition`
+(`docs/RigSchema.md`), raising a `scriptFailed` result if it's outside that range (not caught
+upfront at `run_script` time, matching `select_filter`'s `filterName` resolution) — skipped if the
+component declares neither. Then sets `ABS_FOCUS_POSITION`'s `FOCUS_ABSOLUTE_POSITION` element and
+waits for the vector to reach `Ok` — see "Execution model" above. Distinct from an eventual
+autofocus routine (INDIMCP-43), which would be a higher-level composed script built on top of
+this primitive, not a replacement for it.
 
 #### `run_script`
 
@@ -362,7 +385,8 @@ than being written and silently dropped at the next load.
 ## Design notes
 
 * **Fixed step vocabulary, no embedded expression language.** `step` is a closed enum
-  (`set_property`, `wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`, `run_script`, `repeat`, `if`); condition
+  (`set_property`, `wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`,
+  `set_focus_position`, `run_script`, `repeat`, `if`); condition
   `operator`s are a closed enum; parameter substitution (`"{{ name }}"`) is plain value lookup,
   never code to evaluate. A script is declarative data, safe to author on the Client Computer and
   upload, consistent with [Design.md](Design.md#architecture-overview)'s scripting-layer intro.

@@ -1912,6 +1912,144 @@ async def test_execute_script_select_filter_fails_fast_on_filter_slot_alert(
         )
 
 
+async def test_execute_script_set_focus_position_sets_position_and_waits_for_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="focuser",
+            id="focuser-1",
+            device="Focuser Simulator",
+            minPosition=0,
+            maxPosition=15370,
+        )
+    )
+    _script(
+        "focus",
+        steps=[{"step": "set_focus_position", "role": "focuser", "position": 7000}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    states = iter(["Busy", "Ok"])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: next(states))
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    result = await script_engine.execute_script("focus", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "Focuser Simulator", "ABS_FOCUS_POSITION", {"FOCUS_ABSOLUTE_POSITION": "7000"}
+    )
+    assert result["stepsExecuted"] == 1
+
+
+async def test_execute_script_set_focus_position_substitutes_parameter_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="focuser", id="focuser-1", device="Focuser Simulator"))
+    _script(
+        "focus",
+        parameters={"position": {"type": "integer", "required": True}},
+        steps=[{"step": "set_focus_position", "role": "focuser", "position": "{{ position }}"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("focus", "test-rig", {"position": 5000})
+
+    send_property.assert_awaited_once_with(
+        "Focuser Simulator", "ABS_FOCUS_POSITION", {"FOCUS_ABSOLUTE_POSITION": "5000"}
+    )
+
+
+async def test_execute_script_set_focus_position_raises_when_outside_declared_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="focuser",
+            id="focuser-1",
+            device="Focuser Simulator",
+            minPosition=0,
+            maxPosition=15370,
+        )
+    )
+    _script(
+        "focus",
+        steps=[{"step": "set_focus_position", "role": "focuser", "position": 20000}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match=r"outside its declared range"):
+        await script_engine.execute_script("focus", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_set_focus_position_skips_range_check_when_rig_declares_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A focuser component with no minPosition/maxPosition at all (unset/unknown) has nothing
+    to check against, not a crash."""
+    _rig(rig_store.Component(role="focuser", id="focuser-1", device="Focuser Simulator"))
+    _script(
+        "focus",
+        steps=[{"step": "set_focus_position", "role": "focuser", "position": 999999}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("focus", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "Focuser Simulator", "ABS_FOCUS_POSITION", {"FOCUS_ABSOLUTE_POSITION": "999999"}
+    )
+
+
+async def test_execute_script_set_focus_position_times_out_waiting_for_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="focuser", id="focuser-1", device="Focuser Simulator"))
+    _script(
+        "focus",
+        steps=[
+            {
+                "step": "set_focus_position",
+                "role": "focuser",
+                "position": 7000,
+                "timeoutSeconds": 0.01,
+            }
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Busy")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="did not reach"):
+        await script_engine.execute_script("focus", "test-rig", {})
+
+
+async def test_execute_script_set_focus_position_fails_fast_on_focus_position_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A driver-reported `Alert` (e.g. a focuser stall) shouldn't be waited out for the full
+    timeout — it's not something more polling will resolve.
+    """
+    _rig(rig_store.Component(role="focuser", id="focuser-1", device="Focuser Simulator"))
+    _script(
+        "focus",
+        steps=[{"step": "set_focus_position", "role": "focuser", "position": 7000}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
+        await asyncio.wait_for(script_engine.execute_script("focus", "test-rig", {}), timeout=1.0)
+
+
 async def test_execute_script_reports_progress_for_each_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2162,6 +2300,7 @@ def test_step_handlers_covers_every_closed_step_type() -> None:
         script_store.SlewStep,
         script_store.CoolCameraStep,
         script_store.SelectFilterStep,
+        script_store.SetFocusPositionStep,
         script_store.RunScriptStep,
         script_store.RepeatStep,
         script_store.IfStep,
