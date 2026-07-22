@@ -617,6 +617,13 @@ def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 800
             mcp.settings.transport_security = TransportSecuritySettings(
                 enable_dns_rebinding_protection=False
             )
+            logger.warning(
+                "DNS-rebinding protection disabled: host=%s is not loopback. This trades "
+                "off protection against a DNS-rebinding attacker on the same LAN in "
+                "exchange for LAN clients being able to reach this server at all — see "
+                "docs/Deployment.md's Hardening notes.",
+                host,
+            )
         logger.info(
             "Starting indi-mcp server (transport=%s, host=%s, port=%d)", transport, host, port
         )
