@@ -65,14 +65,17 @@ def test_builtin_cool_camera_script_is_a_thin_wrapper_around_the_cool_camera_ste
     cool_camera = script_store.get_script("cool_camera")
 
     assert cool_camera.pausable is False
-    assert set(cool_camera.parameters) == {"targetTempC"}
+    assert set(cool_camera.parameters) == {"targetTempC", "timeoutSeconds"}
     assert cool_camera.parameters["targetTempC"].required is False
     assert cool_camera.parameters["targetTempC"].default == -10
+    assert cool_camera.parameters["timeoutSeconds"].required is False
+    assert cool_camera.parameters["timeoutSeconds"].default == 300
     assert len(cool_camera.steps) == 1
     step = cool_camera.steps[0]
     assert isinstance(step, script_store.CoolCameraStep)
     assert step.role == "camera"
     assert step.targetTempC == "{{ targetTempC }}"
+    assert step.timeoutSeconds == "{{ timeoutSeconds }}"
 
 
 def test_builtin_park_script_sets_park_and_waits() -> None:

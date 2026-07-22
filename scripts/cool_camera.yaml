@@ -16,7 +16,13 @@ parameters:
     required: false
     default: -10
     description: Target sensor temperature, in degrees Celsius.
+  timeoutSeconds:
+    type: number
+    required: false
+    default: 300
+    description: Maximum time to wait for the sensor to stabilize at targetTempC.
 steps:
   - step: cool_camera
     role: camera
     targetTempC: "{{ targetTempC }}"
+    timeoutSeconds: "{{ timeoutSeconds }}"
