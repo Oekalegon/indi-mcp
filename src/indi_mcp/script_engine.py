@@ -31,6 +31,7 @@ from indi_mcp.script_store import (
     CaptureFrameStep,
     Condition,
     ConditionOperator,
+    CoolCameraStep,
     IfStep,
     RepeatStep,
     RunScriptStep,
@@ -352,7 +353,7 @@ def _substituted_role(role: str, params: dict[str, Any]) -> str:
 
 def _step_role(step: Step, params: dict[str, Any]) -> str | None:
     """The concrete role `step` targets, substituted against `params`; `None` if it has none."""
-    if isinstance(step, SetPropertyStep | CaptureFrameStep | SlewStep):
+    if isinstance(step, SetPropertyStep | CaptureFrameStep | SlewStep | CoolCameraStep):
         return _substituted_role(step.role, params)
     if isinstance(step, WaitForStep | IfStep):
         return _substituted_role(step.condition.role, params)
@@ -1192,11 +1193,63 @@ async def _ensure_track_on_slew(device: str) -> None:
     await indi_messaging.send_property(device, "ON_COORD_SET", {"TRACK": "On"})
 
 
+async def _execute_cool_camera(
+    step: CoolCameraStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    """Cool the camera to `step.targetTempC` and wait through the `Busy`->`Ok` stabilization.
+
+    Turns `CCD_COOLER` on first, best-effort (skipped, not an error, if the
+    device doesn't define it — not every camera has active cooling, mirroring
+    `_ensure_track_on_slew`/`_set_frame_type`'s "optional property" handling).
+    This best-effort step is exactly why `cool_camera` needs a dedicated step
+    type rather than a pure `set_property`/`wait_for` composition like
+    `park`/`connect`: a declarative script has no way to skip a property that
+    doesn't exist on a given device.
+
+    Then sets `CCD_TEMPERATURE_VALUE` to the target and waits for
+    `CCD_TEMPERATURE` to reach `Ok` (the driver's own stabilization signal —
+    standard INDI CCD drivers hold the vector at `Busy` until the sensor
+    settles at or near the setpoint), using `_wait_for_property_state`, the
+    same primitive `slew`/`capture_frame` use for their own `Busy`->`Ok`
+    waits.
+    """
+    device = _resolve_device(_substituted_role(step.role, params), ctx)
+    target_temp = float(_substitute(step.targetTempC, params))
+    timeout = float(_substitute(step.timeoutSeconds, params))
+
+    await _ensure_cooler_on(device)
+    await indi_messaging.send_property(
+        device, "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": str(target_temp)}
+    )
+    await _wait_for_property_state(
+        ctx, device, "CCD_TEMPERATURE", indi_messaging.PropertyState.OK, timeout
+    )
+
+
+async def _ensure_cooler_on(device: str) -> None:
+    """Set `CCD_COOLER`'s `COOLER_ON` element; skipped (not an error) if undefined on this device.
+
+    `CCD_COOLER` is a standard but optional INDI CCD property — not every
+    camera has active cooling — so an undefined vector is treated as "not
+    applicable, skip", matching `_check_not_parked`/`_ensure_track_on_slew`'s
+    handling of `TELESCOPE_PARK`/`ON_COORD_SET`.
+    """
+    values = indi_messaging.get_property_values(device, "CCD_COOLER")
+    if values is None:
+        return
+    await indi_messaging.send_property(device, "CCD_COOLER", {"COOLER_ON": "On"})
+
+
 STEP_HANDLERS: dict[type, StepHandler] = {
     SetPropertyStep: _execute_set_property,
     WaitForStep: _execute_wait_for,
     CaptureFrameStep: _execute_capture_frame,
     SlewStep: _execute_slew,
+    CoolCameraStep: _execute_cool_camera,
     RunScriptStep: _execute_run_script,
     RepeatStep: _execute_repeat,
     IfStep: _execute_if,
@@ -1207,7 +1260,7 @@ Every step type `script_store.Script` can produce must have a handler
 registered here — `_run_one_step` looks up `type(step)` in this dict and
 raises `ScriptValidationError` (rather than silently no-op'ing) if a step's
 runtime type isn't registered. Since `script_store`'s `Step` union is
-already closed to these same 7 types (INDIMCP-6's "no embedded expression
+already closed to these same 8 types (INDIMCP-6's "no embedded expression
 language" rule — see `docs/ScriptSchema.md`), this can't actually be missed
 for a script that loaded successfully; it exists as an explicit,
 inspectable whitelist rather than an implicit if/elif chain, and as a

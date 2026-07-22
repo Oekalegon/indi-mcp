@@ -1619,6 +1619,122 @@ async def test_execute_script_slew_skips_on_coord_set_when_mount_has_no_such_pro
     )
 
 
+async def test_execute_script_cool_camera_turns_on_cooler_sets_temp_and_waits_for_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool_camera",
+        steps=[{"step": "cool_camera", "role": "camera", "targetTempC": -10.0}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"COOLER_ON": "Off", "COOLER_OFF": "On"}
+            if name == "CCD_COOLER"
+            else _default_get_property_values(device, name)
+        ),
+    )
+    states = iter(["Busy", "Busy", "Ok"])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: next(states))
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    result = await script_engine.execute_script("cool_camera", "test-rig", {})
+
+    assert send_property.await_args_list == [
+        call("CCD Simulator", "CCD_COOLER", {"COOLER_ON": "On"}),
+        call("CCD Simulator", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10.0"}),
+    ]
+    assert result["stepsExecuted"] == 1
+
+
+async def test_execute_script_cool_camera_substitutes_parameter_reference_in_target_temp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool_camera",
+        parameters={"targetTempC": {"type": "number", "required": True}},
+        steps=[{"step": "cool_camera", "role": "camera", "targetTempC": "{{ targetTempC }}"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("cool_camera", "test-rig", {"targetTempC": -15.0})
+
+    send_property.assert_awaited_once_with(
+        "CCD Simulator", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-15.0"}
+    )
+
+
+async def test_execute_script_cool_camera_skips_cooler_when_camera_has_no_such_property(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A camera driver with no CCD_COOLER support at all (no active cooling) is skipped."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool_camera",
+        steps=[{"step": "cool_camera", "role": "camera", "targetTempC": -10.0}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("cool_camera", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "CCD Simulator", "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": "-10.0"}
+    )
+
+
+async def test_execute_script_cool_camera_times_out_waiting_for_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool_camera",
+        steps=[
+            {
+                "step": "cool_camera",
+                "role": "camera",
+                "targetTempC": -10.0,
+                "timeoutSeconds": 0.01,
+            }
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Busy")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="did not reach"):
+        await script_engine.execute_script("cool_camera", "test-rig", {})
+
+
+async def test_execute_script_cool_camera_fails_fast_on_temperature_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A driver-reported `Alert` (e.g. a cooler fault) shouldn't be waited out for the full
+    timeout — it's not something more polling will resolve.
+    """
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "cool_camera",
+        steps=[{"step": "cool_camera", "role": "camera", "targetTempC": -10.0}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
+        await asyncio.wait_for(
+            script_engine.execute_script("cool_camera", "test-rig", {}), timeout=1.0
+        )
+
+
 async def test_execute_script_reports_progress_for_each_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1867,6 +1983,7 @@ def test_step_handlers_covers_every_closed_step_type() -> None:
         script_store.WaitForStep,
         script_store.CaptureFrameStep,
         script_store.SlewStep,
+        script_store.CoolCameraStep,
         script_store.RunScriptStep,
         script_store.RepeatStep,
         script_store.IfStep,

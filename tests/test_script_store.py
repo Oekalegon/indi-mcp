@@ -14,6 +14,9 @@ pausable: false
 steps: []
 """
 
+# Predates INDIMCP-56's dedicated cool_camera step; exercises the older
+# set_property/wait_for composition path, still schema-valid, but not what
+# a script using the real `cool_camera` step keyword looks like.
 COOL_CAMERA_YAML = """
 id: cool_camera
 name: Cool camera
@@ -157,6 +160,56 @@ def test_slew_target_rejects_both_ra_dec_and_object_name() -> None:
 def test_slew_target_rejects_neither_ra_dec_nor_object_name() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         script_store.SlewTarget()
+
+
+def test_cool_camera_step_parses_with_default_timeout() -> None:
+    step = script_store.CoolCameraStep(step="cool_camera", role="camera", targetTempC=-10.0)
+
+    assert step.role == "camera"
+    assert step.targetTempC == -10.0
+    assert step.timeoutSeconds == 300
+
+
+def test_cool_camera_step_accepts_an_explicit_timeout() -> None:
+    step = script_store.CoolCameraStep(
+        step="cool_camera", role="camera", targetTempC=-10.0, timeoutSeconds=120
+    )
+
+    assert step.timeoutSeconds == 120
+
+
+def test_load_scripts_parses_a_cool_camera_step(tmp_path: Path) -> None:
+    (tmp_path / "cool_down.yaml").write_text(
+        """
+        id: cool_down
+        name: Cool down
+        pausable: true
+        steps:
+          - step: cool_camera
+            role: camera
+            targetTempC: -10
+        """
+    )
+
+    scripts = script_store.load_scripts(tmp_path)
+
+    assert len(scripts) == 1
+    (step,) = scripts[0].steps
+    assert isinstance(step, script_store.CoolCameraStep)
+    assert step.role == "camera"
+    assert step.targetTempC == -10
+    assert step.timeoutSeconds == 300
+
+
+def test_referenced_roles_includes_a_cool_camera_steps_role() -> None:
+    script = script_store.Script(
+        id="cool_down",
+        name="Cool down",
+        pausable=True,
+        steps=[script_store.CoolCameraStep(step="cool_camera", role="camera", targetTempC=-10.0)],
+    )
+
+    assert script_store.referenced_roles(script) == {"camera"}
 
 
 def test_repeat_step_rejects_both_count_and_until() -> None:
