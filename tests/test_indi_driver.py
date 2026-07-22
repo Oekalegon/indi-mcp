@@ -48,6 +48,14 @@ def _make_process(label: str, binary: str = "indi_ccd_simulator") -> MagicMock:
     return proc
 
 
+def _make_unlabeled_process(binary: str) -> MagicMock:
+    """A psutil.Process-like mock for a driver started without `-n`, as happens when
+    another INDI client (e.g. KStars/EKOS) starts it directly via indiserver's FIFO."""
+    proc = MagicMock()
+    proc.cmdline.return_value = [binary]
+    return proc
+
+
 async def test_get_driver_catalog_lists_known_drivers(
     mocks: Mocks, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -244,6 +252,49 @@ async def test_list_running_drivers_keeps_mdpd_driver_with_no_local_process_matc
     running = await indi_driver.list_running_drivers()
 
     assert running == [{"label": "MDPD Device", "running": True}]
+
+
+async def test_list_running_drivers_matches_unlabeled_process_by_unique_binary(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A driver started by another INDI client directly via indiserver's FIFO (e.g.
+    KStars/EKOS) has no `-n` label. When its binary maps to exactly one catalog entry,
+    it should still be reported as running, matched by that binary."""
+    driver = _make_driver("EQMod Mount", binary="indi_eqmod_telescope")
+    mocks.catalog.drivers = [driver]
+    mocks.catalog.by_label.side_effect = {"EQMod Mount": driver}.get
+    mocks.server.get_running_drivers.return_value = {}
+    monkeypatch.setattr(
+        indi_server,
+        "get_driver_processes",
+        lambda: [_make_unlabeled_process("indi_eqmod_telescope")],
+    )
+
+    running = await indi_driver.list_running_drivers()
+
+    assert running == [{"label": "EQMod Mount", "running": True}]
+
+
+async def test_list_running_drivers_leaves_ambiguous_unlabeled_binary_unresolved(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If an unlabeled process's binary is shared by multiple catalog entries, there's
+    no reliable way to tell which one is running, so it should not be reported at all
+    rather than risking the wrong label."""
+    driver_a = _make_driver("Device A", binary="indi_shared_driver")
+    driver_b = _make_driver("Device B", binary="indi_shared_driver")
+    mocks.catalog.drivers = [driver_a, driver_b]
+    mocks.catalog.by_label.side_effect = {"Device A": driver_a, "Device B": driver_b}.get
+    mocks.server.get_running_drivers.return_value = {}
+    monkeypatch.setattr(
+        indi_server,
+        "get_driver_processes",
+        lambda: [_make_unlabeled_process("indi_shared_driver")],
+    )
+
+    running = await indi_driver.list_running_drivers()
+
+    assert running == []
 
 
 async def test_classify_device_returns_the_driver_family_for_a_known_device(
