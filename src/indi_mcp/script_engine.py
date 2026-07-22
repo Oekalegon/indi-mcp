@@ -1308,18 +1308,30 @@ def _resolve_filter_slot(
     lazily here (not pre-validated up front the way role-to-device
     resolution is), matching `slew`'s `objectName` resolution, which is the
     other case of a step field that depends on more than its own value and
-    fails at execution time rather than validation time.
+    fails at execution time rather than validation time. Also raises if
+    `filterName` matches more than one slot — `docs/RigSchema.md`'s `slots`
+    map doesn't enforce name uniqueness, so a misconfigured rig could
+    otherwise have this silently resolve to whichever slot happens to come
+    first in iteration order, rotating the physical wheel to the wrong slot
+    with no error at all. Matches `_resolve_role_to_component`'s own
+    precedent of treating an ambiguous match as a hard error rather than
+    silently picking one.
     """
     if step.slot is not None:
         return int(_substitute(step.slot, params))
     filter_name = _substitute(step.filterName, params)
     slots = ctx.role_to_slots.get(role, {})
-    for slot_number, name in slots.items():
-        if name == filter_name:
-            return slot_number
-    raise ScriptExecutionError(
-        f"role {role!r}'s filter wheel has no slot named {filter_name!r} (known slots: {slots})"
-    )
+    matches = [slot_number for slot_number, name in slots.items() if name == filter_name]
+    if not matches:
+        raise ScriptExecutionError(
+            f"role {role!r}'s filter wheel has no slot named {filter_name!r} (known slots: {slots})"
+        )
+    if len(matches) > 1:
+        raise ScriptExecutionError(
+            f"role {role!r}'s filter wheel has more than one slot named {filter_name!r}: "
+            f"{sorted(matches)} — fix the rig's slots map"
+        )
+    return matches[0]
 
 
 STEP_HANDLERS: dict[type, StepHandler] = {

@@ -1840,6 +1840,34 @@ async def test_execute_script_select_filter_by_name_raises_when_rig_has_no_slots
         await script_engine.execute_script("select_filter", "test-rig", {})
 
 
+async def test_execute_script_select_filter_by_name_raises_for_an_ambiguous_filter_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A misconfigured rig with two slots sharing the same filter name is a hard error, not a
+    silent pick of whichever slot happens to come first in iteration order."""
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 4: "Luminance"},
+        )
+    )
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Luminance"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(
+        script_engine.ScriptExecutionError, match="more than one slot named 'Luminance'"
+    ):
+        await script_engine.execute_script("select_filter", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
 async def test_execute_script_select_filter_times_out_waiting_for_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
