@@ -64,7 +64,7 @@ def test_builtin_cool_camera_script_is_a_thin_wrapper_around_the_cool_camera_ste
 
     cool_camera = script_store.get_script("cool_camera")
 
-    assert cool_camera.pausable is True
+    assert cool_camera.pausable is False
     assert set(cool_camera.parameters) == {"targetTempC"}
     assert cool_camera.parameters["targetTempC"].required is False
     assert cool_camera.parameters["targetTempC"].default == -10

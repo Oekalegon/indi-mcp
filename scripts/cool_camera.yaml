@@ -6,9 +6,10 @@ description: >
   `cool_camera` step (turns on CCD_COOLER if the camera has one, sets
   CCD_TEMPERATURE, waits for Ok — see docs/ScriptSchema.md's `cool_camera`
   step reference, INDIMCP-56) so composed sequences can `run_script:
-  cool_camera` instead of repeating the step directly. Pausable since
-  cooling to a large deltaT can take several minutes.
-pausable: true
+  cool_camera` instead of repeating the step directly. Not pausable: this
+  is a single step that can run for several minutes with no safe point to
+  suspend mid-cooldown, the same reasoning `slew` is not pausable either.
+pausable: false
 parameters:
   targetTempC:
     type: number
