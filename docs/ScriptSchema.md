@@ -219,7 +219,7 @@ reach `Ok` — see "Execution model" above.
 |---|---|---|---|
 | `role` | string | yes | Typically `"filterWheel"`. |
 | `slot` | integer | one of `slot`/`filterName` | The filter wheel's numeric slot to select directly. |
-| `filterName` | string | one of `slot`/`filterName` | A filter name (e.g. `"Luminance"`) resolved to its numeric slot via the rig component's own `slots` map (`docs/RigSchema.md`) — a validation error at run time if the name isn't in that map. |
+| `filterName` | string | one of `slot`/`filterName` | A filter name (e.g. `"Luminance"`) resolved to its numeric slot via the rig component's own `slots` map (`docs/RigSchema.md`) — resolved when this step runs, raising a `scriptFailed` result if the name isn't in that map (not caught upfront at `run_script` time). |
 | `timeoutSeconds` | number | no (default `30`) | Maximum time to wait for `FILTER_SLOT` to reach `Ok` before failing this step. |
 
 Sets `FILTER_SLOT`'s `FILTER_SLOT_VALUE` element to the resolved slot number and waits for the
