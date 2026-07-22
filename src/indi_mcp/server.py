@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import AnyUrl
@@ -590,6 +591,9 @@ async def read_frame(frameId: str) -> bytes:
     return await asyncio.to_thread(path.read_bytes)
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
     """Start serving the MCP server over the given transport.
 
@@ -602,6 +606,17 @@ def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 800
     if transport != "stdio":
         mcp.settings.host = host
         mcp.settings.port = port
+        if host not in _LOOPBACK_HOSTS:
+            # FastMCP's constructor auto-enables DNS-rebinding protection, but only
+            # when it sees a loopback `host` — and only at construction time, so
+            # mutating `mcp.settings.host` above doesn't retrigger it. Left alone,
+            # that protection's `allowed_hosts` stays locked to 127.0.0.1/localhost,
+            # rejecting every request from a non-loopback `Host` header — which is
+            # every request once `streamable-http` is bound to a LAN-reachable host
+            # (INDIMCP-54), the documented production setup (see docs/Deployment.md).
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            )
         logger.info(
             "Starting indi-mcp server (transport=%s, host=%s, port=%d)", transport, host, port
         )
