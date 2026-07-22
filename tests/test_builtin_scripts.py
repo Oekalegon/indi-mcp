@@ -5,7 +5,7 @@ committed, primitive/composed scripts (see `docs/Design.md`'s "Composing
 scripts" section) are meant to ship with the project. `slew` (INDIMCP-8),
 `park`/`unpark` (INDIMCP-48), a generic `connect`/`disconnect` pair,
 role-parameterized (INDIMCP-52), `cool_camera` (INDIMCP-41), `select_filter`,
-and `focus_absolute` (INDIMCP-54) ship so far; the remaining primitives,
+and `set_focus_position` (INDIMCP-63) ship so far; the remaining primitives,
 tracking control, and a composed sequence are tracked separately
 (INDIMCP-42 through INDIMCP-47, INDIMCP-49). This just confirms whatever's
 here loads and validates cleanly, the way any script a client might upload
@@ -162,25 +162,19 @@ def test_builtin_select_filter_script_is_a_thin_wrapper_around_the_select_filter
     assert step.slot is None
 
 
-def test_builtin_focus_absolute_script_sets_position_and_waits() -> None:
+def test_builtin_set_focus_position_script_is_a_thin_wrapper_around_its_step() -> None:
     script_store.load_scripts(SCRIPTS_DIR)
 
-    focus_absolute = script_store.get_script("focus_absolute")
+    set_focus_position = script_store.get_script("set_focus_position")
 
-    assert focus_absolute.pausable is False
-    assert set(focus_absolute.parameters) == {"position"}
-    assert focus_absolute.parameters["position"].required is True
-    assert len(focus_absolute.steps) == 2
-    set_step, wait_step = focus_absolute.steps
-    assert isinstance(set_step, script_store.SetPropertyStep)
-    assert set_step.role == "focuser"
-    assert set_step.property == "ABS_FOCUS_POSITION"
-    assert set_step.elements == {"FOCUS_ABSOLUTE_POSITION": "{{ position }}"}
-    assert isinstance(wait_step, script_store.WaitForStep)
-    assert wait_step.condition.role == "focuser"
-    assert wait_step.condition.property == "ABS_FOCUS_POSITION"
-    assert wait_step.condition.element is None
-    assert wait_step.condition.value == "Ok"
+    assert set_focus_position.pausable is False
+    assert set(set_focus_position.parameters) == {"position"}
+    assert set_focus_position.parameters["position"].required is True
+    assert len(set_focus_position.steps) == 1
+    step = set_focus_position.steps[0]
+    assert isinstance(step, script_store.SetFocusPositionStep)
+    assert step.role == "focuser"
+    assert step.position == "{{ position }}"
 
 
 def test_builtin_unpark_script_sets_unpark_and_waits() -> None:

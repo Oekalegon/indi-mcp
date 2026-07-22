@@ -1,0 +1,21 @@
+id: set_focus_position
+name: Move the focuser to an absolute position
+description: >
+  Moves the rig's focuser to a fixed absolute position and waits for the move to complete.
+  A thin, reusable wrapper around the set_focus_position step primitive so composed
+  sequences can `run_script: set_focus_position` instead of repeating a raw
+  `set_focus_position` step — see docs/Design.md's "Composing scripts" section. Distinct
+  from the full autofocus routine (INDIMCP-43), which sweeps FWHM across multiple
+  positions to determine and set the best one, rather than moving to a fixed target.
+pausable: false
+parameters:
+  position:
+    type: integer
+    required: true
+    description: >
+      Target absolute focuser position, within the rig's focuser component's
+      minPosition/maxPosition range.
+steps:
+  - step: set_focus_position
+    role: focuser
+    position: "{{ position }}"
