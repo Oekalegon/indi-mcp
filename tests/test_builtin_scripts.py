@@ -3,12 +3,12 @@
 Unlike `rigs/`/`observatories/`, which are user/hardware-specific and never
 committed, primitive/composed scripts (see `docs/Design.md`'s "Composing
 scripts" section) are meant to ship with the project. `slew` (INDIMCP-8),
-`park`/`unpark` (INDIMCP-48), and a generic `connect`/`disconnect` pair,
-role-parameterized (INDIMCP-52), ship so far; the remaining primitives,
-tracking control, and a composed sequence are tracked separately
-(INDIMCP-41 through INDIMCP-47, INDIMCP-49). This just confirms whatever's
-here loads and validates cleanly, the way any script a client might
-upload would.
+`park`/`unpark` (INDIMCP-48), a generic `connect`/`disconnect` pair,
+role-parameterized (INDIMCP-52), and `cool_camera` (INDIMCP-41) ship so
+far; the remaining primitives, tracking control, and a composed sequence
+are tracked separately (INDIMCP-42 through INDIMCP-47, INDIMCP-49). This
+just confirms whatever's here loads and validates cleanly, the way any
+script a client might upload would.
 """
 
 from pathlib import Path
@@ -57,6 +57,25 @@ def test_builtin_slew_script_is_a_thin_wrapper_around_the_slew_step() -> None:
     assert step.target.raDec is not None
     assert step.target.raDec.ra == "{{ ra }}"
     assert step.target.raDec.dec == "{{ dec }}"
+
+
+def test_builtin_cool_camera_script_is_a_thin_wrapper_around_the_cool_camera_step() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    cool_camera = script_store.get_script("cool_camera")
+
+    assert cool_camera.pausable is False
+    assert set(cool_camera.parameters) == {"targetTempC", "timeoutSeconds"}
+    assert cool_camera.parameters["targetTempC"].required is False
+    assert cool_camera.parameters["targetTempC"].default == -10
+    assert cool_camera.parameters["timeoutSeconds"].required is False
+    assert cool_camera.parameters["timeoutSeconds"].default == 300
+    assert len(cool_camera.steps) == 1
+    step = cool_camera.steps[0]
+    assert isinstance(step, script_store.CoolCameraStep)
+    assert step.role == "camera"
+    assert step.targetTempC == "{{ targetTempC }}"
+    assert step.timeoutSeconds == "{{ timeoutSeconds }}"
 
 
 def test_builtin_park_script_sets_park_and_waits() -> None:
