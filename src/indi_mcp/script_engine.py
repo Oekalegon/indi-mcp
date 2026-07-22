@@ -1373,7 +1373,7 @@ async def _execute_set_focus_position(
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
     position = int(_substitute(step.position, params))
-    _check_focus_position_in_range(role, position, ctx)
+    _check_focus_position_in_range(ctx, role, position)
     timeout = float(_substitute(step.timeoutSeconds, params))
     await indi_messaging.send_property(
         device, "ABS_FOCUS_POSITION", {"FOCUS_ABSOLUTE_POSITION": str(position)}
@@ -1383,7 +1383,7 @@ async def _execute_set_focus_position(
     )
 
 
-def _check_focus_position_in_range(role: str, position: int, ctx: _ExecutionContext) -> None:
+def _check_focus_position_in_range(ctx: _ExecutionContext, role: str, position: int) -> None:
     """Raise `ScriptExecutionError` if `position` is outside `role`'s declared focus range.
 
     `role_to_focus_range` only has an entry for a role whose rig component
