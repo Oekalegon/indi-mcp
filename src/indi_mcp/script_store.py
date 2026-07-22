@@ -51,6 +51,7 @@ __all__ = [
     "Script",
     "ScriptSummary",
     "SelectFilterStep",
+    "SetFocusPositionStep",
     "SetPropertyStep",
     "SlewStep",
     "SlewTarget",
@@ -223,6 +224,25 @@ class SelectFilterStep(_StepBase):
         return self
 
 
+class SetFocusPositionStep(_StepBase):
+    """Move the focuser to an absolute position, checked against the rig component's own
+    travel range.
+
+    Checking `position` against the rig component's `minPosition`/`maxPosition`
+    (`docs/RigSchema.md`) needs rig configuration a plain `set_property` step has no access
+    to — the same category of reason `select_filter`'s `filterName` resolution is an
+    engine-implemented primitive rather than a plain `set_property`/`wait_for` composition
+    (INDIMCP-62). Not every focuser driver rejects an out-of-range `ABS_FOCUS_POSITION`
+    consistently, so failing fast here is more useful than waiting out `timeoutSeconds` to
+    discover the same thing from a vector that never reaches `Ok`.
+    """
+
+    step: Literal["set_focus_position"]
+    role: str
+    position: IntOrReference
+    timeoutSeconds: NumberOrReference = 60
+
+
 class RunScriptStep(_StepBase):
     step: Literal["run_script"]
     script: str
@@ -261,6 +281,7 @@ Step = Annotated[
     | SlewStep
     | CoolCameraStep
     | SelectFilterStep
+    | SetFocusPositionStep
     | RunScriptStep
     | RepeatStep
     | IfStep,
@@ -374,7 +395,13 @@ def referenced_roles(script: Script) -> set[str]:
     roles: set[str] = set()
     for step in _iter_steps(script.steps):
         if isinstance(
-            step, SetPropertyStep | CaptureFrameStep | SlewStep | CoolCameraStep | SelectFilterStep
+            step,
+            SetPropertyStep
+            | CaptureFrameStep
+            | SlewStep
+            | CoolCameraStep
+            | SelectFilterStep
+            | SetFocusPositionStep,
         ):
             roles.add(step.role)
         elif isinstance(step, WaitForStep | IfStep):

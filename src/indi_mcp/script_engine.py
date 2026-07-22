@@ -37,6 +37,7 @@ from indi_mcp.script_store import (
     RunScriptStep,
     Script,
     SelectFilterStep,
+    SetFocusPositionStep,
     SetPropertyStep,
     SlewStep,
     Step,
@@ -183,6 +184,12 @@ class _ExecutionContext:
     (empty if it has none) — only consulted by `select_filter`'s
     `filterName` resolution (`_resolve_filter_slot`); every other step
     ignores it.
+
+    `role_to_focus_range` is each resolved role's rig-component
+    `(minPosition, maxPosition)` pair, absent entirely for a role whose
+    component doesn't declare one of them — only consulted by
+    `set_focus_position`'s range check (`_check_focus_position_in_range`);
+    every other step ignores it.
     """
 
     role_to_device: dict[str, str]
@@ -195,6 +202,7 @@ class _ExecutionContext:
     steps_executed: int = field(default=0)
     frames_captured: int = field(default=0)
     role_to_slots: dict[str, dict[int, str]] = field(default_factory=dict)
+    role_to_focus_range: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 async def execute_script(
@@ -273,6 +281,11 @@ async def execute_script(
         total_steps=_count_total_steps(script, scripts),
         role_to_slots={
             role: component.slots or {} for role, component in role_to_component.items()
+        },
+        role_to_focus_range={
+            role: (component.minPosition, component.maxPosition)
+            for role, component in role_to_component.items()
+            if component.minPosition is not None and component.maxPosition is not None
         },
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
@@ -372,7 +385,13 @@ def _substituted_role(role: str, params: dict[str, Any]) -> str:
 def _step_role(step: Step, params: dict[str, Any]) -> str | None:
     """The concrete role `step` targets, substituted against `params`; `None` if it has none."""
     if isinstance(
-        step, SetPropertyStep | CaptureFrameStep | SlewStep | CoolCameraStep | SelectFilterStep
+        step,
+        SetPropertyStep
+        | CaptureFrameStep
+        | SlewStep
+        | CoolCameraStep
+        | SelectFilterStep
+        | SetFocusPositionStep,
     ):
         return _substituted_role(step.role, params)
     if isinstance(step, WaitForStep | IfStep):
@@ -1334,6 +1353,57 @@ def _resolve_filter_slot(
     return matches[0]
 
 
+async def _execute_set_focus_position(
+    step: SetFocusPositionStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    """Move the focuser to `step.position` and wait through the `Busy`->`Ok` transition.
+
+    Validates `position` against the rig component's own `minPosition`/
+    `maxPosition` (`_check_focus_position_in_range`) before sending anything to
+    the device — a lookup only the execution engine can do, since it needs the
+    rig's own configuration, not just this step's fields (see
+    `SetFocusPositionStep`'s docstring for why this makes `set_focus_position`
+    an engine-implemented primitive rather than a plain `set_property`/
+    `wait_for` composition).
+    """
+    role = _substituted_role(step.role, params)
+    device = _resolve_device(role, ctx)
+    position = int(_substitute(step.position, params))
+    _check_focus_position_in_range(ctx, role, position)
+    timeout = float(_substitute(step.timeoutSeconds, params))
+    await indi_messaging.send_property(
+        device, "ABS_FOCUS_POSITION", {"FOCUS_ABSOLUTE_POSITION": str(position)}
+    )
+    await _wait_for_property_state(
+        ctx, device, "ABS_FOCUS_POSITION", indi_messaging.PropertyState.OK, timeout
+    )
+
+
+def _check_focus_position_in_range(ctx: _ExecutionContext, role: str, position: int) -> None:
+    """Raise `ScriptExecutionError` if `position` is outside `role`'s declared focus range.
+
+    `role_to_focus_range` only has an entry for a role whose rig component
+    declares *both* `minPosition`/`maxPosition` (`docs/RigSchema.md`) — both
+    are optional, so a component that omits either is treated as having no
+    known range, and this is skipped rather than an error, matching
+    `_check_not_parked`/`_ensure_cooler_on`'s handling of other optional
+    rig/device state.
+    """
+    range_ = ctx.role_to_focus_range.get(role)
+    if range_ is None:
+        return
+    min_position, max_position = range_
+    if not (min_position <= position <= max_position):
+        raise ScriptExecutionError(
+            f"role {role!r}'s focuser position {position} is outside its declared range "
+            f"[{min_position}, {max_position}]"
+        )
+
+
 STEP_HANDLERS: dict[type, StepHandler] = {
     SetPropertyStep: _execute_set_property,
     WaitForStep: _execute_wait_for,
@@ -1341,6 +1411,7 @@ STEP_HANDLERS: dict[type, StepHandler] = {
     SlewStep: _execute_slew,
     CoolCameraStep: _execute_cool_camera,
     SelectFilterStep: _execute_select_filter,
+    SetFocusPositionStep: _execute_set_focus_position,
     RunScriptStep: _execute_run_script,
     RepeatStep: _execute_repeat,
     IfStep: _execute_if,
