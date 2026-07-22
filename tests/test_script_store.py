@@ -14,6 +14,9 @@ pausable: false
 steps: []
 """
 
+# Predates INDIMCP-56's dedicated cool_camera step; exercises the older
+# set_property/wait_for composition path, still schema-valid, but not what
+# a script using the real `cool_camera` step keyword looks like.
 COOL_CAMERA_YAML = """
 id: cool_camera
 name: Cool camera
