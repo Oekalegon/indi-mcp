@@ -1,7 +1,7 @@
 """Loading and validating the script library.
 
 A script is a declarative sequence of INDI steps — set a property, wait for
-a condition, capture a frame, slew, or call another script — used to run
+a condition, capture a frame, slew, cool the camera, or call another script — used to run
 imaging sequences without an embedded expression language. See
 `docs/ScriptSchema.md` for the full field-by-field schema reference and
 `docs/Design.md` for the background and rationale. This module implements
@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "Condition",
+    "CoolCameraStep",
     "IfStep",
     "PARAMETER_REFERENCE",
     "Parameter",
@@ -189,6 +190,13 @@ class SlewStep(_StepBase):
     target: SlewTarget
 
 
+class CoolCameraStep(_StepBase):
+    step: Literal["cool_camera"]
+    role: str
+    targetTempC: NumberOrReference
+    timeoutSeconds: NumberOrReference = 300
+
+
 class RunScriptStep(_StepBase):
     step: Literal["run_script"]
     script: str
@@ -225,6 +233,7 @@ Step = Annotated[
     | WaitForStep
     | CaptureFrameStep
     | SlewStep
+    | CoolCameraStep
     | RunScriptStep
     | RepeatStep
     | IfStep,
@@ -337,7 +346,7 @@ def referenced_roles(script: Script) -> set[str]:
     """
     roles: set[str] = set()
     for step in _iter_steps(script.steps):
-        if isinstance(step, SetPropertyStep | CaptureFrameStep | SlewStep):
+        if isinstance(step, SetPropertyStep | CaptureFrameStep | SlewStep | CoolCameraStep):
             roles.add(step.role)
         elif isinstance(step, WaitForStep | IfStep):
             roles.add(step.condition.role)
