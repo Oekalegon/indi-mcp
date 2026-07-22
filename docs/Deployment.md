@@ -93,6 +93,18 @@ so the service can only write inside its own install directory. If frame storage
 other server state ends up living elsewhere, add that path to `ReadWritePaths` (or
 relax `ProtectSystem`) — otherwise writes there will fail with a permission error.
 
+**DNS-rebinding protection is intentionally disabled** once `--host` isn't loopback (i.e.
+whenever `streamable-http` is bound the way this doc recommends, above). The MCP SDK's
+built-in protection only auto-configures itself for a loopback host, and its `allowed_hosts`
+allowlist model doesn't have a good way to express "any client on this LAN" without knowing
+every hostname/IP a client might connect through in advance — which isn't known at
+`--host 0.0.0.0` bind time. Disabling it keeps every LAN client able to reach the server (the
+whole point of `streamable-http`), at the cost of losing protection against a DNS-rebinding
+attacker who is *also* on the same LAN. For a single-user home network with intermittent
+uptime, that tradeoff is accepted deliberately rather than fixed with an allowlist that risks
+locking out legitimate clients on any network change — `journalctl -u indi-mcp` logs a warning
+every time the service starts with protection disabled, as a reminder this is active.
+
 ### Updating
 
 ```bash

@@ -1,0 +1,17 @@
+id: select_filter
+name: Select a filter on the filter wheel by name
+description: >
+  Selects a filter on the rig's filter wheel by name and waits for the move to complete.
+  A thin, reusable wrapper around the select_filter step primitive so composed sequences
+  can `run_script: select_filter` instead of repeating a raw `select_filter` step — see
+  docs/Design.md's "Composing scripts" section.
+pausable: false
+parameters:
+  filterName:
+    type: string
+    required: true
+    description: Name of the filter to select, matching the rig's filterWheel slots map.
+steps:
+  - step: select_filter
+    role: filterWheel
+    filterName: "{{ filterName }}"

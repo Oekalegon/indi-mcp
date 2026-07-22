@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -21,6 +22,7 @@ from indi_mcp import (
     observatory_store,
     rig_store,
     script_runs,
+    script_store,
     server,
 )
 
@@ -31,6 +33,13 @@ def _reset_event_streams() -> None:
     event_streams._scripts.clear()
     event_streams._subscribers.clear()
     event_streams._background_tasks.clear()
+
+
+@pytest.fixture
+def _restore_transport_security() -> Iterator[None]:
+    original = server.mcp.settings.transport_security
+    yield
+    server.mcp.settings.transport_security = original
 
 
 async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family(
@@ -606,3 +615,31 @@ async def test_unsubscribe_resource_handler_rejects_a_uri_that_is_not_an_event_s
             await server._unsubscribe_from_event_stream(AnyUrl("indi://message"))
     finally:
         request_ctx.reset(token)
+
+
+def test_run_disables_rebinding_protection_for_a_non_loopback_host(
+    monkeypatch: pytest.MonkeyPatch, _restore_transport_security: None
+) -> None:
+    monkeypatch.setattr(server.mcp, "run", lambda **kwargs: None)
+    monkeypatch.setattr(rig_store, "load_rigs", lambda: None)
+    monkeypatch.setattr(observatory_store, "load_observatories", lambda: None)
+    monkeypatch.setattr(script_store, "load_scripts", lambda: None)
+
+    server.run(transport="streamable-http", host="0.0.0.0", port=8000)
+
+    assert server.mcp.settings.transport_security is not None
+    assert server.mcp.settings.transport_security.enable_dns_rebinding_protection is False
+
+
+def test_run_keeps_rebinding_protection_for_the_default_loopback_host(
+    monkeypatch: pytest.MonkeyPatch, _restore_transport_security: None
+) -> None:
+    monkeypatch.setattr(server.mcp, "run", lambda **kwargs: None)
+    monkeypatch.setattr(rig_store, "load_rigs", lambda: None)
+    monkeypatch.setattr(observatory_store, "load_observatories", lambda: None)
+    monkeypatch.setattr(script_store, "load_scripts", lambda: None)
+
+    server.run(transport="streamable-http", host="127.0.0.1", port=8000)
+
+    assert server.mcp.settings.transport_security is not None
+    assert server.mcp.settings.transport_security.enable_dns_rebinding_protection is True

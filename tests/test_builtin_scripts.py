@@ -4,11 +4,12 @@ Unlike `rigs/`/`observatories/`, which are user/hardware-specific and never
 committed, primitive/composed scripts (see `docs/Design.md`'s "Composing
 scripts" section) are meant to ship with the project. `slew` (INDIMCP-8),
 `park`/`unpark` (INDIMCP-48), a generic `connect`/`disconnect` pair,
-role-parameterized (INDIMCP-52), and `cool_camera` (INDIMCP-41) ship so
-far; the remaining primitives, tracking control, and a composed sequence
-are tracked separately (INDIMCP-42 through INDIMCP-47, INDIMCP-49). This
-just confirms whatever's here loads and validates cleanly, the way any
-script a client might upload would.
+role-parameterized (INDIMCP-52), `cool_camera` (INDIMCP-41), `select_filter`,
+and `focus_absolute` (INDIMCP-54) ship so far; the remaining primitives,
+tracking control, and a composed sequence are tracked separately
+(INDIMCP-42 through INDIMCP-47, INDIMCP-49). This just confirms whatever's
+here loads and validates cleanly, the way any script a client might upload
+would.
 """
 
 from pathlib import Path
@@ -143,6 +144,43 @@ def test_builtin_disconnect_script_is_role_parameterized_and_waits_on_connect_el
     assert wait_step.condition.property == "CONNECTION"
     assert wait_step.condition.element == "CONNECT"
     assert wait_step.condition.value == "Off"
+
+
+def test_builtin_select_filter_script_is_a_thin_wrapper_around_the_select_filter_step() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    select_filter = script_store.get_script("select_filter")
+
+    assert select_filter.pausable is False
+    assert set(select_filter.parameters) == {"filterName"}
+    assert select_filter.parameters["filterName"].required is True
+    assert len(select_filter.steps) == 1
+    step = select_filter.steps[0]
+    assert isinstance(step, script_store.SelectFilterStep)
+    assert step.role == "filterWheel"
+    assert step.filterName == "{{ filterName }}"
+    assert step.slot is None
+
+
+def test_builtin_focus_absolute_script_sets_position_and_waits() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    focus_absolute = script_store.get_script("focus_absolute")
+
+    assert focus_absolute.pausable is False
+    assert set(focus_absolute.parameters) == {"position"}
+    assert focus_absolute.parameters["position"].required is True
+    assert len(focus_absolute.steps) == 2
+    set_step, wait_step = focus_absolute.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "focuser"
+    assert set_step.property == "ABS_FOCUS_POSITION"
+    assert set_step.elements == {"FOCUS_ABSOLUTE_POSITION": "{{ position }}"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "focuser"
+    assert wait_step.condition.property == "ABS_FOCUS_POSITION"
+    assert wait_step.condition.element is None
+    assert wait_step.condition.value == "Ok"
 
 
 def test_builtin_unpark_script_sets_unpark_and_waits() -> None:
