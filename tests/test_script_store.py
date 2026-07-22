@@ -212,6 +212,71 @@ def test_referenced_roles_includes_a_cool_camera_steps_role() -> None:
     assert script_store.referenced_roles(script) == {"camera"}
 
 
+def test_select_filter_step_parses_with_a_slot_and_default_timeout() -> None:
+    step = script_store.SelectFilterStep(step="select_filter", role="filterWheel", slot=2)
+
+    assert step.role == "filterWheel"
+    assert step.slot == 2
+    assert step.filterName is None
+    assert step.timeoutSeconds == 30
+
+
+def test_select_filter_step_parses_with_a_filter_name() -> None:
+    step = script_store.SelectFilterStep(
+        step="select_filter", role="filterWheel", filterName="Luminance"
+    )
+
+    assert step.slot is None
+    assert step.filterName == "Luminance"
+
+
+def test_select_filter_step_rejects_both_slot_and_filter_name() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        script_store.SelectFilterStep(
+            step="select_filter", role="filterWheel", slot=2, filterName="Luminance"
+        )
+
+
+def test_select_filter_step_rejects_neither_slot_nor_filter_name() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        script_store.SelectFilterStep(step="select_filter", role="filterWheel")
+
+
+def test_load_scripts_parses_a_select_filter_step(tmp_path: Path) -> None:
+    (tmp_path / "select_ha.yaml").write_text(
+        """
+        id: select_ha
+        name: Select Ha
+        pausable: false
+        steps:
+          - step: select_filter
+            role: filterWheel
+            filterName: Ha
+        """
+    )
+
+    scripts = script_store.load_scripts(tmp_path)
+
+    assert len(scripts) == 1
+    (step,) = scripts[0].steps
+    assert isinstance(step, script_store.SelectFilterStep)
+    assert step.role == "filterWheel"
+    assert step.filterName == "Ha"
+    assert step.slot is None
+    assert step.timeoutSeconds == 30
+
+
+def test_referenced_roles_includes_a_select_filter_steps_role() -> None:
+    script = script_store.Script(
+        id="select_ha",
+        name="Select Ha",
+        pausable=False,
+        steps=[script_store.SelectFilterStep(step="select_filter", role="filterWheel", slot=1)],
+    )
+
+    assert script_store.referenced_roles(script) == {"filterWheel"}
+
+
 def test_repeat_step_rejects_both_count_and_until() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         script_store.RepeatStep(

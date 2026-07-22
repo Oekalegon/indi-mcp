@@ -1,7 +1,8 @@
 """Loading and validating the script library.
 
 A script is a declarative sequence of INDI steps — set a property, wait for
-a condition, capture a frame, slew, cool the camera, or call another script — used to run
+a condition, capture a frame, slew, cool the camera, select a filter, or call
+another script — used to run
 imaging sequences without an embedded expression language. See
 `docs/ScriptSchema.md` for the full field-by-field schema reference and
 `docs/Design.md` for the background and rationale. This module implements
@@ -49,6 +50,7 @@ __all__ = [
     "RunScriptStep",
     "Script",
     "ScriptSummary",
+    "SelectFilterStep",
     "SetPropertyStep",
     "SlewStep",
     "SlewTarget",
@@ -197,6 +199,30 @@ class CoolCameraStep(_StepBase):
     timeoutSeconds: NumberOrReference = 300
 
 
+class SelectFilterStep(_StepBase):
+    """Select a filter wheel slot, by number or by filter name — exactly one of the two.
+
+    `filterName` is resolved to a numeric `FILTER_SLOT_VALUE` via the rig
+    component's own `slots` map (`docs/RigSchema.md`) at execution time — a
+    lookup only the execution engine can do (it needs the rig's own
+    configuration, not just this step's fields), which is why `select_filter`
+    is an engine-implemented primitive rather than a plain `set_property`/
+    `wait_for` composition (INDIMCP-61).
+    """
+
+    step: Literal["select_filter"]
+    role: str
+    slot: IntOrReference | None = None
+    filterName: str | None = None
+    timeoutSeconds: NumberOrReference = 30
+
+    @model_validator(mode="after")
+    def _check_exactly_one_target(self) -> "SelectFilterStep":
+        if (self.slot is None) == (self.filterName is None):
+            raise ValueError("select_filter must set exactly one of slot or filterName")
+        return self
+
+
 class RunScriptStep(_StepBase):
     step: Literal["run_script"]
     script: str
@@ -234,6 +260,7 @@ Step = Annotated[
     | CaptureFrameStep
     | SlewStep
     | CoolCameraStep
+    | SelectFilterStep
     | RunScriptStep
     | RepeatStep
     | IfStep,
@@ -346,7 +373,9 @@ def referenced_roles(script: Script) -> set[str]:
     """
     roles: set[str] = set()
     for step in _iter_steps(script.steps):
-        if isinstance(step, SetPropertyStep | CaptureFrameStep | SlewStep | CoolCameraStep):
+        if isinstance(
+            step, SetPropertyStep | CaptureFrameStep | SlewStep | CoolCameraStep | SelectFilterStep
+        ):
             roles.add(step.role)
         elif isinstance(step, WaitForStep | IfStep):
             roles.add(step.condition.role)

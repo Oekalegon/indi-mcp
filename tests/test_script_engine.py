@@ -1735,6 +1735,155 @@ async def test_execute_script_cool_camera_fails_fast_on_temperature_alert(
         )
 
 
+async def test_execute_script_select_filter_by_slot_sets_filter_slot_and_waits_for_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "slot": 3}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    states = iter(["Busy", "Ok"])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: next(states))
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    result = await script_engine.execute_script("select_filter", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "3"}
+    )
+    assert result["stepsExecuted"] == 1
+
+
+async def test_execute_script_select_filter_by_name_resolves_slot_from_rig_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red", 3: "Green"},
+        )
+    )
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("select_filter", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "2"}
+    )
+
+
+async def test_execute_script_select_filter_substitutes_parameter_reference_in_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
+    _script(
+        "select_filter",
+        parameters={"slot": {"type": "integer", "required": True}},
+        steps=[{"step": "select_filter", "role": "filterWheel", "slot": "{{ slot }}"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+
+    await script_engine.execute_script("select_filter", "test-rig", {"slot": 5})
+
+    send_property.assert_awaited_once_with(
+        "Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "5"}
+    )
+
+
+async def test_execute_script_select_filter_by_name_raises_for_an_unknown_filter_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="filterWheel", id="fw-1", device="Filter Wheel Simulator", slots={1: "Luminance"}
+        )
+    )
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Ha"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="no slot named 'Ha'"):
+        await script_engine.execute_script("select_filter", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_select_filter_by_name_raises_when_rig_has_no_slots_defined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A filter wheel component with no `slots` map at all (unset/unknown) is the same case as
+    an unknown name, not a crash."""
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Luminance"}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="no slot named 'Luminance'"):
+        await script_engine.execute_script("select_filter", "test-rig", {})
+
+
+async def test_execute_script_select_filter_times_out_waiting_for_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
+    _script(
+        "select_filter",
+        steps=[
+            {
+                "step": "select_filter",
+                "role": "filterWheel",
+                "slot": 2,
+                "timeoutSeconds": 0.01,
+            }
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Busy")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="did not reach"):
+        await script_engine.execute_script("select_filter", "test-rig", {})
+
+
+async def test_execute_script_select_filter_fails_fast_on_filter_slot_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A driver-reported `Alert` (e.g. a filter wheel jam) shouldn't be waited out for the full
+    timeout — it's not something more polling will resolve.
+    """
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "slot": 2}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="went to Alert"):
+        await asyncio.wait_for(
+            script_engine.execute_script("select_filter", "test-rig", {}), timeout=1.0
+        )
+
+
 async def test_execute_script_reports_progress_for_each_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1984,6 +2133,7 @@ def test_step_handlers_covers_every_closed_step_type() -> None:
         script_store.CaptureFrameStep,
         script_store.SlewStep,
         script_store.CoolCameraStep,
+        script_store.SelectFilterStep,
         script_store.RunScriptStep,
         script_store.RepeatStep,
         script_store.IfStep,
