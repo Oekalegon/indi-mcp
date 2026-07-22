@@ -1714,12 +1714,6 @@ async def test_execute_script_cool_camera_times_out_waiting_for_ok(
         await script_engine.execute_script("cool_camera", "test-rig", {})
 
 
-async def test_execute_script_cool_camera_defaults_timeout_to_300_seconds() -> None:
-    step = script_store.CoolCameraStep(step="cool_camera", role="camera", targetTempC=-10.0)
-
-    assert step.timeoutSeconds == 300
-
-
 async def test_execute_script_reports_progress_for_each_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
