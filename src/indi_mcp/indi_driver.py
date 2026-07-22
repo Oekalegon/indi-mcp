@@ -11,7 +11,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import TypedDict
+from typing import NamedTuple, TypedDict
 
 import psutil
 from indiweb.driver import DeviceDriver, DriverCollection
@@ -107,7 +107,15 @@ async def get_driver_catalog() -> list[DriverInfo]:
     ]
 
 
-def _running_driver_processes() -> tuple[set[str], list[str]]:
+class _RunningProcesses(NamedTuple):
+    """Split of `indiserver`'s local child processes by whether they carry a
+    `-n "<label>"` argument — see `_running_driver_processes`."""
+
+    labeled: set[str]
+    unlabeled_binaries: list[str]
+
+
+def _running_driver_processes() -> _RunningProcesses:
     """Scan `indiserver`'s local child processes once, splitting them by whether they
     carry a `-n "<label>"` argument.
 
@@ -141,7 +149,7 @@ def _running_driver_processes() -> tuple[set[str], list[str]]:
             labels.add(label)
         else:
             unlabeled_binaries.append(Path(cmdline[0]).name)
-    return labels, unlabeled_binaries
+    return _RunningProcesses(labels, unlabeled_binaries)
 
 
 def _label_for_unlabeled_binary(binary: str, catalog: DriverCollection) -> str | None:
