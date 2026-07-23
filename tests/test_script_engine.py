@@ -1692,10 +1692,20 @@ async def test_execute_script_capture_frame_tags_saved_frame_with_run_id(
 
 
 _CELESTIAL_CONTEXT: fits_headers.CelestialContext = {
+    "targetAltitudeDeg": 45.0,
+    "targetAzimuthDeg": 180.0,
+    "airmass": 1.4142,
     "sunAltitudeDeg": -30.0,
     "moonSeparationDeg": 90.0,
     "moonIlluminationFraction": 0.5,
     "elongationDeg": 120.0,
+}
+
+_TARGET_POSITION: fits_headers.TargetPosition = {
+    "raDegJ2000": 40.9799,
+    "decDegJ2000": 62.4523,
+    "raSexagesimalJ2000": "02 43 55.18",
+    "decSexagesimalJ2000": "+62 27 08.28",
 }
 
 _DATE_OBS_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}$")
@@ -1938,6 +1948,363 @@ async def test_execute_script_capture_frame_omits_filter_for_dark_and_bias_frame
     assert "FILTER" not in write_headers.call_args.args[1]
 
 
+async def test_execute_script_capture_frame_writes_telescope_optics_fields_for_any_frame_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FOCALLEN/APTDIA/TELESCOP/SCALE are equipment metadata, not tied to frame type or
+    pointing — should be present even for a Dark frame."""
+    _rig(
+        rig_store.Component(
+            role="telescope",
+            id="scope-1",
+            make="Sky-Watcher",
+            model="Esprit 100",
+            apertureMm=100,
+            focalLengthMm=550,
+        ),
+        rig_store.Component(
+            role="camera", id="cam-1", device="CCD Simulator", pixelSizeMicron=3.76
+        ),
+    )
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "Dark",
+            }
+        ],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert fields["FOCALLEN"] == (550, "[mm] Telescope focal length")
+    assert fields["APTDIA"] == (100, "[mm] Telescope aperture")
+    assert fields["TELESCOP"] == ("Sky-Watcher Esprit 100", "Telescope")
+    assert fields["SCALE"] == (round(206.265 * 3.76 / 550, 5), "[arcsec/pixel] Plate scale")
+
+
+async def test_execute_script_capture_frame_omits_telescope_optics_when_rig_has_no_telescope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert "FOCALLEN" not in fields
+    assert "APTDIA" not in fields
+    assert "TELESCOP" not in fields
+    assert "SCALE" not in fields
+
+
+async def test_execute_script_capture_frame_omits_scale_when_camera_has_no_pixel_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FOCALLEN/APTDIA/TELESCOP don't need the camera at all, but SCALE needs both a
+    focal length and a pixel size — should be independently best-effort."""
+    _rig(
+        rig_store.Component(role="telescope", id="scope-1", focalLengthMm=550),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert fields["FOCALLEN"] == (550, "[mm] Telescope focal length")
+    assert "SCALE" not in fields
+
+
+async def test_execute_script_capture_frame_writes_focuser_fields_when_resolvable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(role="focuser", id="focus-1", device="Focuser Simulator"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "Focuser Simulator" and name == "ABS_FOCUS_POSITION":
+            return {"FOCUS_ABSOLUTE_POSITION": "12345"}
+        if device == "Focuser Simulator" and name == "FOCUS_TEMPERATURE":
+            return {"TEMPERATURE": "18.347"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert fields["FOCUSPOS"] == (12345.0, "Focuser position in steps")
+    assert fields["FOCUSTEM"] == (18.35, "[C] Focuser temperature")
+
+
+async def test_execute_script_capture_frame_writes_focuser_position_without_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A focuser reporting a position but not a temperature (no temperature probe) is
+    common — the two fields must be independently best-effort."""
+    _rig(
+        rig_store.Component(role="focuser", id="focus-1", device="Focuser Simulator"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "Focuser Simulator" and name == "ABS_FOCUS_POSITION":
+            return {"FOCUS_ABSOLUTE_POSITION": "12345"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert fields["FOCUSPOS"] == (12345.0, "Focuser position in steps")
+    assert "FOCUSTEM" not in fields
+
+
+async def test_execute_script_capture_frame_omits_focuser_fields_when_rig_has_no_focuser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert "FOCUSPOS" not in fields
+    assert "FOCUSTEM" not in fields
+
+
+async def test_execute_script_capture_frame_writes_site_lat_long_for_any_frame_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SITELAT/SITELONG only need a resolvable observatory, not a Light frame or a mount —
+    should be present even for a Dark frame."""
+    _observatory()
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "Dark",
+            }
+        ],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
+
+    fields = write_headers.call_args.args[1]
+    assert fields["SITELAT"] == (60.369722, "[deg] Observatory latitude")
+    assert fields["SITELONG"] == (11.363611, "[deg] Observatory longitude")
+
+
+async def test_execute_script_capture_frame_omits_site_lat_long_when_no_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert "SITELAT" not in fields
+    assert "SITELONG" not in fields
+
+
+async def test_execute_script_capture_frame_writes_pier_side_independent_of_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PIERSIDE only needs `TELESCOPE_PIER_SIDE` — should be written even when
+    `EQUATORIAL_EOD_COORD` is undefined, since it's a best-effort field of its own."""
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "EQMod Mount" and name == "TELESCOPE_PIER_SIDE":
+            return {"PIER_WEST": "On", "PIER_EAST": "Off"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert fields["PIERSIDE"] == ("WEST", "Mount pier side")
+
+
+async def test_execute_script_capture_frame_writes_pier_side_east(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "EQMod Mount" and name == "TELESCOPE_PIER_SIDE":
+            return {"PIER_WEST": "Off", "PIER_EAST": "On"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert fields["PIERSIDE"] == ("EAST", "Mount pier side")
+
+
+async def test_execute_script_capture_frame_omits_pier_side_when_undefined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    assert "PIERSIDE" not in write_headers.call_args.args[1]
+
+
+async def test_execute_script_capture_frame_writes_object_for_a_light_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "Light",
+                "objectName": "M31",
+            }
+        ],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    assert write_headers.call_args.args[1]["OBJECT"] == ("M31", "Object")
+
+
+@pytest.mark.parametrize("frame_type", ["Dark", "Bias", "Flat"])
+async def test_execute_script_capture_frame_omits_object_for_a_calibration_frame(
+    monkeypatch: pytest.MonkeyPatch, frame_type: str
+) -> None:
+    """`objectName` is a caller-supplied label for what the light frame targets — it
+    doesn't mean anything for a calibration frame even if supplied."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": frame_type,
+                "objectName": "M31",
+            }
+        ],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    assert "OBJECT" not in write_headers.call_args.args[1]
+
+
+async def test_execute_script_capture_frame_omits_object_when_object_name_not_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "Light",
+            }
+        ],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    assert "OBJECT" not in write_headers.call_args.args[1]
+
+
 async def test_execute_script_capture_frame_writes_telescope_position_and_celestial_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1958,20 +2325,28 @@ async def test_execute_script_capture_frame_writes_telescope_position_and_celest
 
     monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
     _, save_frame = _mock_capture_frame_success(monkeypatch)
-    compute = MagicMock(return_value=_CELESTIAL_CONTEXT)
-    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+    compute_position = MagicMock(return_value=_TARGET_POSITION)
+    monkeypatch.setattr(fits_headers, "compute_target_position", compute_position)
+    compute_context = MagicMock(return_value=_CELESTIAL_CONTEXT)
+    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute_context)
     write_headers = _capture_frame_fields(monkeypatch)
 
     await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
 
-    compute.assert_called_once()
-    assert compute.call_args.kwargs["ra_hours"] == 2.767
-    assert compute.call_args.kwargs["dec_deg"] == 62.52
-    assert compute.call_args.kwargs["observatory"] == observatory
-    assert isinstance(compute.call_args.kwargs["at"], datetime)
+    compute_position.assert_called_once()
+    assert compute_position.call_args.kwargs["ra_hours"] == 2.767
+    assert compute_position.call_args.kwargs["dec_deg"] == 62.52
+    compute_context.assert_called_once()
+    assert compute_context.call_args.kwargs["ra_hours"] == 2.767
+    assert compute_context.call_args.kwargs["dec_deg"] == 62.52
+    assert compute_context.call_args.kwargs["observatory"] == observatory
+    assert isinstance(compute_context.call_args.kwargs["at"], datetime)
     fields = write_headers.call_args.args[1]
-    assert fields["RA"] == (2.767, "[h] Telescope RA (EOD) at obs time")
-    assert fields["DEC"] == (62.52, "[deg] Telescope Dec (EOD) at obs time")
+    assert fields["RA"] == (40.9799, "Object J2000 RA in Degrees")
+    assert fields["DEC"] == (62.4523, "Object J2000 DEC in Degrees")
+    assert fields["OBJCTRA"] == ("02 43 55.18", "Object J2000 RA in Hours")
+    assert fields["OBJCTDEC"] == ("+62 27 08.28", "Object J2000 DEC in Degrees")
+    assert fields["OBJCTALT"] == (45.0, "[deg] Target altitude at obs time")
     assert fields["SUNALT"] == (-30.0, "[deg] Sun altitude at obs time")
     assert fields["MOONSEP"] == (90.0, "[deg] Moon-target angular separation")
     assert fields["MOONPHSE"] == (0.5, "Moon illumination fraction [0-1]")
@@ -2002,16 +2377,19 @@ async def test_execute_script_capture_frame_writes_position_without_context_when
 
     monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
     _mock_capture_frame_success(monkeypatch)
-    compute = MagicMock()
-    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+    compute_position = MagicMock(return_value=_TARGET_POSITION)
+    monkeypatch.setattr(fits_headers, "compute_target_position", compute_position)
+    compute_context = MagicMock()
+    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute_context)
     write_headers = _capture_frame_fields(monkeypatch)
 
     await script_engine.execute_script("capture", "test-rig", {})
 
-    compute.assert_not_called()
+    compute_position.assert_called_once()
+    compute_context.assert_not_called()
     fields = write_headers.call_args.args[1]
-    assert fields["RA"] == (2.767, "[h] Telescope RA (EOD) at obs time")
-    assert fields["DEC"] == (62.52, "[deg] Telescope Dec (EOD) at obs time")
+    assert fields["RA"] == (40.9799, "Object J2000 RA in Degrees")
+    assert fields["DEC"] == (62.4523, "Object J2000 DEC in Degrees")
     assert "SUNALT" not in fields
 
 

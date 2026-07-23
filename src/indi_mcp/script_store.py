@@ -219,6 +219,11 @@ class CaptureFrameStep(_StepBase):
     `objectName`, because any of the four may be a `"{{ paramName }}"` reference whose
     resolved None-ness isn't known until execution — so that check happens in the engine
     (`_resolve_frame_roi`) after substitution, not here.
+
+    `objectName` (INDIMCP-60) is a plain caller-supplied label for the FITS `OBJECT`
+    keyword — unlike `SlewTarget.objectName`, this is never resolved to coordinates; there's
+    no way for the engine to derive "what object is this" on its own (that's the deferred
+    Simbad cross-ID work, INDIMCP-68), so it's only written if the caller explicitly names it.
     """
 
     step: Literal["capture_frame"]
@@ -233,6 +238,7 @@ class CaptureFrameStep(_StepBase):
     frameY: IntOrReference | None = None
     frameWidth: IntOrReference | None = None
     frameHeight: IntOrReference | None = None
+    objectName: str | None = None
 
 
 class SlewStep(_StepBase):
