@@ -1,0 +1,34 @@
+id: capture_frame
+name: Capture a single light frame
+description: >
+  Captures a single Light frame from the rig's camera and waits for it to complete. A
+  thin, reusable wrapper around the capture_frame step primitive so composed sequences
+  can `run_script: capture_frame` instead of repeating a raw capture_frame step — see
+  docs/Design.md's "Composing scripts" section. frameType isn't a script parameter here:
+  CaptureFrameStep.frameType is a plain Literal["Light", "Dark", "Flat", "Bias"], not one
+  of the NumberOrReference/IntOrReference types the other capture_frame fields use, so it
+  can't accept a "{{ }}" template reference — a script needing Dark/Flat/Bias frames
+  should compose a raw capture_frame step directly with a literal frameType instead.
+pausable: false
+parameters:
+  exposureSeconds:
+    type: number
+    required: true
+    description: Exposure length, in seconds.
+  binningX:
+    type: integer
+    required: false
+    default: 1
+    description: Horizontal pixel binning, if the camera supports it.
+  binningY:
+    type: integer
+    required: false
+    default: 1
+    description: Vertical pixel binning, if the camera supports it.
+steps:
+  - step: capture_frame
+    role: camera
+    exposureSeconds: "{{ exposureSeconds }}"
+    frameType: Light
+    binningX: "{{ binningX }}"
+    binningY: "{{ binningY }}"

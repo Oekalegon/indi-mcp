@@ -5,11 +5,11 @@ committed, primitive/composed scripts (see `docs/Design.md`'s "Composing
 scripts" section) are meant to ship with the project. `slew` (INDIMCP-8),
 `park`/`unpark` (INDIMCP-48), a generic `connect`/`disconnect` pair,
 role-parameterized (INDIMCP-52), `cool_camera` (INDIMCP-41), `select_filter`,
-and `set_focus_position` (INDIMCP-63) ship so far; the remaining primitives,
-tracking control, and a composed sequence are tracked separately
-(INDIMCP-42 through INDIMCP-47, INDIMCP-49). This just confirms whatever's
-here loads and validates cleanly, the way any script a client might upload
-would.
+`set_focus_position` (INDIMCP-63), and `capture_frame` (INDIMCP-44) ship so
+far; the remaining primitives, tracking control, and a composed sequence
+are tracked separately (INDIMCP-45 through INDIMCP-47, INDIMCP-49). This
+just confirms whatever's here loads and validates cleanly, the way any
+script a client might upload would.
 """
 
 from pathlib import Path
@@ -77,6 +77,28 @@ def test_builtin_cool_camera_script_is_a_thin_wrapper_around_the_cool_camera_ste
     assert step.role == "camera"
     assert step.targetTempC == "{{ targetTempC }}"
     assert step.timeoutSeconds == "{{ timeoutSeconds }}"
+
+
+def test_builtin_capture_frame_script_is_a_thin_wrapper_around_the_capture_frame_step() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    capture_frame = script_store.get_script("capture_frame")
+
+    assert capture_frame.pausable is False
+    assert set(capture_frame.parameters) == {"exposureSeconds", "binningX", "binningY"}
+    assert capture_frame.parameters["exposureSeconds"].required is True
+    assert capture_frame.parameters["binningX"].required is False
+    assert capture_frame.parameters["binningX"].default == 1
+    assert capture_frame.parameters["binningY"].required is False
+    assert capture_frame.parameters["binningY"].default == 1
+    assert len(capture_frame.steps) == 1
+    step = capture_frame.steps[0]
+    assert isinstance(step, script_store.CaptureFrameStep)
+    assert step.role == "camera"
+    assert step.exposureSeconds == "{{ exposureSeconds }}"
+    assert step.frameType == "Light"
+    assert step.binningX == "{{ binningX }}"
+    assert step.binningY == "{{ binningY }}"
 
 
 def test_builtin_park_script_sets_park_and_waits() -> None:
