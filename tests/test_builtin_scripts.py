@@ -90,6 +90,12 @@ def test_builtin_capture_frame_script_is_a_thin_wrapper_around_the_capture_frame
         "frameType",
         "binningX",
         "binningY",
+        "gain",
+        "offset",
+        "frameX",
+        "frameY",
+        "frameWidth",
+        "frameHeight",
     }
     assert capture_frame.parameters["exposureSeconds"].required is True
     assert capture_frame.parameters["frameType"].required is False
@@ -98,6 +104,13 @@ def test_builtin_capture_frame_script_is_a_thin_wrapper_around_the_capture_frame
     assert capture_frame.parameters["binningX"].default == 1
     assert capture_frame.parameters["binningY"].required is False
     assert capture_frame.parameters["binningY"].default == 1
+    assert capture_frame.parameters["gain"].required is False
+    assert capture_frame.parameters["gain"].default is None
+    assert capture_frame.parameters["offset"].required is False
+    assert capture_frame.parameters["offset"].default is None
+    for name in ("frameX", "frameY", "frameWidth", "frameHeight"):
+        assert capture_frame.parameters[name].required is False
+        assert capture_frame.parameters[name].default is None
     assert len(capture_frame.steps) == 1
     step = capture_frame.steps[0]
     assert isinstance(step, script_store.CaptureFrameStep)
@@ -106,6 +119,12 @@ def test_builtin_capture_frame_script_is_a_thin_wrapper_around_the_capture_frame
     assert step.frameType == "{{ frameType }}"
     assert step.binningX == "{{ binningX }}"
     assert step.binningY == "{{ binningY }}"
+    assert step.gain == "{{ gain }}"
+    assert step.offset == "{{ offset }}"
+    assert step.frameX == "{{ frameX }}"
+    assert step.frameY == "{{ frameY }}"
+    assert step.frameWidth == "{{ frameWidth }}"
+    assert step.frameHeight == "{{ frameHeight }}"
 
 
 def test_builtin_park_script_sets_park_and_waits() -> None:

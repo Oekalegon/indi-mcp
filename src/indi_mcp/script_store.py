@@ -206,12 +206,33 @@ class WaitForStep(_StepBase):
 
 
 class CaptureFrameStep(_StepBase):
+    """Capture a single frame, optionally with gain/offset and/or a CCD_FRAME sub-frame (ROI).
+
+    `gain`/`offset` are independently optional — `None` (the default) means "leave the
+    device's current setting alone" rather than "set to some default", since unlike
+    binning there's no universally safe numeric default to fall back to.
+
+    `frameX`/`frameY`/`frameWidth`/`frameHeight` are similarly independently optional at
+    the schema level (`None` by default), but only make sense together — a CCD_FRAME
+    command needs all four. They aren't grouped into a nested object with a
+    load-time "all or none" `model_validator` the way `SlewTarget` groups `raDec`/
+    `objectName`, because any of the four may be a `"{{ paramName }}"` reference whose
+    resolved None-ness isn't known until execution — so that check happens in the engine
+    (`_resolve_frame_roi`) after substitution, not here.
+    """
+
     step: Literal["capture_frame"]
     role: str
     exposureSeconds: NumberOrReference
     frameType: FrameTypeOrReference = "Light"
     binningX: IntOrReference = 1
     binningY: IntOrReference = 1
+    gain: NumberOrReference | None = None
+    offset: NumberOrReference | None = None
+    frameX: IntOrReference | None = None
+    frameY: IntOrReference | None = None
+    frameWidth: IntOrReference | None = None
+    frameHeight: IntOrReference | None = None
 
 
 class SlewStep(_StepBase):
