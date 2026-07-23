@@ -179,10 +179,15 @@ async def test_run_publishes_scriptStarted_scriptProgress_and_scriptCompleted_to
     started = await script_runs.start_script("cool", "test-rig", {})
     await _await_run(started["runId"])
 
-    kinds = [event["kind"] for event in event_streams.read_scripts(started["runId"])["events"]]
+    events = event_streams.read_scripts(started["runId"])["events"]
+    kinds = [event["kind"] for event in events]
     assert "scriptStarted" in kinds
     assert "scriptProgress" in kinds
     assert "scriptCompleted" in kinds
+
+    progress = next(event for event in events if event["kind"] == "scriptProgress")
+    assert progress["role"] == "camera"
+    assert progress["device"] == "CCD Simulator"
 
 
 async def test_run_on_status_publishes_scriptMessage_without_touching_latest_status(
