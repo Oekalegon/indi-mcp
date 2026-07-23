@@ -1609,6 +1609,39 @@ async def test_execute_script_capture_frame_rejects_a_partial_sub_frame_roi(
     send_property.assert_not_awaited()
 
 
+async def test_execute_script_capture_frame_rejects_a_non_numeric_runtime_frame_roi_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed sub-frame value (e.g. a buggy client passing a non-numeric frameWidth)
+    must fail with a clear ScriptExecutionError, not a bare ValueError."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        parameters={"frameWidth": {"type": "string", "required": True}},
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameX": 0,
+                "frameY": 0,
+                "frameWidth": "{{ frameWidth }}",
+                "frameHeight": 600,
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(
+        script_engine.ScriptExecutionError,
+        match="frameX/frameY/frameWidth/frameHeight must all be valid integers",
+    ):
+        await script_engine.execute_script("capture", "test-rig", {"frameWidth": "not-a-number"})
+
+    send_property.assert_not_awaited()
+
+
 async def test_execute_script_capture_frame_tags_saved_frame_with_run_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1147,7 +1147,11 @@ def _resolve_frame_roi(
     other three would capture the wrong region with no indication why. Checked here, after
     substitution, rather than as a pydantic `model_validator` on `CaptureFrameStep`, because
     any of the four fields may be a `"{{ paramName }}"` reference whose resolved `None`-ness
-    isn't known until execution (see `CaptureFrameStep`'s docstring).
+    isn't known until execution (see `CaptureFrameStep`'s docstring). Also raises
+    `ScriptExecutionError` (not a bare `ValueError`) for a resolved value that isn't a valid
+    integer — e.g. a `frameWidth` reference resolving to a non-numeric string — matching this
+    module's documented exception contract instead of falling through to
+    `script_runs._run_and_record`'s generic "internal error" safety net.
     """
     if frame_x is None and frame_y is None and frame_width is None and frame_height is None:
         return None
@@ -1157,7 +1161,14 @@ def _resolve_frame_roi(
             f"not at all (got frameX={frame_x!r}, frameY={frame_y!r}, "
             f"frameWidth={frame_width!r}, frameHeight={frame_height!r})"
         )
-    return (int(frame_x), int(frame_y), int(frame_width), int(frame_height))
+    try:
+        return (int(frame_x), int(frame_y), int(frame_width), int(frame_height))
+    except (TypeError, ValueError) as exc:
+        raise ScriptExecutionError(
+            "capture_frame's frameX/frameY/frameWidth/frameHeight must all be valid integers "
+            f"(got frameX={frame_x!r}, frameY={frame_y!r}, frameWidth={frame_width!r}, "
+            f"frameHeight={frame_height!r})"
+        ) from exc
 
 
 async def _set_frame_roi(device: str, roi: tuple[int, int, int, int] | None) -> None:
