@@ -212,6 +212,29 @@ def test_referenced_roles_includes_a_cool_camera_steps_role() -> None:
     assert script_store.referenced_roles(script) == {"camera"}
 
 
+def test_capture_frame_step_accepts_each_valid_frame_type_literal() -> None:
+    for frame_type in ("Light", "Dark", "Flat", "Bias"):
+        step = script_store.CaptureFrameStep(
+            step="capture_frame", role="camera", exposureSeconds=5, frameType=frame_type
+        )
+        assert step.frameType == frame_type
+
+
+def test_capture_frame_step_accepts_a_frame_type_parameter_reference() -> None:
+    step = script_store.CaptureFrameStep(
+        step="capture_frame", role="camera", exposureSeconds=5, frameType="{{ frameType }}"
+    )
+
+    assert step.frameType == "{{ frameType }}"
+
+
+def test_capture_frame_step_rejects_an_invalid_frame_type() -> None:
+    with pytest.raises(ValueError, match="not a valid frame type"):
+        script_store.CaptureFrameStep(
+            step="capture_frame", role="camera", exposureSeconds=5, frameType="Ligth"
+        )
+
+
 def test_select_filter_step_parses_with_a_slot_and_default_timeout() -> None:
     step = script_store.SelectFilterStep(step="select_filter", role="filterWheel", slot=2)
 

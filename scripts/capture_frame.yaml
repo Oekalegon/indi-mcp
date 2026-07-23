@@ -1,0 +1,35 @@
+id: capture_frame
+name: Capture a single frame
+description: >
+  Captures a single frame from the rig's camera and waits for it to complete. A thin,
+  reusable wrapper around the capture_frame step primitive so composed sequences can
+  `run_script: capture_frame` instead of repeating a raw capture_frame step — see
+  docs/Design.md's "Composing scripts" section.
+pausable: false
+parameters:
+  exposureSeconds:
+    type: number
+    required: true
+    description: Exposure length, in seconds.
+  frameType:
+    type: string
+    required: false
+    default: Light
+    description: One of "Light", "Dark", "Flat", "Bias" (matches INDI's CCD_FRAME_TYPE).
+  binningX:
+    type: integer
+    required: false
+    default: 1
+    description: Horizontal pixel binning, if the camera supports it.
+  binningY:
+    type: integer
+    required: false
+    default: 1
+    description: Vertical pixel binning, if the camera supports it.
+steps:
+  - step: capture_frame
+    role: camera
+    exposureSeconds: "{{ exposureSeconds }}"
+    frameType: "{{ frameType }}"
+    binningX: "{{ binningX }}"
+    binningY: "{{ binningY }}"

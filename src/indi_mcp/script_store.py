@@ -32,7 +32,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict, get_args
 
 import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
@@ -106,6 +106,33 @@ def _check_reference_string(value: Any) -> Any:
 
 NumberOrReference = Annotated[float | str, BeforeValidator(_check_reference_string)]
 IntOrReference = Annotated[int | str, BeforeValidator(_check_reference_string)]
+
+FrameType = Literal["Light", "Dark", "Flat", "Bias"]
+
+
+def _check_frame_type_or_reference(value: Any) -> Any:
+    """Reject a string value that isn't a `FrameType` literal or a `{{ paramName }}` reference.
+
+    `capture_frame`'s `frameType` needs the same "literal or reference" flexibility
+    `NumberOrReference`/`IntOrReference` give numeric fields (see
+    `docs/ScriptSchema.md#parameter-references`), but it's a closed set of strings rather
+    than a number — a plain `<real type> | str` union with `_check_reference_string`
+    wouldn't reject a typo'd literal like `"Ligth"`, since any non-reference string would
+    otherwise fall through to the bare `str` arm unchecked.
+    """
+    if (
+        isinstance(value, str)
+        and value not in get_args(FrameType)
+        and not PARAMETER_REFERENCE.match(value)
+    ):
+        raise ValueError(
+            f"{value!r} is not a valid frame type ({', '.join(get_args(FrameType))}) "
+            f"or a {{{{ paramName }}}} reference"
+        )
+    return value
+
+
+FrameTypeOrReference = Annotated[FrameType | str, BeforeValidator(_check_frame_type_or_reference)]
 
 
 class _StrictModel(BaseModel):
@@ -182,7 +209,7 @@ class CaptureFrameStep(_StepBase):
     step: Literal["capture_frame"]
     role: str
     exposureSeconds: NumberOrReference
-    frameType: Literal["Light", "Dark", "Flat", "Bias"] = "Light"
+    frameType: FrameTypeOrReference = "Light"
     binningX: IntOrReference = 1
     binningY: IntOrReference = 1
 
