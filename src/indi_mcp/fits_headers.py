@@ -1,14 +1,21 @@
-"""Computing and writing celestial-context FITS headers for a captured frame (INDIMCP-60).
+"""Computing and writing enrichment FITS headers for a captured frame (INDIMCP-60).
 
-`indiweb`/the camera driver itself can't compute any of this — it has no notion of the
-observatory's location or of what the mount is currently pointed at (mount and camera are
-separate INDI devices, and the driver only knows its own device's properties). This module
-fills that specific gap: given the mount's current RA/Dec, an `Observatory` location, and
-the time of exposure, it computes the Sun's altitude, the target's angular separation from
-the Moon, the Moon's illumination fraction, and the target's solar elongation, then writes
-them into the captured frame's FITS primary header — best-effort throughout, since neither
-an observatory location nor a resolvable/connected mount is guaranteed to be available for
-every run (see `script_engine._execute_capture_frame`).
+`indiweb`/the camera driver itself can't compute the celestial-context part of this — it
+has no notion of the observatory's location or of what the mount is currently pointed at
+(mount and camera are separate INDI devices, and the driver only knows its own device's
+properties). This module fills that gap: given the mount's current RA/Dec, an `Observatory`
+location, and the time of exposure, `compute_celestial_context` computes the Sun's altitude,
+the target's angular separation from the Moon, the Moon's illumination fraction, and the
+target's solar elongation — best-effort, since neither an observatory location nor a
+resolvable/connected mount is guaranteed to be available for every run (see
+`script_engine._execute_capture_frame`).
+
+`write_fits_headers` itself is generic — it takes any `FitsHeaderFields` (keyword -> (value,
+comment)) and writes them into the captured frame's FITS primary header, `None` if the data
+isn't FITS at all. `celestial_context_fields` converts a `CelestialContext` into that shape;
+`script_engine` also builds its own fields directly (camera/gain/offset/filter/telescope
+position — not computed by this module, since they're read off already-known step/device
+state, not derived astronomy) and merges both into one `write_fits_headers` call.
 
 FITS keyword conventions matched here (`SUNALT`/`MOONSEP`/`MOONPHSE`) come from AstroKit's
 `cfitsio_wrapper.c` celestial-context writer and Navi's corresponding reader, to stay
@@ -40,9 +47,14 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "CelestialContext",
+    "FitsHeaderFields",
+    "celestial_context_fields",
     "compute_celestial_context",
     "write_fits_headers",
 ]
+
+FitsHeaderFields = dict[str, tuple[float | str, str]]
+"""FITS keyword -> `(value, comment)`, the shape `write_fits_headers` writes directly."""
 
 # The Pi this runs on may have no internet access (see docs/Deployment.md's LAN-only
 # framing), and IERS bulletin auto-download would otherwise be attempted lazily on first
@@ -173,24 +185,39 @@ def _moon_illumination_fraction(sun: SkyCoord, moon: SkyCoord) -> float:
     return (1 + math.cos(phase_angle)) / 2
 
 
-def write_fits_headers(data: bytes, context: CelestialContext) -> bytes | None:
-    """Return `data` with `context`'s keywords added to its primary FITS header.
+def celestial_context_fields(context: CelestialContext) -> FitsHeaderFields:
+    """Convert a computed `CelestialContext` into `write_fits_headers`' generic field shape."""
+    return {
+        "SUNALT": (context["sunAltitudeDeg"], _FITS_KEYWORDS["sunAltitudeDeg"][1]),
+        "MOONSEP": (context["moonSeparationDeg"], _FITS_KEYWORDS["moonSeparationDeg"][1]),
+        "MOONPHSE": (
+            context["moonIlluminationFraction"],
+            _FITS_KEYWORDS["moonIlluminationFraction"][1],
+        ),
+        "ELONGAT": (context["elongationDeg"], _FITS_KEYWORDS["elongationDeg"][1]),
+    }
+
+
+def write_fits_headers(data: bytes, fields: FitsHeaderFields) -> bytes | None:
+    """Return `data` with `fields`' keywords added to its primary FITS header.
 
     `None` if `data` isn't a FITS file at all — not every INDI camera driver necessarily
     streams FITS (some support XISF or a native raw format instead), and this is best-effort
     metadata enrichment, not a requirement that every captured frame be FITS. The caller
     (`script_engine._execute_capture_frame`) falls back to saving `data` unmodified in that
-    case, exactly as it did before this module existed.
+    case, exactly as it did before this module existed. `None` (never called at all) if
+    `fields` is empty, since opening/rewriting the file would be pure overhead for nothing.
     """
+    if not fields:
+        return None
     try:
         with fits.open(io.BytesIO(data)) as hdul:
             header = hdul[0].header
-            for field, value in context.items():
-                keyword, comment = _FITS_KEYWORDS[field]
+            for keyword, (value, comment) in fields.items():
                 header[keyword] = (value, comment)
             buffer = io.BytesIO()
             hdul.writeto(buffer)
             return buffer.getvalue()
     except OSError:
-        logger.debug("Captured frame is not a FITS file; skipping celestial-context headers")
+        logger.debug("Captured frame is not a FITS file; skipping header enrichment")
         return None

@@ -101,6 +101,24 @@ def test_compute_celestial_context_raises_no_warnings() -> None:
         )
 
 
+def test_celestial_context_fields_maps_context_to_keywords_values_and_comments() -> None:
+    context: fits_headers.CelestialContext = {
+        "sunAltitudeDeg": -37.0113,
+        "moonSeparationDeg": 137.1356,
+        "moonIlluminationFraction": 0.0856,
+        "elongationDeg": 114.9043,
+    }
+
+    fields = fits_headers.celestial_context_fields(context)
+
+    assert fields == {
+        "SUNALT": (-37.0113, "[deg] Sun altitude at obs time"),
+        "MOONSEP": (137.1356, "[deg] Moon-target angular separation"),
+        "MOONPHSE": (0.0856, "Moon illumination fraction [0-1]"),
+        "ELONGAT": (114.9043, "[deg] Sun-target elongation"),
+    }
+
+
 def test_write_fits_headers_writes_all_four_keywords_with_comments() -> None:
     context: fits_headers.CelestialContext = {
         "sunAltitudeDeg": -37.0113,
@@ -109,7 +127,9 @@ def test_write_fits_headers_writes_all_four_keywords_with_comments() -> None:
         "elongationDeg": 114.9043,
     }
 
-    updated = fits_headers.write_fits_headers(_minimal_fits_bytes(), context)
+    updated = fits_headers.write_fits_headers(
+        _minimal_fits_bytes(), fits_headers.celestial_context_fields(context)
+    )
 
     assert updated is not None
     with fits.open(io.BytesIO(updated)) as hdul:
@@ -136,7 +156,9 @@ def test_write_fits_headers_preserves_existing_data_and_headers() -> None:
         "elongationDeg": 3.0,
     }
 
-    updated = fits_headers.write_fits_headers(buffer.getvalue(), context)
+    updated = fits_headers.write_fits_headers(
+        buffer.getvalue(), fits_headers.celestial_context_fields(context)
+    )
 
     assert updated is not None
     with fits.open(io.BytesIO(updated)) as hdul:
@@ -146,11 +168,10 @@ def test_write_fits_headers_preserves_existing_data_and_headers() -> None:
 
 @pytest.mark.parametrize("data", [b"", b"not a fits file", b"\x00\x01\x02\x03"])
 def test_write_fits_headers_returns_none_for_non_fits_data(data: bytes) -> None:
-    context: fits_headers.CelestialContext = {
-        "sunAltitudeDeg": 0.0,
-        "moonSeparationDeg": 0.0,
-        "moonIlluminationFraction": 0.0,
-        "elongationDeg": 0.0,
-    }
+    fields: fits_headers.FitsHeaderFields = {"SUNALT": (0.0, "test")}
 
-    assert fits_headers.write_fits_headers(data, context) is None
+    assert fits_headers.write_fits_headers(data, fields) is None
+
+
+def test_write_fits_headers_returns_none_for_empty_fields() -> None:
+    assert fits_headers.write_fits_headers(_minimal_fits_bytes(), {}) is None

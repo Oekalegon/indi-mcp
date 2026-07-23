@@ -1,4 +1,5 @@
 import asyncio
+import re
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call
@@ -1697,8 +1698,171 @@ _CELESTIAL_CONTEXT: fits_headers.CelestialContext = {
     "elongationDeg": 120.0,
 }
 
+_DATE_OBS_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}$")
 
-async def test_execute_script_capture_frame_adds_celestial_context_when_available(
+
+def _capture_frame_fields(
+    monkeypatch: pytest.MonkeyPatch, write_result: bytes | None = b"fits-bytes-with-fields"
+) -> MagicMock:
+    """Capture whatever `fields` dict `_execute_capture_frame` builds, by mocking
+    `fits_headers.write_fits_headers` and returning its `fields` argument from `call_args`.
+    """
+    write_headers = MagicMock(return_value=write_result)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", write_headers)
+    return write_headers
+
+
+async def test_execute_script_capture_frame_always_writes_date_obs_and_instrume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DATE-OBS/INSTRUME are written for every frame type — captured metadata, not tied to
+    the mount's pointing or a location the way telescope position/celestial context are."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "Dark",
+            }
+        ],
+    )
+    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert _DATE_OBS_PATTERN.match(fields["DATE-OBS"][0])
+    assert fields["INSTRUME"] == ("CCD Simulator", "Camera (INDI device name)")
+    assert "GAIN" not in fields
+    assert "OFFSET" not in fields
+    assert "RA" not in fields
+    save_frame.assert_called_once_with(
+        b"fits-bytes-with-fields", device="CCD Simulator", extension=".fits", run_id=None
+    )
+
+
+async def test_execute_script_capture_frame_writes_gain_and_offset_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "gain": 100,
+                "offset": 10,
+            }
+        ],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert fields["GAIN"] == (100.0, "Camera gain")
+    assert fields["OFFSET"] == (10.0, "Camera offset")
+
+
+async def test_execute_script_capture_frame_omits_gain_and_offset_when_not_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert "GAIN" not in fields
+    assert "OFFSET" not in fields
+
+
+async def test_execute_script_capture_frame_writes_filter_when_resolvable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="filterWheel", id="fw-1", device="ASI EFW", slots={1: "Ha", 2: "OIII"}
+        ),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "ASI EFW" and name == "FILTER_SLOT":
+            return {"FILTER_SLOT_VALUE": "2"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    fields = write_headers.call_args.args[1]
+    assert fields["FILTER"] == ("OIII", "Filter name")
+
+
+async def test_execute_script_capture_frame_omits_filter_when_rig_has_no_filter_wheel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    assert "FILTER" not in write_headers.call_args.args[1]
+
+
+async def test_execute_script_capture_frame_omits_filter_when_slot_not_in_rig_slots_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wheel reports a slot that the rig's own `slots` map never named — same as not
+    being able to resolve a filter name at all, not a crash."""
+    _rig(
+        rig_store.Component(role="filterWheel", id="fw-1", device="ASI EFW", slots={1: "Ha"}),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "ASI EFW" and name == "FILTER_SLOT":
+            return {"FILTER_SLOT_VALUE": "5"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    assert "FILTER" not in write_headers.call_args.args[1]
+
+
+async def test_execute_script_capture_frame_writes_telescope_position_and_celestial_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observatory = _observatory()
@@ -1720,8 +1884,7 @@ async def test_execute_script_capture_frame_adds_celestial_context_when_availabl
     _, save_frame = _mock_capture_frame_success(monkeypatch)
     compute = MagicMock(return_value=_CELESTIAL_CONTEXT)
     monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
-    write_headers = MagicMock(return_value=b"fits-bytes-with-celestial-headers")
-    monkeypatch.setattr(fits_headers, "write_fits_headers", write_headers)
+    write_headers = _capture_frame_fields(monkeypatch)
 
     await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
 
@@ -1730,21 +1893,58 @@ async def test_execute_script_capture_frame_adds_celestial_context_when_availabl
     assert compute.call_args.kwargs["dec_deg"] == 62.52
     assert compute.call_args.kwargs["observatory"] == observatory
     assert isinstance(compute.call_args.kwargs["at"], datetime)
-    write_headers.assert_called_once_with(b"fits-bytes", _CELESTIAL_CONTEXT)
+    fields = write_headers.call_args.args[1]
+    assert fields["RA"] == (2.767, "[h] Telescope RA (EOD) at obs time")
+    assert fields["DEC"] == (62.52, "[deg] Telescope Dec (EOD) at obs time")
+    assert fields["SUNALT"] == (-30.0, "[deg] Sun altitude at obs time")
+    assert fields["MOONSEP"] == (90.0, "[deg] Moon-target angular separation")
+    assert fields["MOONPHSE"] == (0.5, "Moon illumination fraction [0-1]")
+    assert fields["ELONGAT"] == (120.0, "[deg] Sun-target elongation")
     save_frame.assert_called_once_with(
-        b"fits-bytes-with-celestial-headers",
-        device="CCD Simulator",
-        extension=".fits",
-        run_id=None,
+        b"fits-bytes-with-fields", device="CCD Simulator", extension=".fits", run_id=None
     )
 
 
-async def test_execute_script_capture_frame_skips_celestial_context_for_a_calibration_frame(
+async def test_execute_script_capture_frame_writes_position_without_context_when_no_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Telescope position isn't tied to having a location at all — only the Sun/Moon
+    context (which needs an observer location to compute Alt-Az from) is."""
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "EQMod Mount" and name == "EQUATORIAL_EOD_COORD":
+            return {"RA": "2.767", "DEC": "62.52"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _mock_capture_frame_success(monkeypatch)
+    compute = MagicMock()
+    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    compute.assert_not_called()
+    fields = write_headers.call_args.args[1]
+    assert fields["RA"] == (2.767, "[h] Telescope RA (EOD) at obs time")
+    assert fields["DEC"] == (62.52, "[deg] Telescope Dec (EOD) at obs time")
+    assert "SUNALT" not in fields
+
+
+async def test_execute_script_capture_frame_skips_telescope_position_for_a_calibration_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Dark/Flat/Bias frame isn't captured "of" anything at the mount's current pointing
-    in any meaningful sense — celestial context should be skipped even when location, mount,
-    and coordinates are all otherwise available."""
+    in any meaningful sense — telescope position and celestial context should both be
+    skipped, even when location, mount, and coordinates are all otherwise available."""
     _observatory()
     _rig(
         rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
@@ -1771,62 +1971,43 @@ async def test_execute_script_capture_frame_skips_celestial_context_for_a_calibr
     _, save_frame = _mock_capture_frame_success(monkeypatch)
     compute = MagicMock()
     monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+    write_headers = _capture_frame_fields(monkeypatch)
 
     await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
 
     compute.assert_not_called()
+    fields = write_headers.call_args.args[1]
+    assert "RA" not in fields
+    assert "DEC" not in fields
+    assert "SUNALT" not in fields
     save_frame.assert_called_once_with(
-        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
+        b"fits-bytes-with-fields", device="CCD Simulator", extension=".fits", run_id=None
     )
 
 
-async def test_execute_script_capture_frame_skips_celestial_context_when_no_location_given(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _rig(
-        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
-        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
-    )
-    _script(
-        "capture",
-        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
-    )
-    _, save_frame = _mock_capture_frame_success(monkeypatch)
-    compute = MagicMock()
-    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
-
-    await script_engine.execute_script("capture", "test-rig", {})
-
-    compute.assert_not_called()
-    save_frame.assert_called_once_with(
-        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
-    )
-
-
-async def test_execute_script_capture_frame_skips_celestial_context_when_rig_has_no_mount(
+async def test_execute_script_capture_frame_skips_telescope_position_when_rig_has_no_mount(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A rig with no `"mount"` component (e.g. a camera-only test rig) simply has nothing
-    for celestial context to be computed relative to — not an error."""
+    to report a pointing for — not an error."""
     _observatory()
     _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
     _script(
         "capture",
         steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
     )
-    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    _mock_capture_frame_success(monkeypatch)
     compute = MagicMock()
     monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+    write_headers = _capture_frame_fields(monkeypatch)
 
     await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
 
     compute.assert_not_called()
-    save_frame.assert_called_once_with(
-        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
-    )
+    assert "RA" not in write_headers.call_args.args[1]
 
 
-async def test_execute_script_capture_frame_skips_celestial_context_when_mount_coords_undefined(
+async def test_execute_script_capture_frame_skips_telescope_position_when_mount_coords_undefined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The mount is resolvable but isn't reporting `EQUATORIAL_EOD_COORD` at all (e.g. not
@@ -1840,19 +2021,18 @@ async def test_execute_script_capture_frame_skips_celestial_context_when_mount_c
         "capture",
         steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
     )
-    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    _mock_capture_frame_success(monkeypatch)
     compute = MagicMock()
     monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+    write_headers = _capture_frame_fields(monkeypatch)
 
     await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
 
     compute.assert_not_called()
-    save_frame.assert_called_once_with(
-        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
-    )
+    assert "RA" not in write_headers.call_args.args[1]
 
 
-async def test_execute_script_capture_frame_skips_celestial_context_when_mount_coords_unparseable(
+async def test_execute_script_capture_frame_skips_telescope_position_when_mount_coords_unparseable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _observatory()
@@ -1871,16 +2051,15 @@ async def test_execute_script_capture_frame_skips_celestial_context_when_mount_c
         return _default_get_property_values(device, name)
 
     monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
-    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    _mock_capture_frame_success(monkeypatch)
     compute = MagicMock()
     monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+    write_headers = _capture_frame_fields(monkeypatch)
 
     await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
 
     compute.assert_not_called()
-    save_frame.assert_called_once_with(
-        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
-    )
+    assert "RA" not in write_headers.call_args.args[1]
 
 
 async def test_execute_script_capture_frame_saves_unmodified_data_when_not_a_fits_file(
@@ -1888,29 +2067,15 @@ async def test_execute_script_capture_frame_saves_unmodified_data_when_not_a_fit
 ) -> None:
     """`write_fits_headers` returning `None` (not a FITS file) falls back to the drained
     bytes unmodified — the same file that would have been saved before this feature existed."""
-    _observatory()
-    _rig(
-        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
-        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
-    )
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
     _script(
         "capture",
         steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
     )
-
-    def get_property_values(device: str, name: str) -> dict[str, str] | None:
-        if device == "EQMod Mount" and name == "EQUATORIAL_EOD_COORD":
-            return {"RA": "2.767", "DEC": "62.52"}
-        return _default_get_property_values(device, name)
-
-    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
     _, save_frame = _mock_capture_frame_success(monkeypatch)
-    monkeypatch.setattr(
-        fits_headers, "compute_celestial_context", MagicMock(return_value=_CELESTIAL_CONTEXT)
-    )
-    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+    _capture_frame_fields(monkeypatch, write_result=None)
 
-    await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
+    await script_engine.execute_script("capture", "test-rig", {})
 
     save_frame.assert_called_once_with(
         b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None

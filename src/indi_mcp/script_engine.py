@@ -199,13 +199,15 @@ class _ExecutionContext:
     `set_focus_position`'s range check (`_check_focus_position_in_range`);
     every other step ignores it.
 
-    `observatory`/`mount_device` are only consulted by `capture_frame`'s celestial-context
-    FITS headers (`_add_celestial_context`, INDIMCP-60). `observatory` is `None` whenever the
-    run wasn't given a `location_id`. `mount_device` is resolved once here (best-effort — the
-    rig might not declare a `"mount"` role at all) rather than via `role_to_device`, since a
-    script whose only step is `capture_frame` never otherwise needs a mount resolved: without
-    this, celestial context would only ever be available to scripts that happen to also
-    reference `"mount"` for some other reason (e.g. a `slew` step earlier in the same run).
+    `observatory`/`mount_device`/`filter_wheel_device`/`filter_wheel_slots` are only
+    consulted by `capture_frame`'s FITS header enrichment (`_add_fits_header_fields`,
+    INDIMCP-60). `observatory` is `None` whenever the run wasn't given a `location_id`.
+    `mount_device`/`filter_wheel_device` are resolved once here (best-effort — the rig might
+    not declare a `"mount"`/`"filterWheel"` role at all, see `_resolve_optional_role_component`)
+    rather than via `role_to_device`, since a script whose only step is `capture_frame` never
+    otherwise needs either resolved: without this, telescope-position/filter-name headers
+    would only ever be available to scripts that happen to also reference those roles for
+    some other reason (e.g. a `slew`/`select_filter` step earlier in the same run).
     """
 
     role_to_device: dict[str, str]
@@ -221,6 +223,8 @@ class _ExecutionContext:
     role_to_focus_range: dict[str, tuple[int, int]] = field(default_factory=dict)
     observatory: Observatory | None = None
     mount_device: str | None = None
+    filter_wheel_device: str | None = None
+    filter_wheel_slots: dict[int, str] = field(default_factory=dict)
 
 
 async def execute_script(
@@ -297,6 +301,9 @@ async def execute_script(
     _warn_on_missing_devices(rig_id, known_devices)
     _check_devices_connected(role_to_device, known_devices, usage.connection_managed_roles)
 
+    mount_component = _resolve_optional_role_component(rig, "mount")
+    filter_wheel_component = _resolve_optional_role_component(rig, "filterWheel")
+
     ctx = _ExecutionContext(
         role_to_device=role_to_device,
         cancel_event=cancel_event,
@@ -314,7 +321,13 @@ async def execute_script(
             if component.minPosition is not None and component.maxPosition is not None
         },
         observatory=observatory,
-        mount_device=_resolve_mount_device(rig) if observatory is not None else None,
+        mount_device=mount_component.device if mount_component is not None else None,
+        filter_wheel_device=filter_wheel_component.device
+        if filter_wheel_component is not None
+        else None,
+        filter_wheel_slots=(filter_wheel_component.slots or {})
+        if filter_wheel_component is not None
+        else {},
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
     return {
@@ -362,16 +375,17 @@ def _get_observatory(location_id: str) -> Observatory:
         raise ScriptValidationError(str(exc)) from exc
 
 
-def _resolve_mount_device(rig: rig_store.Rig) -> str | None:
-    """The rig's `"mount"` role resolved to a device, or `None` if it isn't resolvable.
+def _resolve_optional_role_component(rig: rig_store.Rig, role: str) -> rig_store.Component | None:
+    """`role` resolved to a rig component, or `None` if it isn't resolvable.
 
-    Best-effort, unlike `_resolve_role_to_component`'s normal strict behavior — a rig with
-    no `"mount"` component (or an ambiguous one) simply means celestial-context FITS headers
+    Best-effort, unlike `_resolve_role_to_component`'s normal strict behavior — a rig with no
+    matching component for `role` (or an ambiguous one) simply means the FITS-header fields
+    that depend on it (telescope position, filter name — see `_add_fits_header_fields`)
     aren't available for this run, not that the run itself should fail; nothing about
-    `capture_frame` otherwise requires a mount to exist.
+    `capture_frame` otherwise requires a `"mount"`/`"filterWheel"` component to exist.
     """
     try:
-        return _resolve_role_to_component(rig, {"mount"})["mount"].device
+        return _resolve_role_to_component(rig, {role})[role]
     except ScriptValidationError:
         return None
 
@@ -1079,9 +1093,10 @@ async def _execute_capture_frame(
     `_resolve_frame_roi`, which raises `ScriptExecutionError` for a partial specification
     rather than silently capturing the wrong region.
 
-    Once the BLOB is drained, `_add_celestial_context` best-effort enriches it with
-    Sun/Moon/elongation FITS headers (INDIMCP-60) before it's saved — see that function and
-    `fits_headers.py` for what's written and why it's best-effort rather than required.
+    Once the BLOB is drained, `_add_fits_header_fields` best-effort enriches it with camera/
+    gain/offset/filter/telescope-position/Sun-Moon-elongation FITS headers (INDIMCP-60)
+    before it's saved — see that function and `fits_headers.py` for what's written and why
+    each part is best-effort rather than required.
     """
     device = _resolve_device(_substituted_role(step.role, params), ctx)
     exposure = float(_substitute(step.exposureSeconds, params))
@@ -1119,7 +1134,7 @@ async def _execute_capture_frame(
     data, extension = await _wait_for_blob(
         ctx, device, _CCD_BLOB_VECTOR, since, deadline - asyncio.get_running_loop().time()
     )
-    data = await _add_celestial_context(ctx, data, frame_type, since)
+    data = await _add_fits_header_fields(ctx, data, device, frame_type, gain, offset, since)
 
     metadata = await asyncio.to_thread(
         frame_store.save_frame, data, device=device, extension=extension, run_id=ctx.run_id
@@ -1135,58 +1150,120 @@ async def _execute_capture_frame(
     )
 
 
-async def _add_celestial_context(
-    ctx: _ExecutionContext, data: bytes, frame_type: str, at: datetime
+async def _add_fits_header_fields(
+    ctx: _ExecutionContext,
+    data: bytes,
+    device: str,
+    frame_type: str,
+    gain: float | None,
+    offset: float | None,
+    at: datetime,
 ) -> bytes:
-    """Best-effort: enrich `data`'s FITS header with Sun/Moon/elongation context, or return
-    it unmodified.
+    """Best-effort: enrich `data`'s FITS header with capture metadata, or return it unmodified.
 
-    Skipped entirely — not an error — if any of: `frame_type` isn't `"Light"` (Dark/Flat/Bias
-    calibration frames aren't captured "of" anything at the mount's current pointing in any
-    meaningful sense — a mount can be tracking, parked, or capped during a calibration
-    sequence, and celestial context computed from wherever it happens to be pointed would be
-    misleading rather than useful), no `location_id` was given for this run
-    (`ctx.observatory is None`), the rig has no resolvable `"mount"` component
-    (`ctx.mount_device is None`, see `_resolve_mount_device`), the mount isn't currently
-    reporting `EQUATORIAL_EOD_COORD` (undefined, or a value that doesn't parse as RA/Dec —
-    e.g. disconnected), or `data` isn't a FITS file at all (`fits_headers.write_fits_headers`
-    returns `None`). Each of these is a legitimate, unremarkable state for a run that simply
-    isn't set up for celestial-context enrichment, not a sign anything went wrong with the
-    capture itself — matching this whole step's best-effort, optional-property philosophy.
+    Two tiers, per `docs/FitsHeaders.md`:
 
-    Both the celestial-geometry computation and the FITS header rewrite are synchronous,
+    - **Every frame type** (`DATE-OBS`, `INSTRUME`, `GAIN`/`OFFSET` if set, `FILTER` if
+      resolvable): this is metadata about the capture itself — camera, filter, gain, offset,
+      when — meaningful for a calibration frame exactly as much as a Light frame (a Dark's
+      gain/offset needs to match the Lights it calibrates; a Flat needs to record which
+      filter it was taken through).
+    - **`Light` frames only** (telescope `RA`/`DEC`, and — additionally, only if a
+      `location_id` was given — Sun/Moon/elongation context): a Dark/Flat/Bias frame isn't
+      captured "of" anything at the mount's current pointing in any meaningful sense — the
+      mount can be tracking, parked, or capped during a calibration sequence — so telescope
+      position and celestial context computed from wherever it happens to be pointed would be
+      misleading rather than useful, not just unnecessary work.
+
+    Each field is independently best-effort: an unresolvable `"mount"`/`"filterWheel"` role,
+    an undefined/unparseable device property, or `data` not being a FITS file at all
+    (`fits_headers.write_fits_headers` returns `None`) all just mean that specific field (or
+    the whole enrichment) is skipped — never a failed capture.
+
+    The celestial-geometry computation and the FITS header rewrite are synchronous,
     non-trivial CPU work (coordinate frame transforms; reading/writing a potentially
     multi-megabyte file in memory) — wrapped in `asyncio.to_thread`, same as
     `frame_store.save_frame`, so a capture on this single-core-constrained device doesn't
     block the event loop while it runs.
     """
-    if frame_type != "Light":
-        return data
-    if ctx.observatory is None or ctx.mount_device is None:
-        return data
+    fields: fits_headers.FitsHeaderFields = {
+        "DATE-OBS": (_format_fits_datetime(at), "UTC date/time of exposure start"),
+        "INSTRUME": (device, "Camera (INDI device name)"),
+    }
+    if gain is not None:
+        fields["GAIN"] = (gain, "Camera gain")
+    if offset is not None:
+        fields["OFFSET"] = (offset, "Camera offset")
+    filter_name = _current_filter_name(ctx)
+    if filter_name is not None:
+        fields["FILTER"] = (filter_name, "Filter name")
+
+    if frame_type == "Light":
+        pointing = _current_mount_pointing(ctx)
+        if pointing is not None:
+            ra_hours, dec_deg = pointing
+            fields["RA"] = (round(ra_hours, 4), "[h] Telescope RA (EOD) at obs time")
+            fields["DEC"] = (round(dec_deg, 4), "[deg] Telescope Dec (EOD) at obs time")
+            if ctx.observatory is not None:
+                context = await asyncio.to_thread(
+                    fits_headers.compute_celestial_context,
+                    ra_hours=ra_hours,
+                    dec_deg=dec_deg,
+                    observatory=ctx.observatory,
+                    at=at,
+                )
+                fields.update(fits_headers.celestial_context_fields(context))
+
+    updated = await asyncio.to_thread(fits_headers.write_fits_headers, data, fields)
+    return updated if updated is not None else data
+
+
+def _format_fits_datetime(at: datetime) -> str:
+    """`at` (must be UTC) as a FITS-standard `DATE-OBS` string: no timezone suffix, since FITS
+    `DATE-OBS` is implicitly UTC — a literal `+00:00`/`Z` isn't valid in that field."""
+    return at.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+
+
+def _current_filter_name(ctx: _ExecutionContext) -> str | None:
+    """The filter wheel's currently selected filter name, or `None` if it isn't resolvable.
+
+    `None` if the rig has no resolvable `"filterWheel"` component (`ctx.filter_wheel_device`),
+    `FILTER_SLOT` is undefined/unparseable, or the current slot isn't in the rig's own
+    `slots` map (`ctx.filter_wheel_slots`) — e.g. an in-use slot the rig config never named.
+    """
+    if ctx.filter_wheel_device is None:
+        return None
+    values = indi_messaging.get_property_values(ctx.filter_wheel_device, "FILTER_SLOT")
+    if values is None:
+        return None
+    try:
+        slot = int(values["FILTER_SLOT_VALUE"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return ctx.filter_wheel_slots.get(slot)
+
+
+def _current_mount_pointing(ctx: _ExecutionContext) -> tuple[float, float] | None:
+    """The mount's current `(ra_hours, dec_deg)`, or `None` if it isn't resolvable.
+
+    `None` if the rig has no resolvable `"mount"` component (`ctx.mount_device`), or
+    `EQUATORIAL_EOD_COORD` is undefined or doesn't parse as RA/Dec (e.g. disconnected).
+    """
+    if ctx.mount_device is None:
+        return None
     coords = indi_messaging.get_property_values(ctx.mount_device, "EQUATORIAL_EOD_COORD")
     if coords is None:
-        return data
+        return None
     try:
-        ra_hours = float(coords["RA"])
-        dec_deg = float(coords["DEC"])
+        return float(coords["RA"]), float(coords["DEC"])
     except (KeyError, TypeError, ValueError):
         logger.warning(
             "Mount %s reported an unusable EQUATORIAL_EOD_COORD %r; skipping "
-            "celestial-context FITS headers",
+            "telescope-position/celestial-context FITS headers",
             ctx.mount_device,
             coords,
         )
-        return data
-    context = await asyncio.to_thread(
-        fits_headers.compute_celestial_context,
-        ra_hours=ra_hours,
-        dec_deg=dec_deg,
-        observatory=ctx.observatory,
-        at=at,
-    )
-    updated = await asyncio.to_thread(fits_headers.write_fits_headers, data, context)
-    return updated if updated is not None else data
+        return None
 
 
 async def _set_frame_type(device: str, frame_type: str) -> None:
