@@ -61,6 +61,7 @@ __all__ = [
     "ScriptPreconditionError",
     "ScriptProgress",
     "ScriptResult",
+    "ScriptStatusMessage",
     "ScriptValidationError",
     "execute_script",
 ]
@@ -158,12 +159,42 @@ class ScriptProgress(TypedDict):
     script author didn't write one; the engine doesn't synthesize a
     fallback (e.g. the step's class name) into what's meant to be
     human-authored text — a caller wanting a fallback supplies its own.
+
+    `role`/`device` (INDIMCP-58) identify the rig component the step is about to act on —
+    `role` exactly as the step (or its `condition`, for `wait_for`/`if`) declares it,
+    `device` the INDI device name that role currently resolves to, via the same
+    `role_to_device` map every step handler itself uses (`None` if that role has no resolved
+    device — e.g. a `"telescope"` role, which never has one). Both are `None` for a step with
+    no single role of its own (`run_script`, `repeat`, `repeat`'s `count`-based form, `if` with
+    no `condition.role`... — see `_step_role`) — not synthesized from, say, a role referenced
+    somewhere inside a `repeat`'s nested steps, since that would misattribute this specific
+    progress event to a role the step itself isn't acting on.
     """
 
     scriptId: str
     stepsExecuted: int
     totalSteps: int | None
     message: str | None
+    role: str | None
+    device: str | None
+
+
+class ScriptStatusMessage(TypedDict):
+    """Reported via `on_status`: a message-only status update, not tied to a numbered step.
+
+    Deliberately a separate, lower-noise channel from `ScriptProgress` (INDIMCP-58) —
+    `ScriptProgress` fires automatically before *every* step, whether or not there's
+    anything noteworthy to say; `ScriptStatusMessage` is emitted only when a step handler
+    itself has something specific to report mid-step (e.g. `capture_frame` reporting the
+    frame it just saved) — no `stepsExecuted`/`totalSteps`, since it isn't a step boundary.
+
+    `role`/`device` follow the same convention as `ScriptProgress`'s.
+    """
+
+    scriptId: str
+    message: str
+    role: str | None
+    device: str | None
 
 
 class ScriptResult(TypedDict):
@@ -228,6 +259,11 @@ class _ExecutionContext:
     some other reason (e.g. a `slew`/`select_filter`/`set_focus_position` step earlier in the
     same run). `"telescope"` in particular has no `device` of its own at all (it isn't a
     driver — see `docs/RigSchema.md`), so it could never appear in `role_to_device` regardless.
+
+    `on_status` (INDIMCP-58) is `on_progress`'s lower-noise sibling — see `ScriptStatusMessage`
+    — for step handlers to report activity mid-step without it being a numbered progress
+    event. `None` has the same meaning as `on_progress` being `None`: no caller wants this
+    channel, so `_report_status` is a no-op.
     """
 
     role_to_device: dict[str, str]
@@ -244,6 +280,7 @@ class _ExecutionContext:
     role_to_component: dict[str, rig_store.Component] = field(default_factory=dict)
     observatory: Observatory | None = None
     optional_role_components: dict[str, rig_store.Component] = field(default_factory=dict)
+    on_status: Callable[[ScriptStatusMessage], None] | None = None
 
 
 async def execute_script(
@@ -255,9 +292,16 @@ async def execute_script(
     cancel_event: asyncio.Event | None = None,
     pause_event: asyncio.Event | None = None,
     on_progress: Callable[[ScriptProgress], None] | None = None,
+    on_status: Callable[[ScriptStatusMessage], None] | None = None,
     run_id: str | None = None,
 ) -> ScriptResult:
     """Run the script identified by `script_id` against the rig identified by `rig_id`.
+
+    `on_status` (INDIMCP-58) is `on_progress`'s lower-noise sibling: a step handler calls
+    `_report_status` to report something worth surfacing mid-step (e.g. `capture_frame`
+    reporting the frame it just saved) without that being a numbered `ScriptProgress` step
+    boundary. Omitted (the default) the same way `on_progress` can be — a caller that only
+    wants step-boundary progress just doesn't pass it.
 
     `location_id`, if given, identifies an `Observatory` (`docs/ObservatorySchema.md`) an
     unknown id raises `ScriptValidationError`, matching `rig_id`'s own behavior. Omitted
@@ -345,6 +389,7 @@ async def execute_script(
         role_to_component=role_to_component,
         observatory=observatory,
         optional_role_components=optional_role_components,
+        on_status=on_status,
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
     return {
@@ -876,15 +921,37 @@ async def _wait_while_paused(ctx: _ExecutionContext, pausable: bool) -> None:
         await asyncio.sleep(_PAUSE_POLL_INTERVAL_SECONDS)
 
 
-def _report_progress(ctx: _ExecutionContext, script_id: str, step: Step) -> None:
+def _report_progress(
+    ctx: _ExecutionContext, script_id: str, step: Step, params: dict[str, Any]
+) -> None:
     if ctx.on_progress is None:
         return
+    role = _step_role(step, params)
     ctx.on_progress(
         {
             "scriptId": script_id,
             "stepsExecuted": ctx.steps_executed,
             "totalSteps": ctx.total_steps,
             "message": step.description,
+            "role": role,
+            "device": ctx.role_to_device.get(role) if role is not None else None,
+        }
+    )
+
+
+def _report_status(ctx: _ExecutionContext, script_id: str, role: str | None, message: str) -> None:
+    """Emit a `ScriptStatusMessage` (INDIMCP-58) — a step handler's own lower-noise sibling
+    to `_report_progress`, for something worth reporting mid-step rather than at a step
+    boundary. A no-op if the caller didn't ask for this channel (`ctx.on_status is None`),
+    same as `_report_progress` is for `on_progress`."""
+    if ctx.on_status is None:
+        return
+    ctx.on_status(
+        {
+            "scriptId": script_id,
+            "message": message,
+            "role": role,
+            "device": ctx.role_to_device.get(role) if role is not None else None,
         }
     )
 
@@ -921,7 +988,7 @@ async def _run_one_step(
     await _check_cancelled(ctx)
     await _wait_while_paused(ctx, pausable)
     ctx.steps_executed += 1
-    _report_progress(ctx, script_id, step)
+    _report_progress(ctx, script_id, step, params)
 
     handler = STEP_HANDLERS.get(type(step))
     if handler is None:
@@ -1128,6 +1195,11 @@ async def _execute_capture_frame(
     telescope-optics/focuser/filter/telescope-position/Sun-Moon-elongation FITS headers
     (INDIMCP-60) before it's saved — see that function and `fits_headers.py` for what's
     written and why each part is best-effort rather than required.
+
+    Reports a `ScriptStatusMessage` (INDIMCP-58) once the frame is saved — this is
+    per-frame activity worth surfacing live, but not itself a numbered `ScriptProgress` step
+    boundary (a `repeat`-wrapped `capture_frame` only advances `stepsExecuted` once per
+    iteration, before the capture even starts).
     """
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
@@ -1182,6 +1254,12 @@ async def _execute_capture_frame(
         frame_type,
         metadata["frameId"],
         metadata["sizeBytes"],
+    )
+    _report_status(
+        ctx,
+        script_id,
+        role,
+        f"Captured frame {metadata['frameId']} ({metadata['sizeBytes']} bytes)",
     )
 
 

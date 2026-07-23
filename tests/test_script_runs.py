@@ -185,6 +185,47 @@ async def test_run_publishes_scriptStarted_scriptProgress_and_scriptCompleted_to
     assert "scriptCompleted" in kinds
 
 
+async def test_run_on_status_publishes_scriptMessage_without_touching_latest_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`on_status` (INDIMCP-58) bridges `script_engine.ScriptStatusMessage` into a
+    `scriptMessage`-kind envelope on `indi://scripts` — but, unlike `on_progress`, must
+    never become `run.latest_status`: `get_script_status`'s reconnect story depends on that
+    slot holding real progress/terminal state, not a point-in-time message (see
+    `script_runs.ScriptRunMessage`'s docstring)."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("noop")
+
+    async def fake_execute_script(*args: Any, **kwargs: Any) -> script_engine.ScriptResult:
+        on_status = kwargs["on_status"]
+        on_status(
+            {
+                "scriptId": "noop",
+                "message": "Captured frame frame-1 (10 bytes)",
+                "role": "camera",
+                "device": "CCD Simulator",
+            }
+        )
+        return {"scriptId": "noop", "stepsExecuted": 0, "framesCaptured": 0}
+
+    monkeypatch.setattr(script_engine, "execute_script", fake_execute_script)
+
+    started = await script_runs.start_script("noop", "test-rig", {})
+    await _await_run(started["runId"])
+
+    events = event_streams.read_scripts(started["runId"])["events"]
+    messages = [event for event in events if event["kind"] == "scriptMessage"]
+    assert len(messages) == 1
+    assert messages[0]["runId"] == started["runId"]
+    assert messages[0]["rigId"] == "test-rig"
+    assert messages[0]["message"] == "Captured frame frame-1 (10 bytes)"
+    assert messages[0]["role"] == "camera"
+    assert messages[0]["device"] == "CCD Simulator"
+
+    status = script_runs.get_script_status(started["runId"])
+    assert status["kind"] == "scriptCompleted"
+
+
 async def test_run_that_fails_reports_scriptFailed(monkeypatch: pytest.MonkeyPatch) -> None:
     _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
     _script("connect", steps=[_set_property("camera", "CONNECTION", {"CONNECT": "On"})])

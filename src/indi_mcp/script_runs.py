@@ -41,6 +41,7 @@ __all__ = [
     "ScriptRunCancelled",
     "ScriptRunCompleted",
     "ScriptRunFailed",
+    "ScriptRunMessage",
     "ScriptRunPauseRejected",
     "ScriptRunPaused",
     "ScriptRunProgress",
@@ -75,7 +76,12 @@ class ScriptRunStarted(TypedDict):
 
 
 class ScriptRunProgress(TypedDict):
-    """The most recently reported progress for a run, fetched via `get_script_status`."""
+    """The most recently reported progress for a run, fetched via `get_script_status`.
+
+    `role`/`device` (INDIMCP-58) identify the rig component the step this progress reports
+    on is acting on — `None` for a step with no single role of its own (`run_script`,
+    `repeat`, `if` with no `condition.role`), see `script_engine.ScriptProgress`.
+    """
 
     kind: str
     runId: str
@@ -83,6 +89,30 @@ class ScriptRunProgress(TypedDict):
     step: int
     totalSteps: int | None
     message: str | None
+    role: str | None
+    device: str | None
+
+
+class ScriptRunMessage(TypedDict):
+    """A message-only status update for a run — `scriptMessage`, INDIMCP-58.
+
+    Deliberately not fetchable via `get_script_status`/`run.latest_status` (see
+    `_run_and_record`'s `on_status`): unlike `scriptProgress`, this doesn't represent the
+    run's current state, just a point-in-time note a step handler chose to report (e.g.
+    `capture_frame` reporting the frame it just saved) — surfacing it through
+    `get_script_status`'s "current state" polling story would risk clobbering whatever real
+    progress/terminal status a reconnecting client actually needs to see there. Still
+    published live (`indi://scripts`) and durably logged, same as every other `kind` here —
+    a client that cares about it subscribes or replays the event log, it just isn't part of
+    "the currently recorded status for this run."
+    """
+
+    kind: str
+    runId: str
+    rigId: str
+    message: str
+    role: str | None
+    device: str | None
 
 
 class ScriptRunError(TypedDict):
@@ -323,8 +353,21 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             "step": progress["stepsExecuted"],
             "totalSteps": progress["totalSteps"],
             "message": progress["message"],
+            "role": progress["role"],
+            "device": progress["device"],
         }
         event_streams.publish_script_event(run.latest_status)
+
+    def on_status(status: script_engine.ScriptStatusMessage) -> None:
+        message: ScriptRunMessage = {
+            "kind": "scriptMessage",
+            "runId": run.run_id,
+            "rigId": run.rig_id,
+            "message": status["message"],
+            "role": status["role"],
+            "device": status["device"],
+        }
+        event_streams.publish_script_event(message)
 
     try:
         result = await script_engine.execute_script(
@@ -335,6 +378,7 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             cancel_event=run.cancel_event,
             pause_event=run.pause_event,
             on_progress=on_progress,
+            on_status=on_status,
             run_id=run.run_id,
         )
     except script_engine.ScriptCancelled:
