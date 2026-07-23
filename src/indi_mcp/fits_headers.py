@@ -250,13 +250,24 @@ def compute_target_position(*, ra_hours: float, dec_deg: float, at: datetime) ->
     time = Time(at)
     target = SkyCoord(ra=ra_hours * u.hourangle, dec=dec_deg * u.deg, frame=TETE(obstime=time))
     j2000 = target.transform_to(ICRS())
+    # astropy's sexagesimal `to_string` carries seconds/arcseconds that round up to the next
+    # unit (e.g. 59.999... -> 60.00) through an intermediate numpy computation that can hit a
+    # transient 0/0 and raise "invalid value encountered in do_format" — a harmless artifact
+    # of that internal carry logic (platform/numpy-version dependent; the final formatted
+    # string is unaffected), not a sign the coordinate itself is invalid.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="invalid value encountered", category=RuntimeWarning
+        )
+        ra_sexagesimal = j2000.ra.to_string(unit=u.hourangle, sep=" ", precision=2, pad=True)
+        dec_sexagesimal = j2000.dec.to_string(
+            unit=u.deg, sep=" ", precision=2, alwayssign=True, pad=True
+        )
     return {
         "raDegJ2000": round(float(j2000.ra.to_value(u.deg)), 4),
         "decDegJ2000": round(float(j2000.dec.to_value(u.deg)), 4),
-        "raSexagesimalJ2000": j2000.ra.to_string(unit=u.hourangle, sep=" ", precision=2, pad=True),
-        "decSexagesimalJ2000": j2000.dec.to_string(
-            unit=u.deg, sep=" ", precision=2, alwayssign=True, pad=True
-        ),
+        "raSexagesimalJ2000": ra_sexagesimal,
+        "decSexagesimalJ2000": dec_sexagesimal,
     }
 
 
