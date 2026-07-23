@@ -1005,31 +1005,46 @@ async def _execute_capture_frame(
     script_id: str,
     pausable: bool,
 ) -> None:
-    """Capture a frame: set frame type/binning (best-effort), expose, drain the BLOB, and store it.
+    """Capture a frame: set frame type/binning/gain/offset/sub-frame (best-effort), expose,
+    drain the BLOB, and store it.
 
-    Sequence: set `CCD_FRAME_TYPE`/`CCD_BINNING` if the device defines them
-    (skipped, not an error, if undefined — not every driver reports frame
-    type or supports binning, mirroring `_check_not_parked`/
-    `_ensure_track_on_slew`'s "optional property" handling) — then set
-    `CCD_EXPOSURE`, wait through its `Busy`->`Ok` transition
-    (`_wait_for_property_state`, the same primitive `slew` uses for
-    `EQUATORIAL_EOD_COORD`), and drain whatever BLOB most recently arrived
-    on `_CCD_BLOB_VECTOR` *after* the exposure command was sent
-    (`_wait_for_blob` guards against draining one left over from an
-    earlier, unrelated capture of the same device). The drained bytes are
-    saved via `frame_store.save_frame` — synchronous/blocking, so wrapped
-    in `asyncio.to_thread` per that module's own contract — tagged with
-    this run's `run_id` so a captured frame can be traced back to the
-    script run that produced it.
+    Sequence: set `CCD_FRAME_TYPE`/`CCD_BINNING`/`CCD_GAIN`/`CCD_OFFSET`/`CCD_FRAME` if the
+    device defines them (skipped, not an error, if undefined — not every driver reports
+    frame type, binning, gain, offset, or sub-frame support, mirroring
+    `_check_not_parked`/`_ensure_track_on_slew`'s "optional property" handling) — then set
+    `CCD_EXPOSURE`, wait through its `Busy`->`Ok` transition (`_wait_for_property_state`,
+    the same primitive `slew` uses for `EQUATORIAL_EOD_COORD`), and drain whatever BLOB
+    most recently arrived on `_CCD_BLOB_VECTOR` *after* the exposure command was sent
+    (`_wait_for_blob` guards against draining one left over from an earlier, unrelated
+    capture of the same device). The drained bytes are saved via `frame_store.save_frame`
+    — synchronous/blocking, so wrapped in `asyncio.to_thread` per that module's own
+    contract — tagged with this run's `run_id` so a captured frame can be traced back to
+    the script run that produced it.
+
+    `gain`/`offset` are skipped entirely (not even a "device defines it?" check) when
+    `None` — that's "leave the device's current setting alone", not "set to some default".
+    `frameX`/`frameY`/`frameWidth`/`frameHeight` are resolved together via
+    `_resolve_frame_roi`, which raises `ScriptExecutionError` for a partial specification
+    rather than silently capturing the wrong region.
     """
     device = _resolve_device(_substituted_role(step.role, params), ctx)
     exposure = float(_substitute(step.exposureSeconds, params))
     frame_type = _substitute(step.frameType, params)
     binning_x = _substitute(step.binningX, params)
     binning_y = _substitute(step.binningY, params)
+    gain = _substitute(step.gain, params) if step.gain is not None else None
+    offset = _substitute(step.offset, params) if step.offset is not None else None
+    frame_x = _substitute(step.frameX, params) if step.frameX is not None else None
+    frame_y = _substitute(step.frameY, params) if step.frameY is not None else None
+    frame_width = _substitute(step.frameWidth, params) if step.frameWidth is not None else None
+    frame_height = _substitute(step.frameHeight, params) if step.frameHeight is not None else None
+    roi = _resolve_frame_roi(frame_x, frame_y, frame_width, frame_height)
 
     await _set_frame_type(device, frame_type)
     await _set_binning(device, binning_x, binning_y)
+    await _set_gain(device, gain)
+    await _set_offset(device, offset)
+    await _set_frame_roi(device, roi)
 
     since = datetime.now(tz=UTC)
     deadline = asyncio.get_running_loop().time() + exposure + _CAPTURE_READOUT_BUFFER_SECONDS
@@ -1094,6 +1109,69 @@ async def _set_binning(device: str, binning_x: int, binning_y: int) -> None:
         return
     await indi_messaging.send_property(
         device, "CCD_BINNING", {"HOR_BIN": str(binning_x), "VER_BIN": str(binning_y)}
+    )
+
+
+async def _set_gain(device: str, gain: float | None) -> None:
+    """Set `CCD_GAIN`'s `GAIN` element; skipped if `gain` is `None` or the device has no
+    `CCD_GAIN` property (not every camera exposes adjustable gain)."""
+    if gain is None:
+        return
+    values = indi_messaging.get_property_values(device, "CCD_GAIN")
+    if values is None:
+        return
+    await indi_messaging.send_property(device, "CCD_GAIN", {"GAIN": str(gain)})
+
+
+async def _set_offset(device: str, offset: float | None) -> None:
+    """Set `CCD_OFFSET`'s `OFFSET` element; skipped if `offset` is `None` or the device has
+    no `CCD_OFFSET` property (not every camera exposes adjustable offset)."""
+    if offset is None:
+        return
+    values = indi_messaging.get_property_values(device, "CCD_OFFSET")
+    if values is None:
+        return
+    await indi_messaging.send_property(device, "CCD_OFFSET", {"OFFSET": str(offset)})
+
+
+def _resolve_frame_roi(
+    frame_x: int | None, frame_y: int | None, frame_width: int | None, frame_height: int | None
+) -> tuple[int, int, int, int] | None:
+    """`None` if no sub-frame was requested (capture the full sensor); the four resolved
+    values if all were set.
+
+    Raises `ScriptExecutionError` for a partial specification — e.g. only `frameWidth` set
+    — since that doesn't map to a valid `CCD_FRAME` command, and silently ignoring the
+    other three would capture the wrong region with no indication why. Checked here, after
+    substitution, rather than as a pydantic `model_validator` on `CaptureFrameStep`, because
+    any of the four fields may be a `"{{ paramName }}"` reference whose resolved `None`-ness
+    isn't known until execution (see `CaptureFrameStep`'s docstring).
+    """
+    if frame_x is None and frame_y is None and frame_width is None and frame_height is None:
+        return None
+    if frame_x is None or frame_y is None or frame_width is None or frame_height is None:
+        raise ScriptExecutionError(
+            "capture_frame's frameX/frameY/frameWidth/frameHeight must be set together or "
+            f"not at all (got frameX={frame_x!r}, frameY={frame_y!r}, "
+            f"frameWidth={frame_width!r}, frameHeight={frame_height!r})"
+        )
+    return (int(frame_x), int(frame_y), int(frame_width), int(frame_height))
+
+
+async def _set_frame_roi(device: str, roi: tuple[int, int, int, int] | None) -> None:
+    """Set `CCD_FRAME`'s `X`/`Y`/`WIDTH`/`HEIGHT` elements to `roi`; skipped if `roi` is
+    `None` (full-sensor capture, see `_resolve_frame_roi`) or the device has no `CCD_FRAME`
+    property."""
+    if roi is None:
+        return
+    values = indi_messaging.get_property_values(device, "CCD_FRAME")
+    if values is None:
+        return
+    x, y, width, height = roi
+    await indi_messaging.send_property(
+        device,
+        "CCD_FRAME",
+        {"X": str(x), "Y": str(y), "WIDTH": str(width), "HEIGHT": str(height)},
     )
 
 

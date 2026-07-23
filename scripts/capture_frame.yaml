@@ -4,7 +4,10 @@ description: >
   Captures a single frame from the rig's camera and waits for it to complete. A thin,
   reusable wrapper around the capture_frame step primitive so composed sequences can
   `run_script: capture_frame` instead of repeating a raw capture_frame step — see
-  docs/Design.md's "Composing scripts" section.
+  docs/Design.md's "Composing scripts" section. gain/offset default to leaving the
+  device's current setting alone (not sent at all) rather than some fixed number, since
+  there's no universally safe default. frameX/frameY/frameWidth/frameHeight default to
+  capturing the full sensor; if you set any one of them, set all four.
 pausable: false
 parameters:
   exposureSeconds:
@@ -26,6 +29,30 @@ parameters:
     required: false
     default: 1
     description: Vertical pixel binning, if the camera supports it.
+  gain:
+    type: number
+    required: false
+    description: Sensor gain, if the camera supports it. Omit to leave the device's current setting alone.
+  offset:
+    type: number
+    required: false
+    description: Sensor offset, if the camera supports it. Omit to leave the device's current setting alone.
+  frameX:
+    type: integer
+    required: false
+    description: Sub-frame left edge, in pixels. Set together with frameY/frameWidth/frameHeight, or omit all four for the full sensor.
+  frameY:
+    type: integer
+    required: false
+    description: Sub-frame top edge, in pixels. Set together with frameX/frameWidth/frameHeight, or omit all four for the full sensor.
+  frameWidth:
+    type: integer
+    required: false
+    description: Sub-frame width, in pixels. Set together with frameX/frameY/frameHeight, or omit all four for the full sensor.
+  frameHeight:
+    type: integer
+    required: false
+    description: Sub-frame height, in pixels. Set together with frameX/frameY/frameWidth, or omit all four for the full sensor.
 steps:
   - step: capture_frame
     role: camera
@@ -33,3 +60,9 @@ steps:
     frameType: "{{ frameType }}"
     binningX: "{{ binningX }}"
     binningY: "{{ binningY }}"
+    gain: "{{ gain }}"
+    offset: "{{ offset }}"
+    frameX: "{{ frameX }}"
+    frameY: "{{ frameY }}"
+    frameWidth: "{{ frameWidth }}"
+    frameHeight: "{{ frameHeight }}"

@@ -235,6 +235,59 @@ def test_capture_frame_step_rejects_an_invalid_frame_type() -> None:
         )
 
 
+def test_capture_frame_step_gain_offset_and_frame_roi_default_to_none() -> None:
+    step = script_store.CaptureFrameStep(step="capture_frame", role="camera", exposureSeconds=5)
+
+    assert step.gain is None
+    assert step.offset is None
+    assert step.frameX is None
+    assert step.frameY is None
+    assert step.frameWidth is None
+    assert step.frameHeight is None
+
+
+def test_capture_frame_step_accepts_gain_offset_and_frame_roi_as_literals() -> None:
+    step = script_store.CaptureFrameStep(
+        step="capture_frame",
+        role="camera",
+        exposureSeconds=5,
+        gain=100,
+        offset=10,
+        frameX=0,
+        frameY=0,
+        frameWidth=1920,
+        frameHeight=1080,
+    )
+
+    assert step.gain == 100
+    assert step.offset == 10
+    assert step.frameX == 0
+    assert step.frameY == 0
+    assert step.frameWidth == 1920
+    assert step.frameHeight == 1080
+
+
+def test_capture_frame_step_accepts_gain_offset_and_frame_roi_as_references() -> None:
+    step = script_store.CaptureFrameStep(
+        step="capture_frame",
+        role="camera",
+        exposureSeconds=5,
+        gain="{{ gain }}",
+        offset="{{ offset }}",
+        frameX="{{ frameX }}",
+        frameY="{{ frameY }}",
+        frameWidth="{{ frameWidth }}",
+        frameHeight="{{ frameHeight }}",
+    )
+
+    assert step.gain == "{{ gain }}"
+    assert step.offset == "{{ offset }}"
+    assert step.frameX == "{{ frameX }}"
+    assert step.frameY == "{{ frameY }}"
+    assert step.frameWidth == "{{ frameWidth }}"
+    assert step.frameHeight == "{{ frameHeight }}"
+
+
 def test_select_filter_step_parses_with_a_slot_and_default_timeout() -> None:
     step = script_store.SelectFilterStep(step="select_filter", role="filterWheel", slot=2)
 

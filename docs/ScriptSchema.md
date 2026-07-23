@@ -193,6 +193,9 @@ a disconnected device) would otherwise hang the run forever.
 | `exposureSeconds` | number | yes | Exposure length. |
 | `frameType` | string | no (default `"Light"`) | One of `"Light"`, `"Dark"`, `"Flat"`, `"Bias"` — matches INDI's `CCD_FRAME_TYPE` values. |
 | `binningX` / `binningY` | integer | no (default `1`) | Pixel binning, if the camera supports it. |
+| `gain` | number | no (default: leave the device's current setting alone) | Sensor gain, if the camera supports it (INDI's `CCD_GAIN`). Unlike `binningX`/`binningY`, omitting this never sends a command — there's no universally safe default gain to fall back to. |
+| `offset` | number | no (default: leave the device's current setting alone) | Sensor offset, if the camera supports it (INDI's `CCD_OFFSET`). Same "omit to leave alone" behavior as `gain`. |
+| `frameX` / `frameY` / `frameWidth` / `frameHeight` | integer | no (default: full sensor) | A sub-frame (region of interest) to capture, if the camera supports it (INDI's `CCD_FRAME`). Must be set together — a partial set (e.g. only `frameWidth`) is a `scriptFailed` result at execution time, not caught upfront at `run_script` time (matching `select_filter`'s `filterName` resolution), since any of the four may be a parameter reference whose resolved value isn't known until then. |
 
 Captured frames are stored on the INDI Device and reported back through the script result — see
 [Design.md § Frame storage metadata](Design.md#frame-storage-metadata) (`frame_store`, INDIMCP-10)

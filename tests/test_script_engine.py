@@ -1299,6 +1299,282 @@ async def test_execute_script_capture_frame_skips_frame_type_and_binning_when_un
     )
 
 
+async def test_execute_script_capture_frame_sets_gain_and_offset_when_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "gain": 100,
+                "offset": 10,
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name in ("CCD_GAIN", "CCD_OFFSET"):
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_any_call("CCD Simulator", "CCD_GAIN", {"GAIN": "100.0"})
+    send_property.assert_any_call("CCD Simulator", "CCD_OFFSET", {"OFFSET": "10.0"})
+
+
+async def test_execute_script_capture_frame_skips_gain_and_offset_when_not_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset gain/offset means "leave the device's current setting alone", not "set to some
+    default" — so no CCD_GAIN/CCD_OFFSET command should be sent at all, even though the
+    device supports both."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name in ("CCD_GAIN", "CCD_OFFSET"):
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"}
+    )
+
+
+async def test_execute_script_capture_frame_skips_gain_and_offset_when_reference_resolves_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike the step above, gain/offset are templated (not omitted) here — matching the
+    shape of the real built-in capture_frame.yaml, which always templates them and relies
+    on the calling script's own declared parameter defaulting to None when unsupplied."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        parameters={
+            "gain": {"type": "number", "required": False},
+            "offset": {"type": "number", "required": False},
+        },
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "gain": "{{ gain }}",
+                "offset": "{{ offset }}",
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name in ("CCD_GAIN", "CCD_OFFSET"):
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"}
+    )
+
+
+async def test_execute_script_capture_frame_skips_gain_and_offset_when_undefined_on_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even when gain/offset are explicitly requested, a device with no CCD_GAIN/CCD_OFFSET
+    property (not every camera exposes adjustable gain/offset) is skipped, not an error."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "gain": 100,
+                "offset": 10,
+            }
+        ],
+    )
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"}
+    )
+
+
+async def test_execute_script_capture_frame_substitutes_parameter_references_in_gain_and_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        parameters={
+            "gain": {"type": "number", "required": True},
+            "offset": {"type": "number", "required": True},
+        },
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "gain": "{{ gain }}",
+                "offset": "{{ offset }}",
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name in ("CCD_GAIN", "CCD_OFFSET"):
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {"gain": 200, "offset": 20})
+
+    send_property.assert_any_call("CCD Simulator", "CCD_GAIN", {"GAIN": "200"})
+    send_property.assert_any_call("CCD Simulator", "CCD_OFFSET", {"OFFSET": "20"})
+
+
+async def test_execute_script_capture_frame_sets_sub_frame_roi_when_all_four_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameX": 100,
+                "frameY": 200,
+                "frameWidth": 800,
+                "frameHeight": 600,
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name == "CCD_FRAME":
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_any_call(
+        "CCD Simulator",
+        "CCD_FRAME",
+        {"X": "100", "Y": "200", "WIDTH": "800", "HEIGHT": "600"},
+    )
+
+
+async def test_execute_script_capture_frame_skips_sub_frame_roi_when_none_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name == "CCD_FRAME":
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"}
+    )
+
+
+async def test_execute_script_capture_frame_skips_sub_frame_roi_when_undefined_on_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameX": 0,
+                "frameY": 0,
+                "frameWidth": 800,
+                "frameHeight": 600,
+            }
+        ],
+    )
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"}
+    )
+
+
+async def test_execute_script_capture_frame_rejects_a_partial_sub_frame_roi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only frameWidth/frameHeight set, no frameX/frameY — doesn't map to a valid CCD_FRAME
+    command, so this must fail loudly rather than silently capture the wrong region."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameWidth": 800,
+                "frameHeight": 600,
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(
+        script_engine.ScriptExecutionError,
+        match="frameX/frameY/frameWidth/frameHeight must be set together",
+    ):
+        await script_engine.execute_script("capture", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
 async def test_execute_script_capture_frame_tags_saved_frame_with_run_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
