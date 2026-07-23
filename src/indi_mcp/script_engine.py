@@ -1307,6 +1307,8 @@ def _add_focuser_fields(ctx: _ExecutionContext, fields: fits_headers.FitsHeaderF
     position_values = indi_messaging.get_property_values(focuser.device, "ABS_FOCUS_POSITION")
     if position_values is not None:
         with contextlib.suppress(KeyError, TypeError, ValueError):
+            # INDI reports this as a float-formatted string ("12345.0"); truncate to whole
+            # steps rather than round, matching FOCUS_ABSOLUTE_POSITION's own integer meaning.
             fields["FOCUSPOS"] = (
                 int(float(position_values["FOCUS_ABSOLUTE_POSITION"])),
                 "Focuser position in steps",
