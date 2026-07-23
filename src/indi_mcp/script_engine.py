@@ -1034,6 +1034,8 @@ async def _execute_capture_frame(
     binning_y = _substitute(step.binningY, params)
     gain = _substitute(step.gain, params) if step.gain is not None else None
     offset = _substitute(step.offset, params) if step.offset is not None else None
+    gain = float(gain) if gain is not None else None
+    offset = float(offset) if offset is not None else None
     frame_x = _substitute(step.frameX, params) if step.frameX is not None else None
     frame_y = _substitute(step.frameY, params) if step.frameY is not None else None
     frame_width = _substitute(step.frameWidth, params) if step.frameWidth is not None else None

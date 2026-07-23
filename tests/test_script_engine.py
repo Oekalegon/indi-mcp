@@ -1454,8 +1454,42 @@ async def test_execute_script_capture_frame_substitutes_parameter_references_in_
 
     await script_engine.execute_script("capture", "test-rig", {"gain": 200, "offset": 20})
 
-    send_property.assert_any_call("CCD Simulator", "CCD_GAIN", {"GAIN": "200"})
-    send_property.assert_any_call("CCD Simulator", "CCD_OFFSET", {"OFFSET": "20"})
+    send_property.assert_any_call("CCD Simulator", "CCD_GAIN", {"GAIN": "200.0"})
+    send_property.assert_any_call("CCD Simulator", "CCD_OFFSET", {"OFFSET": "20.0"})
+
+
+async def test_execute_script_capture_frame_rejects_a_non_numeric_runtime_gain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed gain (e.g. a buggy client passing a non-numeric string) must fail cleanly
+    rather than being sent to CCD_GAIN as-is."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        parameters={"gain": {"type": "string", "required": True}},
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "gain": "{{ gain }}",
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name == "CCD_GAIN":
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(ValueError, match="could not convert string to float"):
+        await script_engine.execute_script("capture", "test-rig", {"gain": "not-a-number"})
+
+    send_property.assert_not_awaited()
 
 
 async def test_execute_script_capture_frame_sets_sub_frame_roi_when_all_four_given(
