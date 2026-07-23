@@ -23,7 +23,7 @@ messaging layer) a `type` field naming the underlying INDI property type. `kind`
 | `propertyCommand` | messaging | `new*Vector` | A command was sent to a property (client → server). |
 | `propertyDeleted` | messaging | `delProperty` | A property (or, if `name` is absent, a whole device) was removed. |
 | `message` | messaging | `message` | A driver/device log message, not tied to a specific property. |
-| `scriptStarted`, `scriptProgress`, `scriptCompleted`, `scriptFailed`, `scriptCancelled`, `scriptPaused`, `scriptResumed`, `scriptPauseRejected` | scripting | — | See [Design.md § Calling scripts and script results](Design.md#calling-scripts-and-script-results); field reference in [Scripting layer envelope](#scripting-layer-envelope) below. |
+| `scriptStarted`, `scriptProgress`, `scriptMessage`, `scriptCompleted`, `scriptFailed`, `scriptCancelled`, `scriptPaused`, `scriptResumed`, `scriptPauseRejected` | scripting | — | See [Design.md § Calling scripts and script results](Design.md#calling-scripts-and-script-results); field reference in [Scripting layer envelope](#scripting-layer-envelope) below. `scriptMessage` (INDIMCP-58) is never returned by `get_script_status` — see that row below. |
 
 `type` (messaging `kind`s only) is one of `text`, `number`, `switch`, `light`, `blob`, matching
 INDI's `Text`/`Number`/`Switch`/`Light`/`BLOB` vectors. It is `null` for `message` and
@@ -216,13 +216,23 @@ bare `runId` to poll with).
 | `kind` | Additional fields |
 |---|---|
 | `scriptStarted` | `script` (string), `startedAt` (ISO 8601), `pausable` (boolean) |
-| `scriptProgress` | `step` (integer), `totalSteps` (integer \| null), `message` (string \| null) |
+| `scriptProgress` | `step` (integer), `totalSteps` (integer \| null), `message` (string \| null), `role` (string \| null), `device` (string \| null) |
+| `scriptMessage` | `message` (string), `role` (string \| null), `device` (string \| null) — **not** returned by `get_script_status` (see below) |
 | `scriptCompleted` | `finishedAt` (ISO 8601), `result` (script-defined summary object) |
 | `scriptFailed` | `failedAtStep` (integer), `error` (`{ "message": string }`) |
 | `scriptCancelled` | `cancelledAtStep` (integer), `finishedAt` (ISO 8601) |
 | `scriptPaused` | `pausedAtStep` (integer) |
 | `scriptResumed` | `resumedAtStep` (integer) |
 | `scriptPauseRejected` | `reason` (string) |
+
+`scriptProgress`'s `role`/`device` (INDIMCP-58) identify the rig component the step this
+progress reports on is acting on — `null` for a step with no single role of its own
+(`run_script`, a `count`-based `repeat`). `scriptMessage` is a lower-noise, message-only
+sibling of `scriptProgress` for a step handler to report per-invocation activity (e.g.
+`capture_frame` reporting the frame it just saved) without that being a numbered progress
+step — unlike every other `kind` in this table, it's **not** part of `get_script_status`'s
+"current status" response, since it's a point-in-time note rather than run state; a client
+only sees it live via `indi://scripts` or by replaying the event log.
 
 `error` is currently just `{ "message": string }` — `script_engine`'s own exceptions
 (`ScriptValidationError`/`ScriptPreconditionError`/`ScriptExecutionError`) carry a human-readable

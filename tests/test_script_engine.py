@@ -1214,6 +1214,44 @@ async def test_execute_script_capture_frame_sends_exposure_and_saves_the_drained
     assert result["framesCaptured"] == 1
 
 
+async def test_execute_script_capture_frame_reports_a_status_message_after_saving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`capture_frame` reports on `on_status` (INDIMCP-58) once the frame is saved — a
+    lower-noise channel than `on_progress`, which already fired before the step started."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    status: list[script_engine.ScriptStatusMessage] = []
+
+    await script_engine.execute_script("capture", "test-rig", {}, on_status=status.append)
+
+    assert len(status) == 1
+    assert status[0]["role"] == "camera"
+    assert status[0]["device"] == "CCD Simulator"
+    assert status[0]["message"] == "Captured frame frame-1 (10 bytes)"
+
+
+async def test_execute_script_without_on_status_does_not_call_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`on_status=None` (the default) is a no-op, same as `on_progress=None` — a caller that
+    doesn't ask for the channel doesn't pay for it or need to handle it."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _mock_capture_frame_success(monkeypatch)
+
+    result = await script_engine.execute_script("capture", "test-rig", {})
+
+    assert result["framesCaptured"] == 1
+
+
 async def test_execute_script_capture_frame_sets_frame_type_and_binning_when_supported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3393,6 +3431,47 @@ async def test_execute_script_progress_message_is_none_without_a_description(
     await script_engine.execute_script("undescribed", "test-rig", {}, on_progress=progress.append)
 
     assert progress[0]["message"] is None
+
+
+async def test_execute_script_progress_reports_role_and_device_for_a_step_with_a_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("single", steps=[_set_property("camera", "CCD_EXPOSURE", {"X": "1"})])
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("single", "test-rig", {}, on_progress=progress.append)
+
+    assert progress[0]["role"] == "camera"
+    assert progress[0]["device"] == "CCD Simulator"
+
+
+async def test_execute_script_progress_role_and_device_are_none_for_a_roleless_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`repeat` (fixed `count`, no `until`) has no role of its own — distinct from the
+    steps nested inside it, which each report their own role/device normally."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "repeat-count",
+        steps=[
+            {
+                "step": "repeat",
+                "count": 2,
+                "steps": [_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+            }
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("repeat-count", "test-rig", {}, on_progress=progress.append)
+
+    assert progress[0]["role"] is None
+    assert progress[0]["device"] is None
+    assert progress[1]["role"] == "camera"
+    assert progress[1]["device"] == "CCD Simulator"
 
 
 async def test_execute_script_total_steps_counts_a_fixed_count_repeat(

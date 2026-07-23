@@ -94,9 +94,38 @@ Whether a run can be paused (see below) depends on the script itself — some sc
   "runId": "b3f1c2d4-...",
   "step": 3,
   "totalSteps": 10,
-  "message": "Capturing frame 3 of 10"
+  "message": "Capturing frame 3 of 10",
+  "role": "camera",
+  "device": "ZWO CCD ASI2600MM Pro"
 }
 ```
+
+`role`/`device` identify the rig component the step about to execute acts on — `role` exactly
+as the step (or its `condition`, for `wait_for`/`if`) declares it, `device` the INDI device
+name that role currently resolves to. Both are `null` for a step with no single role of its
+own (`run_script`, a `count`-based `repeat`, ...).
+
+**Status messages** — a lower-noise, message-only notification a step can emit mid-execution,
+distinct from the numbered `scriptProgress` events above (which fire before every step
+regardless of whether there's anything to say):
+
+```json
+{
+  "kind": "scriptMessage",
+  "runId": "b3f1c2d4-...",
+  "message": "Captured frame frame-42 (18874368 bytes)",
+  "role": "camera",
+  "device": "ZWO CCD ASI2600MM Pro"
+}
+```
+
+Not every primitive emits these — only ones with per-invocation activity worth surfacing
+live (`capture_frame` reporting the frame it just saved is the first case). Published to
+`indi://scripts` and the durable event log like every other status here, but **not** part of
+`get_script_status`'s "current status" reconnect story — it's a point-in-time note, not a
+change to the run's state, so it never overwrites what `get_script_status` returns for a
+`runId` (a reconnecting client polling for "what's the run doing right now" still gets the
+most recent `scriptProgress`/terminal status, not a stale message).
 
 **Completion** — a terminal status once the run finishes, successfully or not:
 
