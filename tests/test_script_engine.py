@@ -1215,6 +1215,72 @@ async def test_execute_script_capture_frame_sets_frame_type_and_binning_when_sup
     send_property.assert_any_call("CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "5.0"})
 
 
+async def test_execute_script_capture_frame_substitutes_parameter_reference_in_frame_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        parameters={"frameType": {"type": "string", "required": True}},
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "{{ frameType }}",
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name == "CCD_FRAME_TYPE":
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property, _ = _mock_capture_frame_success(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {"frameType": "Flat"})
+
+    send_property.assert_any_call("CCD Simulator", "CCD_FRAME_TYPE", {"FRAME_FLAT": "On"})
+
+
+async def test_execute_script_capture_frame_rejects_an_unknown_runtime_frame_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `frameType` script parameter isn't restricted to FrameType's four literals at the
+    Parameter level (it's just `type: string`), so a bad runtime value only gets caught here,
+    not at script-load time — must fail clearly rather than send a nonsense CCD_FRAME_TYPE
+    command."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        parameters={"frameType": {"type": "string", "required": True}},
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "{{ frameType }}",
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name == "CCD_FRAME_TYPE":
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(script_engine.ScriptValidationError, match="unknown frameType 'Bogus'"):
+        await script_engine.execute_script("capture", "test-rig", {"frameType": "Bogus"})
+
+    send_property.assert_not_awaited()
+
+
 async def test_execute_script_capture_frame_skips_frame_type_and_binning_when_undefined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

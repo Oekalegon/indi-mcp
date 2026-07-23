@@ -85,8 +85,15 @@ def test_builtin_capture_frame_script_is_a_thin_wrapper_around_the_capture_frame
     capture_frame = script_store.get_script("capture_frame")
 
     assert capture_frame.pausable is False
-    assert set(capture_frame.parameters) == {"exposureSeconds", "binningX", "binningY"}
+    assert set(capture_frame.parameters) == {
+        "exposureSeconds",
+        "frameType",
+        "binningX",
+        "binningY",
+    }
     assert capture_frame.parameters["exposureSeconds"].required is True
+    assert capture_frame.parameters["frameType"].required is False
+    assert capture_frame.parameters["frameType"].default == "Light"
     assert capture_frame.parameters["binningX"].required is False
     assert capture_frame.parameters["binningX"].default == 1
     assert capture_frame.parameters["binningY"].required is False
@@ -96,7 +103,7 @@ def test_builtin_capture_frame_script_is_a_thin_wrapper_around_the_capture_frame
     assert isinstance(step, script_store.CaptureFrameStep)
     assert step.role == "camera"
     assert step.exposureSeconds == "{{ exposureSeconds }}"
-    assert step.frameType == "Light"
+    assert step.frameType == "{{ frameType }}"
     assert step.binningX == "{{ binningX }}"
     assert step.binningY == "{{ binningY }}"
 

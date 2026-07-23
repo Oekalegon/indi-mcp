@@ -1062,12 +1062,20 @@ async def _execute_capture_frame(
 
 
 async def _set_frame_type(device: str, frame_type: str) -> None:
-    """Set `CCD_FRAME_TYPE` to `frame_type`; skipped (not an error) if undefined on this device."""
+    """Set `CCD_FRAME_TYPE` to `frame_type`; skipped (not an error) if undefined on this device.
+
+    `frame_type` is only pydantic-validated against `FrameType`'s four literals when
+    `CaptureFrameStep.frameType` is itself a literal in the YAML — a `"{{ paramName }}"`
+    reference is schema-valid at load time regardless of what the run eventually
+    substitutes for it (see `FrameTypeOrReference`), so a bad runtime value (e.g. a typo'd
+    `frameType` script parameter) reaches here unvalidated and must still be caught before
+    it becomes a nonsense `CCD_FRAME_TYPE` command.
+    """
     values = indi_messaging.get_property_values(device, "CCD_FRAME_TYPE")
     if values is None:
         return
     element = _FRAME_TYPE_ELEMENTS.get(frame_type)
-    if element is None:  # pragma: no cover - schema restricts frameType to these 4 values
+    if element is None:
         raise ScriptValidationError(f"unknown frameType {frame_type!r}")
     await indi_messaging.send_property(device, "CCD_FRAME_TYPE", {element: "On"})
 
