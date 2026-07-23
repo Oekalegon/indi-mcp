@@ -1308,7 +1308,7 @@ def _add_focuser_fields(ctx: _ExecutionContext, fields: fits_headers.FitsHeaderF
     if position_values is not None:
         with contextlib.suppress(KeyError, TypeError, ValueError):
             fields["FOCUSPOS"] = (
-                float(int(float(position_values["FOCUS_ABSOLUTE_POSITION"]))),
+                int(float(position_values["FOCUS_ABSOLUTE_POSITION"])),
                 "Focuser position in steps",
             )
     temperature_values = indi_messaging.get_property_values(focuser.device, "FOCUS_TEMPERATURE")

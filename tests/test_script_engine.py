@@ -2058,7 +2058,7 @@ async def test_execute_script_capture_frame_writes_focuser_fields_when_resolvabl
     await script_engine.execute_script("capture", "test-rig", {})
 
     fields = write_headers.call_args.args[1]
-    assert fields["FOCUSPOS"] == (12345.0, "Focuser position in steps")
+    assert fields["FOCUSPOS"] == (12345, "Focuser position in steps")
     assert fields["FOCUSTEM"] == (18.35, "[C] Focuser temperature")
 
 
@@ -2088,7 +2088,7 @@ async def test_execute_script_capture_frame_writes_focuser_position_without_temp
     await script_engine.execute_script("capture", "test-rig", {})
 
     fields = write_headers.call_args.args[1]
-    assert fields["FOCUSPOS"] == (12345.0, "Focuser position in steps")
+    assert fields["FOCUSPOS"] == (12345, "Focuser position in steps")
     assert "FOCUSTEM" not in fields
 
 

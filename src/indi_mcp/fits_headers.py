@@ -62,7 +62,7 @@ __all__ = [
     "write_fits_headers",
 ]
 
-FitsHeaderFields = dict[str, tuple[float | str, str]]
+FitsHeaderFields = dict[str, tuple[float | int | str, str]]
 """FITS keyword -> `(value, comment)`, the shape `write_fits_headers` writes directly."""
 
 # The Pi this runs on may have no internet access (see docs/Deployment.md's LAN-only
