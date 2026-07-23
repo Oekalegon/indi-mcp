@@ -180,6 +180,7 @@ class _Run:
     run_id: str
     script_id: str
     rig_id: str
+    location_id: str | None
     pausable: bool
     cancel_event: asyncio.Event
     pause_event: asyncio.Event
@@ -245,7 +246,11 @@ def _get_run(run_id: str) -> _Run:
 
 
 async def start_script(
-    script_id: str, rig_id: str, parameters: dict[str, Any] | None = None
+    script_id: str,
+    rig_id: str,
+    parameters: dict[str, Any] | None = None,
+    *,
+    location_id: str | None = None,
 ) -> ScriptRunStarted:
     """Start `script_id` against `rig_id` as a background task and return immediately.
 
@@ -257,6 +262,11 @@ async def start_script(
     failure. This mirrors Design.md: starting a script is asynchronous, so a
     bad `rig_id` or bad `parameters` is only discovered once the run
     actually begins, not before this call returns.
+
+    `location_id`, if given, is threaded straight through to `execute_script` — see its own
+    docstring (INDIMCP-60). Not echoed into the `scriptStarted`/`scriptProgress`/... envelopes
+    below, the same way `parameters` itself isn't: it's an input to the run, not part of its
+    reported status.
     """
     script = script_store.get_script(script_id)
     run_id = str(uuid.uuid4())
@@ -272,6 +282,7 @@ async def start_script(
         run_id=run_id,
         script_id=script_id,
         rig_id=rig_id,
+        location_id=location_id,
         pausable=script.pausable,
         cancel_event=asyncio.Event(),
         pause_event=asyncio.Event(),
@@ -320,6 +331,7 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             run.script_id,
             run.rig_id,
             parameters,
+            location_id=run.location_id,
             cancel_event=run.cancel_event,
             pause_event=run.pause_event,
             on_progress=on_progress,

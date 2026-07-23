@@ -5,7 +5,15 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
-from indi_mcp import frame_store, indi_messaging, rig_store, script_engine, script_store
+from indi_mcp import (
+    fits_headers,
+    frame_store,
+    indi_messaging,
+    observatory_store,
+    rig_store,
+    script_engine,
+    script_store,
+)
 
 _known_devices: list[str] = []
 
@@ -14,6 +22,7 @@ _known_devices: list[str] = []
 def _reset_stores() -> None:
     rig_store._rigs = {}
     script_store._scripts = {}
+    observatory_store._observatories = {}
     _known_devices.clear()
 
 
@@ -55,6 +64,18 @@ def _rig(*components: rig_store.Component, rig_id: str = "test-rig") -> rig_stor
     rig_store._rigs[rig.id] = rig
     _known_devices.extend(c.device for c in components if c.device is not None)
     return rig
+
+
+def _observatory(
+    observatory_id: str = "test-observatory", **fields: Any
+) -> observatory_store.Observatory:
+    fields.setdefault("name", observatory_id)
+    fields.setdefault("latitudeDeg", 60.369722)
+    fields.setdefault("longitudeDeg", 11.363611)
+    fields.setdefault("elevationMeters", 350)
+    observatory = observatory_store.Observatory(id=observatory_id, **fields)
+    observatory_store._observatories[observatory.id] = observatory
+    return observatory
 
 
 def _script(script_id: str, **fields: Any) -> script_store.Script:
@@ -288,6 +309,16 @@ async def test_execute_script_raises_validation_error_for_unknown_rig_id(
 
     with pytest.raises(script_engine.ScriptValidationError, match="Unknown rig"):
         await script_engine.execute_script("cool", "does-not-exist", {})
+
+
+async def test_execute_script_raises_validation_error_for_unknown_location_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig()
+    _script("cool")
+
+    with pytest.raises(script_engine.ScriptValidationError, match="Unknown observatory"):
+        await script_engine.execute_script("cool", "test-rig", {}, location_id="does-not-exist")
 
 
 async def test_execute_script_raises_validation_error_for_run_script_to_a_since_removed_script(
@@ -1656,6 +1687,192 @@ async def test_execute_script_capture_frame_tags_saved_frame_with_run_id(
 
     save_frame.assert_called_once_with(
         b"fits-bytes", device="CCD Simulator", extension=".fits", run_id="run-42"
+    )
+
+
+_CELESTIAL_CONTEXT: fits_headers.CelestialContext = {
+    "sunAltitudeDeg": -30.0,
+    "moonSeparationDeg": 90.0,
+    "moonIlluminationFraction": 0.5,
+    "elongationDeg": 120.0,
+}
+
+
+async def test_execute_script_capture_frame_adds_celestial_context_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observatory = _observatory()
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "EQMod Mount" and name == "EQUATORIAL_EOD_COORD":
+            return {"RA": "2.767", "DEC": "62.52"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    compute = MagicMock(return_value=_CELESTIAL_CONTEXT)
+    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+    write_headers = MagicMock(return_value=b"fits-bytes-with-celestial-headers")
+    monkeypatch.setattr(fits_headers, "write_fits_headers", write_headers)
+
+    await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
+
+    compute.assert_called_once()
+    assert compute.call_args.kwargs["ra_hours"] == 2.767
+    assert compute.call_args.kwargs["dec_deg"] == 62.52
+    assert compute.call_args.kwargs["observatory"] == observatory
+    assert isinstance(compute.call_args.kwargs["at"], datetime)
+    write_headers.assert_called_once_with(b"fits-bytes", _CELESTIAL_CONTEXT)
+    save_frame.assert_called_once_with(
+        b"fits-bytes-with-celestial-headers",
+        device="CCD Simulator",
+        extension=".fits",
+        run_id=None,
+    )
+
+
+async def test_execute_script_capture_frame_skips_celestial_context_when_no_location_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    compute = MagicMock()
+    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    compute.assert_not_called()
+    save_frame.assert_called_once_with(
+        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
+    )
+
+
+async def test_execute_script_capture_frame_skips_celestial_context_when_rig_has_no_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rig with no `"mount"` component (e.g. a camera-only test rig) simply has nothing
+    for celestial context to be computed relative to — not an error."""
+    _observatory()
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    compute = MagicMock()
+    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+
+    await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
+
+    compute.assert_not_called()
+    save_frame.assert_called_once_with(
+        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
+    )
+
+
+async def test_execute_script_capture_frame_skips_celestial_context_when_mount_coords_undefined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mount is resolvable but isn't reporting `EQUATORIAL_EOD_COORD` at all (e.g. not
+    connected) — matches `_default_get_property_values`'s "undefined" default."""
+    _observatory()
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    compute = MagicMock()
+    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+
+    await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
+
+    compute.assert_not_called()
+    save_frame.assert_called_once_with(
+        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
+    )
+
+
+async def test_execute_script_capture_frame_skips_celestial_context_when_mount_coords_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _observatory()
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "EQMod Mount" and name == "EQUATORIAL_EOD_COORD":
+            return {"RA": "not-a-number", "DEC": "62.52"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    compute = MagicMock()
+    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+
+    await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
+
+    compute.assert_not_called()
+    save_frame.assert_called_once_with(
+        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
+    )
+
+
+async def test_execute_script_capture_frame_saves_unmodified_data_when_not_a_fits_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`write_fits_headers` returning `None` (not a FITS file) falls back to the drained
+    bytes unmodified — the same file that would have been saved before this feature existed."""
+    _observatory()
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[{"step": "capture_frame", "role": "camera", "exposureSeconds": 5}],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "EQMod Mount" and name == "EQUATORIAL_EOD_COORD":
+            return {"RA": "2.767", "DEC": "62.52"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    monkeypatch.setattr(
+        fits_headers, "compute_celestial_context", MagicMock(return_value=_CELESTIAL_CONTEXT)
+    )
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
+
+    save_frame.assert_called_once_with(
+        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
     )
 
 

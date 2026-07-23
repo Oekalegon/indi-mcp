@@ -13,6 +13,7 @@ dependencies = [
     "indiweb>=1.1.0",
     "pyyaml>=6.0.3",
     "psutil>=7.0.0",
+    "astropy>=8.0.1",
 ]
 
 [project.scripts]

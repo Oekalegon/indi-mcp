@@ -410,7 +410,10 @@ async def save_script(script: Script, overwrite: bool = False) -> Script:
 
 @mcp.tool()
 async def run_script(
-    script_id: str, rig_id: str, parameters: dict[str, Any] | None = None
+    script_id: str,
+    rig_id: str,
+    parameters: dict[str, Any] | None = None,
+    location_id: str | None = None,
 ) -> ScriptRunStarted:
     """Start `script_id` running against `rig_id`, returning immediately with a `runId`.
 
@@ -420,8 +423,13 @@ async def run_script(
     results`) — poll `get_script_status(runId)` for progress and the
     eventual `scriptCompleted`/`scriptFailed` outcome, or use
     `cancel_script`/`pause_script`/`resume_script` to control the run.
+
+    `location_id`, if given, identifies a saved `Observatory` (see `save_observatory`) this
+    run should use — currently only consumed by `capture_frame`'s celestial-context FITS
+    headers (INDIMCP-60), best-effort even when given (see `script_engine.execute_script`).
+    An unknown `location_id` fails the run (`scriptFailed`), matching a bad `rig_id`.
     """
-    return await script_runs.start_script(script_id, rig_id, parameters)
+    return await script_runs.start_script(script_id, rig_id, parameters, location_id=location_id)
 
 
 @mcp.tool()

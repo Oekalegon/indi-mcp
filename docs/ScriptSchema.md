@@ -321,6 +321,14 @@ A nested `run_script` step (see "Script composition" below) does **not** repeat 
 script in a single run, top-level and nested, resolves roles against the one rig selected when
 the run started.
 
+`run_script` also accepts an optional `locationId`, naming a saved observatory location
+([ObservatorySchema.md](ObservatorySchema.md)) — unlike `rigId`, this doesn't affect role
+resolution at all; today it's consumed only by `capture_frame`'s celestial-context FITS
+headers (see [FitsHeaders.md](FitsHeaders.md), INDIMCP-60), and even then best-effort (an
+omitted `locationId`, or a rig with no resolvable `"mount"` component, simply means those
+headers aren't written — not a run failure). An unknown `locationId` *is* a validation
+error at run start, matching a bad `rigId`.
+
 **A `role` field is a normal substitutable field, not a special case.** Like any other step
 field, it may be a literal (`role: mount`) or a `"{{ paramName }}"` reference to one of the
 script's own declared `parameters` (see "Parameter references" above) — for example, a single

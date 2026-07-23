@@ -26,7 +26,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
-from indi_mcp import frame_store, indi_messaging, rig_store, script_store
+from indi_mcp import (
+    fits_headers,
+    frame_store,
+    indi_messaging,
+    observatory_store,
+    rig_store,
+    script_store,
+)
+from indi_mcp.observatory_store import Observatory
 from indi_mcp.script_store import (
     CaptureFrameStep,
     Condition,
@@ -190,6 +198,14 @@ class _ExecutionContext:
     component doesn't declare one of them — only consulted by
     `set_focus_position`'s range check (`_check_focus_position_in_range`);
     every other step ignores it.
+
+    `observatory`/`mount_device` are only consulted by `capture_frame`'s celestial-context
+    FITS headers (`_add_celestial_context`, INDIMCP-60). `observatory` is `None` whenever the
+    run wasn't given a `location_id`. `mount_device` is resolved once here (best-effort — the
+    rig might not declare a `"mount"` role at all) rather than via `role_to_device`, since a
+    script whose only step is `capture_frame` never otherwise needs a mount resolved: without
+    this, celestial context would only ever be available to scripts that happen to also
+    reference `"mount"` for some other reason (e.g. a `slew` step earlier in the same run).
     """
 
     role_to_device: dict[str, str]
@@ -203,6 +219,8 @@ class _ExecutionContext:
     frames_captured: int = field(default=0)
     role_to_slots: dict[str, dict[int, str]] = field(default_factory=dict)
     role_to_focus_range: dict[str, tuple[int, int]] = field(default_factory=dict)
+    observatory: Observatory | None = None
+    mount_device: str | None = None
 
 
 async def execute_script(
@@ -210,12 +228,19 @@ async def execute_script(
     rig_id: str,
     parameters: dict[str, Any],
     *,
+    location_id: str | None = None,
     cancel_event: asyncio.Event | None = None,
     pause_event: asyncio.Event | None = None,
     on_progress: Callable[[ScriptProgress], None] | None = None,
     run_id: str | None = None,
 ) -> ScriptResult:
     """Run the script identified by `script_id` against the rig identified by `rig_id`.
+
+    `location_id`, if given, identifies an `Observatory` (`docs/ObservatorySchema.md`) an
+    unknown id raises `ScriptValidationError`, matching `rig_id`'s own behavior. Omitted
+    (the default), no observatory-dependent enrichment happens at all — currently only
+    `capture_frame`'s celestial-context FITS headers (INDIMCP-60) consume it, and that's
+    itself best-effort even when a location *is* given (see `_ExecutionContext`).
 
     `run_id` is purely a label passed through to `capture_frame` steps
     (which tag each frame they save with it via `frame_store.save_frame`)
@@ -255,6 +280,7 @@ async def execute_script(
     """
     script = _get_script(script_id)
     rig = _get_rig(rig_id)
+    observatory = _get_observatory(location_id) if location_id is not None else None
     scripts = _collect_reachable_scripts(script)
     resolved_params = _resolve_parameters(script, parameters)
     usage = _collect_role_usage(script, resolved_params, scripts)
@@ -287,6 +313,8 @@ async def execute_script(
             for role, component in role_to_component.items()
             if component.minPosition is not None and component.maxPosition is not None
         },
+        observatory=observatory,
+        mount_device=_resolve_mount_device(rig) if observatory is not None else None,
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
     return {
@@ -322,6 +350,30 @@ def _get_rig(rig_id: str) -> rig_store.Rig:
         return rig_store.get_rig(rig_id)
     except ValueError as exc:
         raise ScriptValidationError(str(exc)) from exc
+
+
+def _get_observatory(location_id: str) -> Observatory:
+    """`observatory_store.get_observatory`, wrapped so an unknown id raises
+    `ScriptValidationError`. See `_get_script` for why.
+    """
+    try:
+        return observatory_store.get_observatory(location_id)
+    except ValueError as exc:
+        raise ScriptValidationError(str(exc)) from exc
+
+
+def _resolve_mount_device(rig: rig_store.Rig) -> str | None:
+    """The rig's `"mount"` role resolved to a device, or `None` if it isn't resolvable.
+
+    Best-effort, unlike `_resolve_role_to_component`'s normal strict behavior — a rig with
+    no `"mount"` component (or an ambiguous one) simply means celestial-context FITS headers
+    aren't available for this run, not that the run itself should fail; nothing about
+    `capture_frame` otherwise requires a mount to exist.
+    """
+    try:
+        return _resolve_role_to_component(rig, {"mount"})["mount"].device
+    except ScriptValidationError:
+        return None
 
 
 def _collect_reachable_scripts(
@@ -1026,6 +1078,10 @@ async def _execute_capture_frame(
     `frameX`/`frameY`/`frameWidth`/`frameHeight` are resolved together via
     `_resolve_frame_roi`, which raises `ScriptExecutionError` for a partial specification
     rather than silently capturing the wrong region.
+
+    Once the BLOB is drained, `_add_celestial_context` best-effort enriches it with
+    Sun/Moon/elongation FITS headers (INDIMCP-60) before it's saved — see that function and
+    `fits_headers.py` for what's written and why it's best-effort rather than required.
     """
     device = _resolve_device(_substituted_role(step.role, params), ctx)
     exposure = float(_substitute(step.exposureSeconds, params))
@@ -1063,6 +1119,7 @@ async def _execute_capture_frame(
     data, extension = await _wait_for_blob(
         ctx, device, _CCD_BLOB_VECTOR, since, deadline - asyncio.get_running_loop().time()
     )
+    data = await _add_celestial_context(ctx, data, since)
 
     metadata = await asyncio.to_thread(
         frame_store.save_frame, data, device=device, extension=extension, run_id=ctx.run_id
@@ -1076,6 +1133,52 @@ async def _execute_capture_frame(
         metadata["frameId"],
         metadata["sizeBytes"],
     )
+
+
+async def _add_celestial_context(ctx: _ExecutionContext, data: bytes, at: datetime) -> bytes:
+    """Best-effort: enrich `data`'s FITS header with Sun/Moon/elongation context, or return
+    it unmodified.
+
+    Skipped entirely — not an error — if any of: no `location_id` was given for this run
+    (`ctx.observatory is None`), the rig has no resolvable `"mount"` component
+    (`ctx.mount_device is None`, see `_resolve_mount_device`), the mount isn't currently
+    reporting `EQUATORIAL_EOD_COORD` (undefined, or a value that doesn't parse as RA/Dec —
+    e.g. disconnected), or `data` isn't a FITS file at all (`fits_headers.write_fits_headers`
+    returns `None`). Each of these is a legitimate, unremarkable state for a run that simply
+    isn't set up for celestial-context enrichment, not a sign anything went wrong with the
+    capture itself — matching this whole step's best-effort, optional-property philosophy.
+
+    Both the celestial-geometry computation and the FITS header rewrite are synchronous,
+    non-trivial CPU work (coordinate frame transforms; reading/writing a potentially
+    multi-megabyte file in memory) — wrapped in `asyncio.to_thread`, same as
+    `frame_store.save_frame`, so a capture on this single-core-constrained device doesn't
+    block the event loop while it runs.
+    """
+    if ctx.observatory is None or ctx.mount_device is None:
+        return data
+    coords = indi_messaging.get_property_values(ctx.mount_device, "EQUATORIAL_EOD_COORD")
+    if coords is None:
+        return data
+    try:
+        ra_hours = float(coords["RA"])
+        dec_deg = float(coords["DEC"])
+    except (KeyError, TypeError, ValueError):
+        logger.warning(
+            "Mount %s reported an unusable EQUATORIAL_EOD_COORD %r; skipping "
+            "celestial-context FITS headers",
+            ctx.mount_device,
+            coords,
+        )
+        return data
+    context = await asyncio.to_thread(
+        fits_headers.compute_celestial_context,
+        ra_hours=ra_hours,
+        dec_deg=dec_deg,
+        observatory=ctx.observatory,
+        at=at,
+    )
+    updated = await asyncio.to_thread(fits_headers.write_fits_headers, data, context)
+    return updated if updated is not None else data
 
 
 async def _set_frame_type(device: str, frame_type: str) -> None:

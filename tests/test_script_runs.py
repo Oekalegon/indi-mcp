@@ -120,6 +120,26 @@ async def test_start_script_raises_for_unknown_script_id() -> None:
         await script_runs.start_script("cool", "test-rig", {})
 
 
+async def test_start_script_passes_location_id_through_to_execute_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("noop")
+    calls: list[str | None] = []
+    original = script_engine.execute_script
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs.get("location_id"))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(script_engine, "execute_script", spy)
+
+    started = await script_runs.start_script("noop", "test-rig", {}, location_id="home-backyard")
+    await _await_run(started["runId"])
+
+    assert calls == ["home-backyard"]
+
+
 async def test_run_completes_and_get_script_status_reports_scriptCompleted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
