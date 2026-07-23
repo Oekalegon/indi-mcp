@@ -196,6 +196,7 @@ a disconnected device) would otherwise hang the run forever.
 | `gain` | number | no (default: leave the device's current setting alone) | Sensor gain, if the camera supports it (INDI's `CCD_GAIN`). Unlike `binningX`/`binningY`, omitting this never sends a command — there's no universally safe default gain to fall back to. |
 | `offset` | number | no (default: leave the device's current setting alone) | Sensor offset, if the camera supports it (INDI's `CCD_OFFSET`). Same "omit to leave alone" behavior as `gain`. |
 | `frameX` / `frameY` / `frameWidth` / `frameHeight` | integer | no (default: full sensor) | A sub-frame (region of interest) to capture, if the camera supports it (INDI's `CCD_FRAME`). Must be set together — a partial set (e.g. only `frameWidth`) is a `scriptFailed` result at execution time, not caught upfront at `run_script` time (matching `select_filter`'s `filterName` resolution), since any of the four may be a parameter reference whose resolved value isn't known until then. |
+| `objectName` | string | no | A caller-supplied label for what a `Light` frame targets, written verbatim to the FITS `OBJECT` keyword — never resolved to RA/Dec or a catalog entry (unlike `slew`'s `target.objectName`). Ignored for `Dark`/`Flat`/`Bias` frames. See [FitsHeaders.md](FitsHeaders.md). |
 
 Captured frames are stored on the INDI Device and reported back through the script result — see
 [Design.md § Frame storage metadata](Design.md#frame-storage-metadata) (`frame_store`, INDIMCP-10)
@@ -320,6 +321,15 @@ role), rather than the engine silently picking one.
 A nested `run_script` step (see "Script composition" below) does **not** repeat `rigId` — every
 script in a single run, top-level and nested, resolves roles against the one rig selected when
 the run started.
+
+`run_script` also accepts an optional `locationId`, naming a saved observatory location
+([ObservatorySchema.md](ObservatorySchema.md)) — unlike `rigId`, this doesn't affect role
+resolution at all; today it's consumed only by `capture_frame`'s Sun/Moon/elongation FITS
+headers on `Light` frames (see [FitsHeaders.md](FitsHeaders.md), INDIMCP-60), and even then
+best-effort (an omitted `locationId`, or a rig with no resolvable `"mount"` component, simply
+means those specific headers aren't written — not a run failure; `capture_frame`'s other FITS
+enrichment, including telescope position, doesn't need a `locationId` at all). An unknown
+`locationId` *is* a validation error at run start, matching a bad `rigId`.
 
 **A `role` field is a normal substitutable field, not a special case.** Like any other step
 field, it may be a literal (`role: mount`) or a `"{{ paramName }}"` reference to one of the

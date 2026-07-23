@@ -20,13 +20,22 @@ them — see `execute_script`'s `run_id` parameter.
 """
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
-from indi_mcp import frame_store, indi_messaging, rig_store, script_store
+from indi_mcp import (
+    fits_headers,
+    frame_store,
+    indi_messaging,
+    observatory_store,
+    rig_store,
+    script_store,
+)
+from indi_mcp.observatory_store import Observatory
 from indi_mcp.script_store import (
     CaptureFrameStep,
     Condition,
@@ -93,6 +102,16 @@ _FRAME_TYPE_ELEMENTS = {
     "Bias": "FRAME_BIAS",
 }
 """`CaptureFrameStep.frameType` value -> `CCD_FRAME_TYPE` switch element name (standard INDI)."""
+
+_FILTER_RELEVANT_FRAME_TYPES = frozenset({"Light", "Flat"})
+"""`frameType` values for which `FILTER` is written to the FITS header (INDIMCP-60).
+
+A Flat is taken *through* a specific filter, same as a Light — the whole point of a Flat is
+to calibrate that filter's illumination/vignetting pattern, so its filter matters just as
+much. A Dark/Bias is filter-independent (taken with the sensor read out the same way
+regardless of what's in the optical path, typically capped) — recording a filter name on one
+would be misleading, implying a dependency that doesn't exist.
+"""
 
 
 class ScriptValidationError(Exception):
@@ -190,6 +209,25 @@ class _ExecutionContext:
     component doesn't declare one of them — only consulted by
     `set_focus_position`'s range check (`_check_focus_position_in_range`);
     every other step ignores it.
+
+    `role_to_component` is every strictly-resolved role's full rig `Component` (the same
+    resolution `role_to_device`/`role_to_slots`/`role_to_focus_range` are each derived a
+    slice of) — only consulted by `capture_frame`'s FITS header enrichment, for data a step's
+    own resolved role already carries that none of those narrower views expose (e.g. the
+    camera's `pixelSizeMicron`, for `SCALE`).
+
+    `observatory`/`optional_role_components` are also only consulted by `capture_frame`'s FITS
+    header enrichment (`_add_fits_header_fields`, INDIMCP-60). `observatory` is `None`
+    whenever the run wasn't given a `location_id`. `optional_role_components` holds
+    `"mount"`/`"filterWheel"`/`"telescope"`/`"focuser"`, each resolved once here best-effort
+    (see `_resolve_optional_role_component`) — absent from the dict entirely if the rig
+    doesn't declare that role at all — rather than via `role_to_device`/`role_to_component`,
+    since a script whose only step is `capture_frame` never otherwise needs any of them
+    resolved: without this, telescope-position/filter-name/focuser/telescope-optics headers
+    would only ever be available to scripts that happen to also reference those roles for
+    some other reason (e.g. a `slew`/`select_filter`/`set_focus_position` step earlier in the
+    same run). `"telescope"` in particular has no `device` of its own at all (it isn't a
+    driver — see `docs/RigSchema.md`), so it could never appear in `role_to_device` regardless.
     """
 
     role_to_device: dict[str, str]
@@ -203,6 +241,9 @@ class _ExecutionContext:
     frames_captured: int = field(default=0)
     role_to_slots: dict[str, dict[int, str]] = field(default_factory=dict)
     role_to_focus_range: dict[str, tuple[int, int]] = field(default_factory=dict)
+    role_to_component: dict[str, rig_store.Component] = field(default_factory=dict)
+    observatory: Observatory | None = None
+    optional_role_components: dict[str, rig_store.Component] = field(default_factory=dict)
 
 
 async def execute_script(
@@ -210,12 +251,19 @@ async def execute_script(
     rig_id: str,
     parameters: dict[str, Any],
     *,
+    location_id: str | None = None,
     cancel_event: asyncio.Event | None = None,
     pause_event: asyncio.Event | None = None,
     on_progress: Callable[[ScriptProgress], None] | None = None,
     run_id: str | None = None,
 ) -> ScriptResult:
     """Run the script identified by `script_id` against the rig identified by `rig_id`.
+
+    `location_id`, if given, identifies an `Observatory` (`docs/ObservatorySchema.md`) an
+    unknown id raises `ScriptValidationError`, matching `rig_id`'s own behavior. Omitted
+    (the default), no observatory-dependent enrichment happens at all — currently only
+    `capture_frame`'s celestial-context FITS headers (INDIMCP-60) consume it, and that's
+    itself best-effort even when a location *is* given (see `_ExecutionContext`).
 
     `run_id` is purely a label passed through to `capture_frame` steps
     (which tag each frame they save with it via `frame_store.save_frame`)
@@ -255,6 +303,7 @@ async def execute_script(
     """
     script = _get_script(script_id)
     rig = _get_rig(rig_id)
+    observatory = _get_observatory(location_id) if location_id is not None else None
     scripts = _collect_reachable_scripts(script)
     resolved_params = _resolve_parameters(script, parameters)
     usage = _collect_role_usage(script, resolved_params, scripts)
@@ -270,6 +319,12 @@ async def execute_script(
     known_devices = set(indi_messaging.list_devices())
     _warn_on_missing_devices(rig_id, known_devices)
     _check_devices_connected(role_to_device, known_devices, usage.connection_managed_roles)
+
+    optional_role_components: dict[str, rig_store.Component] = {}
+    for optional_role in _OPTIONAL_METADATA_ROLES:
+        component = _resolve_optional_role_component(rig, optional_role)
+        if component is not None:
+            optional_role_components[optional_role] = component
 
     ctx = _ExecutionContext(
         role_to_device=role_to_device,
@@ -287,6 +342,9 @@ async def execute_script(
             for role, component in role_to_component.items()
             if component.minPosition is not None and component.maxPosition is not None
         },
+        role_to_component=role_to_component,
+        observatory=observatory,
+        optional_role_components=optional_role_components,
     )
     await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
     return {
@@ -322,6 +380,45 @@ def _get_rig(rig_id: str) -> rig_store.Rig:
         return rig_store.get_rig(rig_id)
     except ValueError as exc:
         raise ScriptValidationError(str(exc)) from exc
+
+
+def _get_observatory(location_id: str) -> Observatory:
+    """`observatory_store.get_observatory`, wrapped so an unknown id raises
+    `ScriptValidationError`. See `_get_script` for why.
+    """
+    try:
+        return observatory_store.get_observatory(location_id)
+    except ValueError as exc:
+        raise ScriptValidationError(str(exc)) from exc
+
+
+_OPTIONAL_METADATA_ROLES = ("mount", "filterWheel", "telescope", "focuser")
+"""Roles `execute_script` best-effort resolves into `_ExecutionContext.optional_role_components`
+for `capture_frame`'s FITS header enrichment (INDIMCP-60) — see that field's docstring."""
+
+
+def _resolve_optional_role_component(rig: rig_store.Rig, role: str) -> rig_store.Component | None:
+    """`role` resolved to a rig component, or `None` if it isn't resolvable.
+
+    Best-effort, unlike `_resolve_role_to_component`'s normal strict behavior — a rig with no
+    matching component for `role` (or an ambiguous one) simply means the FITS-header fields
+    that depend on it (telescope optics, filter name, focuser position, ... — see
+    `_add_fits_header_fields`) aren't available for this run, not that the run itself should
+    fail; nothing about `capture_frame` otherwise requires any of `_OPTIONAL_METADATA_ROLES`
+    to exist.
+
+    Deliberately **not** built on `_resolve_role_to_component`, unlike other best-effort
+    lookups in this module: that helper requires `component.device is not None` (see its own
+    docstring), which is correct for a role that must resolve to a live INDI device to send
+    commands to — but a `"telescope"` component has no `device` of its own at all (it isn't a
+    driver — `docs/RigSchema.md`), so that filter would make a `"telescope"` role
+    unresolvable here even when the rig declares one perfectly validly. This only reads
+    already-known rig config, so it doesn't need a device to exist.
+    """
+    matches = [component for component in rig.components if component.role == role]
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
 
 def _collect_reachable_scripts(
@@ -1026,8 +1123,14 @@ async def _execute_capture_frame(
     `frameX`/`frameY`/`frameWidth`/`frameHeight` are resolved together via
     `_resolve_frame_roi`, which raises `ScriptExecutionError` for a partial specification
     rather than silently capturing the wrong region.
+
+    Once the BLOB is drained, `_add_fits_header_fields` best-effort enriches it with capture/
+    telescope-optics/focuser/filter/telescope-position/Sun-Moon-elongation FITS headers
+    (INDIMCP-60) before it's saved — see that function and `fits_headers.py` for what's
+    written and why each part is best-effort rather than required.
     """
-    device = _resolve_device(_substituted_role(step.role, params), ctx)
+    role = _substituted_role(step.role, params)
+    device = _resolve_device(role, ctx)
     exposure = float(_substitute(step.exposureSeconds, params))
     frame_type = _substitute(step.frameType, params)
     binning_x = _substitute(step.binningX, params)
@@ -1036,6 +1139,7 @@ async def _execute_capture_frame(
     offset = _substitute(step.offset, params) if step.offset is not None else None
     gain = float(gain) if gain is not None else None
     offset = float(offset) if offset is not None else None
+    object_name = _substitute(step.objectName, params) if step.objectName is not None else None
     frame_x = _substitute(step.frameX, params) if step.frameX is not None else None
     frame_y = _substitute(step.frameY, params) if step.frameY is not None else None
     frame_width = _substitute(step.frameWidth, params) if step.frameWidth is not None else None
@@ -1063,6 +1167,9 @@ async def _execute_capture_frame(
     data, extension = await _wait_for_blob(
         ctx, device, _CCD_BLOB_VECTOR, since, deadline - asyncio.get_running_loop().time()
     )
+    data = await _add_fits_header_fields(
+        ctx, data, device, role, frame_type, gain, offset, object_name, since
+    )
 
     metadata = await asyncio.to_thread(
         frame_store.save_frame, data, device=device, extension=extension, run_id=ctx.run_id
@@ -1076,6 +1183,209 @@ async def _execute_capture_frame(
         metadata["frameId"],
         metadata["sizeBytes"],
     )
+
+
+async def _add_fits_header_fields(
+    ctx: _ExecutionContext,
+    data: bytes,
+    device: str,
+    camera_role: str,
+    frame_type: str,
+    gain: float | None,
+    offset: float | None,
+    object_name: str | None,
+    at: datetime,
+) -> bytes:
+    """Best-effort: enrich `data`'s FITS header with capture metadata, or return it unmodified.
+
+    Four tiers, per `docs/FitsHeaders.md`:
+
+    - **Every frame type** (`DATE-OBS`, `INSTRUME`, `GAIN`/`OFFSET` if set, `FOCALLEN`/
+      `APTDIA`/`TELESCOP`/`SCALE` from the rig's `"telescope"` component, `FOCUSPOS`/
+      `FOCUSTEM` from a resolvable `"focuser"`, `SITELAT`/`SITELONG` if a `location_id` was
+      given): metadata about the capture/setup itself, meaningful for a calibration frame
+      exactly as much as a Light frame (a Dark's gain/offset needs to match the Lights it
+      calibrates; the telescope/site didn't change because this frame happens to be a Flat).
+    - **`Light`/`Flat` frames** (`FILTER`, if resolvable — `_FILTER_RELEVANT_FRAME_TYPES`): a
+      Flat is taken *through* a specific filter, same as a Light — calibrating that filter's
+      illumination pattern is the whole point of it. A Dark/Bias is filter-independent
+      (typically capped, sensor readout the same regardless of the optical path), so
+      recording a filter on one would imply a dependency that doesn't exist.
+    - **`Light` frames only, no location needed** (`OBJCTRA`/`OBJCTDEC`/`RA`/`DEC`/`EQUINOX`
+      — target position converted to J2000, matching Ekos's convention exactly, see
+      `fits_headers.compute_target_position` — `PIERSIDE` if the mount reports one, `OBJECT`
+      if the caller supplied `objectName`): a Dark/Flat/Bias frame isn't captured "of"
+      anything at the mount's current pointing in any meaningful sense — the mount can be
+      tracking, parked, or capped during a calibration sequence — so telescope position would
+      be misleading rather than useful, not just unnecessary work.
+    - **`Light` frames, additionally needing a `location_id`** (`OBJCTALT`/`OBJCTAZ`/
+      `AIRMASS`/`SUNALT`/`MOONSEP`/`MOONPHSE`/`ELONGAT`): needs an observer location to
+      compute an Alt-Az frame, unlike the raw EOD/J2000 target position above.
+
+    Each field is independently best-effort: an unresolvable role, an undefined/unparseable
+    device property, or `data` not being a FITS file at all (`fits_headers.write_fits_headers`
+    returns `None`) all just mean that specific field (or the whole enrichment) is skipped —
+    never a failed capture.
+
+    The celestial-geometry computation and the FITS header rewrite are synchronous,
+    non-trivial CPU work (coordinate frame transforms; reading/writing a potentially
+    multi-megabyte file in memory) — wrapped in `asyncio.to_thread`, same as
+    `frame_store.save_frame`, so a capture on this single-core-constrained device doesn't
+    block the event loop while it runs.
+    """
+    fields: fits_headers.FitsHeaderFields = {
+        "DATE-OBS": (_format_fits_datetime(at), "UTC date/time of exposure start"),
+        "INSTRUME": (device, "Camera (INDI device name)"),
+    }
+    if gain is not None:
+        fields["GAIN"] = (gain, "Camera gain")
+    if offset is not None:
+        fields["OFFSET"] = (offset, "Camera offset")
+    _add_telescope_optics_fields(ctx, camera_role, fields)
+    _add_focuser_fields(ctx, fields)
+    if ctx.observatory is not None:
+        fields["SITELAT"] = (ctx.observatory.latitudeDeg, "[deg] Observatory latitude")
+        fields["SITELONG"] = (ctx.observatory.longitudeDeg, "[deg] Observatory longitude")
+
+    if frame_type in _FILTER_RELEVANT_FRAME_TYPES:
+        _add_filter_field(ctx, fields)
+
+    if frame_type == "Light":
+        if object_name is not None:
+            fields["OBJECT"] = (object_name, "Object")
+        await _add_mount_derived_fields(ctx, fields, at)
+
+    updated = await asyncio.to_thread(fits_headers.write_fits_headers, data, fields)
+    return updated if updated is not None else data
+
+
+def _format_fits_datetime(at: datetime) -> str:
+    """`at` (must be UTC) as a FITS-standard `DATE-OBS` string: no timezone suffix, since FITS
+    `DATE-OBS` is implicitly UTC — a literal `+00:00`/`Z` isn't valid in that field."""
+    return at.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+
+
+def _add_telescope_optics_fields(
+    ctx: _ExecutionContext, camera_role: str, fields: fits_headers.FitsHeaderFields
+) -> None:
+    """`FOCALLEN`/`APTDIA`/`TELESCOP` from the rig's `"telescope"` component, plus `SCALE`
+    (plate scale) if the camera's own resolved component also declares `pixelSizeMicron`.
+
+    `"telescope"` components have no INDI `device` of their own (see
+    `_resolve_optional_role_component`'s docstring) — everything here comes from rig
+    config, not a live property read.
+    """
+    telescope = ctx.optional_role_components.get("telescope")
+    if telescope is None:
+        return
+    if telescope.focalLengthMm is not None:
+        fields["FOCALLEN"] = (telescope.focalLengthMm, "[mm] Telescope focal length")
+    if telescope.apertureMm is not None:
+        fields["APTDIA"] = (telescope.apertureMm, "[mm] Telescope aperture")
+    name = " ".join(part for part in (telescope.make, telescope.model) if part)
+    if name:
+        fields["TELESCOP"] = (name, "Telescope")
+
+    camera = ctx.role_to_component.get(camera_role)
+    if (
+        telescope.focalLengthMm is not None
+        and camera is not None
+        and camera.pixelSizeMicron is not None
+    ):
+        # Plate scale: arcsec/pixel = 206265 * pixel_size_um / (focal_length_mm * 1000).
+        scale = 206.265 * camera.pixelSizeMicron / telescope.focalLengthMm
+        fields["SCALE"] = (round(scale, 5), "[arcsec/pixel] Plate scale")
+
+
+def _add_focuser_fields(ctx: _ExecutionContext, fields: fits_headers.FitsHeaderFields) -> None:
+    """`FOCUSPOS`/`FOCUSTEM` from a resolvable `"focuser"`'s `ABS_FOCUS_POSITION`/
+    `FOCUS_TEMPERATURE` — independently best-effort (a focuser reporting a position but not a
+    temperature, or vice versa, is common; not every focuser has a temperature probe)."""
+    focuser = ctx.optional_role_components.get("focuser")
+    if focuser is None or focuser.device is None:
+        return
+    position_values = indi_messaging.get_property_values(focuser.device, "ABS_FOCUS_POSITION")
+    if position_values is not None:
+        with contextlib.suppress(KeyError, TypeError, ValueError):
+            # INDI reports this as a float-formatted string ("12345.0"); truncate to whole
+            # steps rather than round, matching FOCUS_ABSOLUTE_POSITION's own integer meaning.
+            fields["FOCUSPOS"] = (
+                int(float(position_values["FOCUS_ABSOLUTE_POSITION"])),
+                "Focuser position in steps",
+            )
+    temperature_values = indi_messaging.get_property_values(focuser.device, "FOCUS_TEMPERATURE")
+    if temperature_values is not None:
+        with contextlib.suppress(KeyError, TypeError, ValueError):
+            fields["FOCUSTEM"] = (
+                round(float(temperature_values["TEMPERATURE"]), 2),
+                "[C] Focuser temperature",
+            )
+
+
+def _add_filter_field(ctx: _ExecutionContext, fields: fits_headers.FitsHeaderFields) -> None:
+    """`FILTER` from a resolvable `"filterWheel"`'s current `FILTER_SLOT`, resolved to a name
+    via the rig component's own `slots` map — `None` (skipped) if the wheel isn't resolvable,
+    `FILTER_SLOT` is undefined/unparseable, or the current slot isn't in that map."""
+    filter_wheel = ctx.optional_role_components.get("filterWheel")
+    if filter_wheel is None or filter_wheel.device is None:
+        return
+    values = indi_messaging.get_property_values(filter_wheel.device, "FILTER_SLOT")
+    if values is None:
+        return
+    try:
+        slot = int(values["FILTER_SLOT_VALUE"])
+    except (KeyError, TypeError, ValueError):
+        return
+    filter_name = (filter_wheel.slots or {}).get(slot)
+    if filter_name is not None:
+        fields["FILTER"] = (filter_name, "Filter name")
+
+
+async def _add_mount_derived_fields(
+    ctx: _ExecutionContext, fields: fits_headers.FitsHeaderFields, at: datetime
+) -> None:
+    """`PIERSIDE` and, if the mount is resolvable and reporting a parseable
+    `EQUATORIAL_EOD_COORD`, target position (J2000, always) and celestial context
+    (additionally, only with a `location_id` — see `_add_fits_header_fields`)."""
+    mount = ctx.optional_role_components.get("mount")
+    if mount is None or mount.device is None:
+        return
+
+    pier_side_values = indi_messaging.get_property_values(mount.device, "TELESCOPE_PIER_SIDE")
+    if pier_side_values is not None:
+        if pier_side_values.get("PIER_WEST") == "On":
+            fields["PIERSIDE"] = ("WEST", "Mount pier side")
+        elif pier_side_values.get("PIER_EAST") == "On":
+            fields["PIERSIDE"] = ("EAST", "Mount pier side")
+
+    coords = indi_messaging.get_property_values(mount.device, "EQUATORIAL_EOD_COORD")
+    if coords is None:
+        return
+    try:
+        ra_hours, dec_deg = float(coords["RA"]), float(coords["DEC"])
+    except (KeyError, TypeError, ValueError):
+        logger.warning(
+            "Mount %s reported an unusable EQUATORIAL_EOD_COORD %r; skipping "
+            "telescope-position/celestial-context FITS headers",
+            mount.device,
+            coords,
+        )
+        return
+
+    position = await asyncio.to_thread(
+        fits_headers.compute_target_position, ra_hours=ra_hours, dec_deg=dec_deg, at=at
+    )
+    fields.update(fits_headers.target_position_fields(position))
+
+    if ctx.observatory is not None:
+        context = await asyncio.to_thread(
+            fits_headers.compute_celestial_context,
+            ra_hours=ra_hours,
+            dec_deg=dec_deg,
+            observatory=ctx.observatory,
+            at=at,
+        )
+        fields.update(fits_headers.celestial_context_fields(context))
 
 
 async def _set_frame_type(device: str, frame_type: str) -> None:

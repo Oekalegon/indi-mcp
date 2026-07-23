@@ -163,10 +163,12 @@ async def test_save_observatory_delegates_to_observatory_store_with_the_overwrit
 async def test_run_script_delegates_to_script_runs_start_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, str, dict]] = []
+    calls: list[tuple[str, str, dict, str | None]] = []
 
-    async def fake_start_script(script_id: str, rig_id: str, parameters: dict) -> dict:
-        calls.append((script_id, rig_id, parameters))
+    async def fake_start_script(
+        script_id: str, rig_id: str, parameters: dict, *, location_id: str | None = None
+    ) -> dict:
+        calls.append((script_id, rig_id, parameters, location_id))
         return {"kind": "scriptStarted", "runId": "abc"}
 
     monkeypatch.setattr(script_runs, "start_script", fake_start_script)
@@ -174,7 +176,25 @@ async def test_run_script_delegates_to_script_runs_start_script(
     result = await server.run_script("capture_sequence", "test-rig", {"count": 10})
 
     assert result == {"kind": "scriptStarted", "runId": "abc"}
-    assert calls == [("capture_sequence", "test-rig", {"count": 10})]
+    assert calls == [("capture_sequence", "test-rig", {"count": 10}, None)]
+
+
+async def test_run_script_passes_location_id_through_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str | None] = []
+
+    async def fake_start_script(
+        script_id: str, rig_id: str, parameters: dict, *, location_id: str | None = None
+    ) -> dict:
+        calls.append(location_id)
+        return {"kind": "scriptStarted", "runId": "abc"}
+
+    monkeypatch.setattr(script_runs, "start_script", fake_start_script)
+
+    await server.run_script("capture_sequence", "test-rig", {}, "home-backyard")
+
+    assert calls == ["home-backyard"]
 
 
 def test_get_script_status_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
