@@ -1119,7 +1119,7 @@ async def _execute_capture_frame(
     data, extension = await _wait_for_blob(
         ctx, device, _CCD_BLOB_VECTOR, since, deadline - asyncio.get_running_loop().time()
     )
-    data = await _add_celestial_context(ctx, data, since)
+    data = await _add_celestial_context(ctx, data, frame_type, since)
 
     metadata = await asyncio.to_thread(
         frame_store.save_frame, data, device=device, extension=extension, run_id=ctx.run_id
@@ -1135,11 +1135,17 @@ async def _execute_capture_frame(
     )
 
 
-async def _add_celestial_context(ctx: _ExecutionContext, data: bytes, at: datetime) -> bytes:
+async def _add_celestial_context(
+    ctx: _ExecutionContext, data: bytes, frame_type: str, at: datetime
+) -> bytes:
     """Best-effort: enrich `data`'s FITS header with Sun/Moon/elongation context, or return
     it unmodified.
 
-    Skipped entirely — not an error — if any of: no `location_id` was given for this run
+    Skipped entirely — not an error — if any of: `frame_type` isn't `"Light"` (Dark/Flat/Bias
+    calibration frames aren't captured "of" anything at the mount's current pointing in any
+    meaningful sense — a mount can be tracking, parked, or capped during a calibration
+    sequence, and celestial context computed from wherever it happens to be pointed would be
+    misleading rather than useful), no `location_id` was given for this run
     (`ctx.observatory is None`), the rig has no resolvable `"mount"` component
     (`ctx.mount_device is None`, see `_resolve_mount_device`), the mount isn't currently
     reporting `EQUATORIAL_EOD_COORD` (undefined, or a value that doesn't parse as RA/Dec —
@@ -1154,6 +1160,8 @@ async def _add_celestial_context(ctx: _ExecutionContext, data: bytes, at: dateti
     `frame_store.save_frame`, so a capture on this single-core-constrained device doesn't
     block the event loop while it runs.
     """
+    if frame_type != "Light":
+        return data
     if ctx.observatory is None or ctx.mount_device is None:
         return data
     coords = indi_messaging.get_property_values(ctx.mount_device, "EQUATORIAL_EOD_COORD")

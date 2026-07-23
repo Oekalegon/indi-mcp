@@ -1739,6 +1739,47 @@ async def test_execute_script_capture_frame_adds_celestial_context_when_availabl
     )
 
 
+async def test_execute_script_capture_frame_skips_celestial_context_for_a_calibration_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Dark/Flat/Bias frame isn't captured "of" anything at the mount's current pointing
+    in any meaningful sense — celestial context should be skipped even when location, mount,
+    and coordinates are all otherwise available."""
+    _observatory()
+    _rig(
+        rig_store.Component(role="mount", id="mount-1", device="EQMod Mount"),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "Dark",
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "EQMod Mount" and name == "EQUATORIAL_EOD_COORD":
+            return {"RA": "2.767", "DEC": "62.52"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _, save_frame = _mock_capture_frame_success(monkeypatch)
+    compute = MagicMock()
+    monkeypatch.setattr(fits_headers, "compute_celestial_context", compute)
+
+    await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
+
+    compute.assert_not_called()
+    save_frame.assert_called_once_with(
+        b"fits-bytes", device="CCD Simulator", extension=".fits", run_id=None
+    )
+
+
 async def test_execute_script_capture_frame_skips_celestial_context_when_no_location_given(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

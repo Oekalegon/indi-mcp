@@ -34,6 +34,10 @@ Adding these headers is **best-effort**, not a requirement of every capture. All
 following are legitimate, unremarkable reasons a captured frame won't have them — none of
 them fail the capture itself:
 
+- **The frame isn't a `Light` frame.** A Dark/Flat/Bias calibration frame isn't captured "of"
+  anything at the mount's current pointing in any meaningful sense — the mount can be
+  tracking, parked, or capped during a calibration sequence — so celestial context computed
+  from wherever it happens to be pointed would be misleading rather than useful.
 - **No `location_id` given for the run.** `run_script`/`execute_script` take an optional
   `location_id` naming a saved [`Observatory`](ObservatorySchema.md); without one, there's
   no location to compute the Sun/Moon's position relative to, so nothing is attempted.
