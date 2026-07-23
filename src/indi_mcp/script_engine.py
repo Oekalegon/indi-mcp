@@ -102,6 +102,16 @@ _FRAME_TYPE_ELEMENTS = {
 }
 """`CaptureFrameStep.frameType` value -> `CCD_FRAME_TYPE` switch element name (standard INDI)."""
 
+_FILTER_RELEVANT_FRAME_TYPES = frozenset({"Light", "Flat"})
+"""`frameType` values for which `FILTER` is written to the FITS header (INDIMCP-60).
+
+A Flat is taken *through* a specific filter, same as a Light — the whole point of a Flat is
+to calibrate that filter's illumination/vignetting pattern, so its filter matters just as
+much. A Dark/Bias is filter-independent (taken with the sensor read out the same way
+regardless of what's in the optical path, typically capped) — recording a filter name on one
+would be misleading, implying a dependency that doesn't exist.
+"""
+
 
 class ScriptValidationError(Exception):
     """Raised before execution starts: the script/rig/parameters themselves are invalid.
@@ -1161,13 +1171,17 @@ async def _add_fits_header_fields(
 ) -> bytes:
     """Best-effort: enrich `data`'s FITS header with capture metadata, or return it unmodified.
 
-    Two tiers, per `docs/FitsHeaders.md`:
+    Three tiers, per `docs/FitsHeaders.md`:
 
-    - **Every frame type** (`DATE-OBS`, `INSTRUME`, `GAIN`/`OFFSET` if set, `FILTER` if
-      resolvable): this is metadata about the capture itself — camera, filter, gain, offset,
-      when — meaningful for a calibration frame exactly as much as a Light frame (a Dark's
-      gain/offset needs to match the Lights it calibrates; a Flat needs to record which
-      filter it was taken through).
+    - **Every frame type** (`DATE-OBS`, `INSTRUME`, `GAIN`/`OFFSET` if set): metadata about
+      the capture itself — camera, gain, offset, when — meaningful for a calibration frame
+      exactly as much as a Light frame (a Dark's gain/offset needs to match the Lights it
+      calibrates).
+    - **`Light`/`Flat` frames** (`FILTER`, if resolvable — `_FILTER_RELEVANT_FRAME_TYPES`): a
+      Flat is taken *through* a specific filter, same as a Light — calibrating that filter's
+      illumination pattern is the whole point of it. A Dark/Bias is filter-independent
+      (typically capped, sensor readout the same regardless of the optical path), so
+      recording a filter on one would imply a dependency that doesn't exist.
     - **`Light` frames only** (telescope `RA`/`DEC`, and — additionally, only if a
       `location_id` was given — Sun/Moon/elongation context): a Dark/Flat/Bias frame isn't
       captured "of" anything at the mount's current pointing in any meaningful sense — the
@@ -1194,9 +1208,10 @@ async def _add_fits_header_fields(
         fields["GAIN"] = (gain, "Camera gain")
     if offset is not None:
         fields["OFFSET"] = (offset, "Camera offset")
-    filter_name = _current_filter_name(ctx)
-    if filter_name is not None:
-        fields["FILTER"] = (filter_name, "Filter name")
+    if frame_type in _FILTER_RELEVANT_FRAME_TYPES:
+        filter_name = _current_filter_name(ctx)
+        if filter_name is not None:
+            fields["FILTER"] = (filter_name, "Filter name")
 
     if frame_type == "Light":
         pointing = _current_mount_pointing(ctx)

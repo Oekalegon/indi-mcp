@@ -1,20 +1,22 @@
 # FITS Headers
 
 `capture_frame` (the step primitive and the built-in script — see [ScriptSchema.md](ScriptSchema.md#capture_frame))
-saves each captured frame's bytes essentially as received from the camera driver: whatever
-the driver itself already wrote into the FITS header (`EXPTIME`, `CCD-TEMP`, and similar —
-driver-dependent, not something this project controls) is preserved as-is, and indi-mcp adds
-its own enrichment keywords on top. This is implemented in
-[`fits_headers.py`](../src/indi_mcp/fits_headers.py) plus `script_engine._add_fits_header_fields`
-(INDIMCP-60).
+saves each captured frame's bytes essentially as received from the camera driver, then adds
+its own enrichment keywords on top. This page documents **every** FITS header property that
+ends up in a captured frame — both the ones indi-mcp itself writes, and the ones typically
+already present from the driver — so it's a complete reference for what to expect in a file,
+not just a changelog of what INDIMCP-60 added.
 
-## Keywords written
+indi-mcp's own enrichment is implemented in
+[`fits_headers.py`](../src/indi_mcp/fits_headers.py) plus `script_engine._add_fits_header_fields`.
+
+## Keywords indi-mcp writes
 
 ### Every frame type
 
-This tier is about the capture itself — camera, filter, gain, offset, when — meaningful for
-a calibration frame exactly as much as a Light frame (a Dark's gain/offset needs to match the
-Lights it calibrates; a Flat needs to record which filter it was taken through).
+This tier is about the capture itself — camera, gain, offset, when — meaningful for a
+calibration frame exactly as much as a Light frame (a Dark's gain/offset needs to match the
+Lights it calibrates).
 
 | Keyword | Meaning | Comment written | Written when |
 |---|---|---|---|
@@ -22,12 +24,23 @@ Lights it calibrates; a Flat needs to record which filter it was taken through).
 | `INSTRUME` | Camera used (its INDI device name) | `Camera (INDI device name)` | Always |
 | `GAIN` | Sensor gain, if `capture_frame`'s `gain` was set | `Camera gain` | Only if `gain` was set — omitting it means "leave the device's current setting alone", not "gain unknown" |
 | `OFFSET` | Sensor offset, if `capture_frame`'s `offset` was set | `Camera offset` | Only if `offset` was set, same reasoning as `GAIN` |
-| `FILTER` | Currently selected filter's name | `Filter name` | Only if the rig has a resolvable `"filterWheel"` component reporting a slot that's in the rig's own `slots` map |
 
 `DATE-OBS` is always overwritten with indi-mcp's own authoritative timestamp (taken right
 before `CCD_EXPOSURE` is sent) rather than only filled in if missing — this server knows
 precisely when it commanded the exposure to start, at least as accurately as whatever the
 driver itself would stamp.
+
+### `Light` and `Flat` frames
+
+| Keyword | Meaning | Comment written | Written when |
+|---|---|---|---|
+| `FILTER` | Currently selected filter's name | `Filter name` | `frameType` is `Light` or `Flat`, **and** the rig has a resolvable `"filterWheel"` component reporting a slot that's in the rig's own `slots` map |
+
+A Flat is taken *through* a specific filter, same as a Light — calibrating that filter's
+illumination/vignetting pattern is the whole point of it, so its filter matters just as much.
+A Dark/Bias is filter-independent (typically capped, sensor readout the same regardless of
+the optical path) — recording a filter name on one would imply a dependency that doesn't
+exist, even when the filter wheel is otherwise perfectly resolvable.
 
 ### `Light` frames only
 
@@ -59,13 +72,44 @@ FITS card well within its 80-character limit).
 this project stay consistent with the rest of that ecosystem. `ELONGAT` has no prior
 convention in either — chosen to match their 8-character keyword style.
 
+## Keywords the driver typically already writes
+
+These are **not** written or controlled by indi-mcp — they come from the INDI camera driver
+itself, before the BLOB ever reaches this server, and are preserved as-is (indi-mcp only ever
+adds keywords, never removes or renames anything already present). Listed here for a
+complete picture of what a captured frame usually contains, not as something this project
+guarantees: exact keywords, presence, and values are driver-dependent, and this isn't
+verified against every driver this project might run against.
+
+Standard INDI CCD driver convention (`indibase`'s `CCD` class) typically includes:
+
+| Keyword | Typical meaning |
+|---|---|
+| `EXPTIME` | Exposure length, in seconds |
+| `DARKTIME` | For a Dark frame, the actual dark-current integration time |
+| `PIXSIZE1` / `PIXSIZE2` | Pixel size, in microns |
+| `XBINNING` / `YBINNING` | Pixel binning |
+| `XPIXSZ` / `YPIXSZ` | Binned pixel size, in microns |
+| `FRAME` / `IMAGETYP` | Frame type (`Light`/`Dark`/`Flat`/`Bias`) |
+| `CCD-TEMP` | Sensor temperature, if the camera reports one |
+| `FOCALLEN` | Telescope focal length, in mm (if configured on the driver side) |
+| `APTDIA` | Telescope aperture, in mm (if configured on the driver side) |
+| `BAYERPAT` | Bayer matrix pattern, for a one-shot-color sensor |
+| `ROWORDER` | Pixel row readout order |
+
+Where indi-mcp's own keywords overlap in *purpose* with one of these (`GAIN`/`OFFSET`
+specifically — some drivers report their own), indi-mcp's value reflects exactly what was
+commanded for this capture via `capture_frame`'s `gain`/`offset` fields, which is the more
+directly authoritative source for this specific exposure.
+
 ## Best-effort, not required
 
-Adding any of these headers is **best-effort**. All of the following are legitimate,
-unremarkable reasons a captured frame won't have some (or all) of them — none of them fail
-the capture itself:
+Adding any of indi-mcp's own headers is **best-effort**. All of the following are
+legitimate, unremarkable reasons a captured frame won't have some (or all) of them — none of
+them fail the capture itself:
 
-- **The frame isn't a `Light` frame** — skips the whole "Light frames only" tier above.
+- **The frame isn't `Light`/`Flat`** — skips `FILTER`.
+- **The frame isn't `Light`** — skips the whole "Light frames only" tier.
 - **No `location_id` given for the run** — skips `SUNALT`/`MOONSEP`/`MOONPHSE`/`ELONGAT`
   specifically (`RA`/`DEC` are unaffected).
 - **The rig has no resolvable `"mount"` component**, or the mount isn't reporting a

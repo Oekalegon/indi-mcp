@@ -1862,6 +1862,82 @@ async def test_execute_script_capture_frame_omits_filter_when_slot_not_in_rig_sl
     assert "FILTER" not in write_headers.call_args.args[1]
 
 
+async def test_execute_script_capture_frame_writes_filter_for_a_flat_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Flat is taken through a specific filter, same as a Light — calibrating that
+    filter's illumination pattern is the whole point of it."""
+    _rig(
+        rig_store.Component(
+            role="filterWheel", id="fw-1", device="ASI EFW", slots={1: "Ha", 2: "OIII"}
+        ),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": "Flat",
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "ASI EFW" and name == "FILTER_SLOT":
+            return {"FILTER_SLOT_VALUE": "2"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    assert write_headers.call_args.args[1]["FILTER"] == ("OIII", "Filter name")
+
+
+@pytest.mark.parametrize("frame_type", ["Dark", "Bias"])
+async def test_execute_script_capture_frame_omits_filter_for_dark_and_bias_frames(
+    monkeypatch: pytest.MonkeyPatch, frame_type: str
+) -> None:
+    """A Dark/Bias is filter-independent (typically capped, sensor readout the same
+    regardless of the optical path) — recording a filter would imply a dependency that
+    doesn't exist, even though the filter wheel is otherwise perfectly resolvable."""
+    _rig(
+        rig_store.Component(
+            role="filterWheel", id="fw-1", device="ASI EFW", slots={1: "Ha", 2: "OIII"}
+        ),
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"),
+    )
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 5,
+                "frameType": frame_type,
+            }
+        ],
+    )
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if device == "ASI EFW" and name == "FILTER_SLOT":
+            return {"FILTER_SLOT_VALUE": "2"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _mock_capture_frame_success(monkeypatch)
+    write_headers = _capture_frame_fields(monkeypatch)
+
+    await script_engine.execute_script("capture", "test-rig", {})
+
+    assert "FILTER" not in write_headers.call_args.args[1]
+
+
 async def test_execute_script_capture_frame_writes_telescope_position_and_celestial_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
