@@ -1,0 +1,80 @@
+id: capture_light_sequence
+name: Capture a sequence of light frames
+description: >
+  Cools the camera, slews to a fixed RA/Dec target, selects a filter, sets a
+  fixed focuser position, then captures count light frames — a composed
+  sequence built entirely from existing primitive/wrapper scripts and steps
+  (cool_camera, slew, select_filter, set_focus_position, capture_frame), see
+  docs/Design.md's "Composing scripts" section and docs/ScriptSchema.md's
+  example. Light frames are the one frame type that needs all four of mount
+  position, filter, focus, and camera temperature — flat/dark/bias
+  sequences each need a strict subset of these (see
+  capture_flat_sequence/capture_dark_sequence/capture_bias_sequence). Two
+  departures from docs/ScriptSchema.md's own top-of-doc example, both
+  because the primitives they'd need don't exist yet: `slew` targets a
+  fixed raDec rather than `objectName` (name resolution is INDIMCP-29), and
+  focus is a fixed `focusPosition` rather than a periodic
+  `run_script: focus every: 2` loop (autofocus is INDIMCP-43). Pausable:
+  capture_frame is the only step inside the repeat loop, so a pause request
+  only ever lands between frames, never mid-exposure.
+pausable: true
+parameters:
+  ra:
+    type: number
+    required: true
+    description: Right ascension of the target, in hours.
+  dec:
+    type: number
+    required: true
+    description: Declination of the target, in degrees.
+  objectName:
+    type: string
+    required: false
+    description: Caller-supplied label written verbatim to each frame's FITS OBJECT keyword.
+  filterName:
+    type: string
+    required: true
+    description: Name of the filter to select, matching the rig's filterWheel slots map.
+  focusPosition:
+    type: integer
+    required: true
+    description: >
+      Target absolute focuser position, within the rig's focuser component's
+      minPosition/maxPosition range.
+  targetTempC:
+    type: number
+    required: false
+    default: -10
+    description: Target sensor temperature, in degrees Celsius.
+  exposureSeconds:
+    type: number
+    required: true
+    description: Exposure length per frame, in seconds.
+  count:
+    type: integer
+    required: true
+    description: Number of light frames to capture.
+steps:
+  - step: run_script
+    script: cool_camera
+    parameters: { targetTempC: "{{ targetTempC }}" }
+  - step: slew
+    role: mount
+    target:
+      raDec:
+        ra: "{{ ra }}"
+        dec: "{{ dec }}"
+  - step: select_filter
+    role: filterWheel
+    filterName: "{{ filterName }}"
+  - step: set_focus_position
+    role: focuser
+    position: "{{ focusPosition }}"
+  - step: repeat
+    count: "{{ count }}"
+    steps:
+      - step: capture_frame
+        role: camera
+        exposureSeconds: "{{ exposureSeconds }}"
+        frameType: Light
+        objectName: "{{ objectName }}"

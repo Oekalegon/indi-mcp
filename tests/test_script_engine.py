@@ -1015,6 +1015,38 @@ async def test_execute_script_repeat_count_runs_the_right_number_of_times(
     assert result["stepsExecuted"] == 4
 
 
+async def test_execute_script_repeat_count_accepts_a_parameter_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`repeat.count` may be a `"{{ paramName }}"` reference, not just a literal — the caller
+    picks the frame count per run instead of it being fixed in the script file. This also
+    exercises `_count_total_steps` resolving the reference (not falling back to `None`),
+    since `stepsExecuted`'s total is only reported when it can be computed exactly."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "repeat-count-param",
+        parameters={"count": script_store.Parameter(type="integer", required=True)},
+        steps=[
+            {
+                "step": "repeat",
+                "count": "{{ count }}",
+                "steps": [_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    progress: list[dict] = []
+
+    result = await script_engine.execute_script(
+        "repeat-count-param", "test-rig", {"count": 5}, on_progress=progress.append
+    )
+
+    assert send_property.await_count == 5
+    assert result["stepsExecuted"] == 6
+    assert all(event["totalSteps"] == 6 for event in progress)
+
+
 async def test_execute_script_repeat_honors_every(monkeypatch: pytest.MonkeyPatch) -> None:
     _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
     _script(

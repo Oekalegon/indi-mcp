@@ -377,7 +377,7 @@ async def execute_script(
         on_progress=on_progress,
         scripts=scripts,
         run_id=run_id,
-        total_steps=_count_total_steps(script, scripts),
+        total_steps=_count_total_steps(script, scripts, resolved_params),
         role_to_slots={
             role: component.slots or {} for role, component in role_to_component.items()
         },
@@ -676,8 +676,10 @@ def _walk_role_usage(
             _walk_role_usage(step.else_, params, scripts, usage, _visited)
 
 
-def _count_total_steps(script: Script, scripts: dict[str, Script]) -> int | None:
-    """The exact number of steps a run of `script` will dispatch, or `None` if that isn't knowable.
+def _count_total_steps(
+    script: Script, scripts: dict[str, Script], params: dict[str, Any]
+) -> int | None:
+    """The exact number of steps a run of `script` (with `params`) will dispatch, or `None`.
 
     Walks the whole call tree (this script, plus every script it calls via
     `run_script`, transitively, resolved from `scripts` — the run's own
@@ -689,6 +691,13 @@ def _count_total_steps(script: Script, scripts: dict[str, Script]) -> int | None
     separate `run_script` steps naming the same callee) must be counted
     twice, not skipped the second time, and `script_store.load_scripts`
     already guarantees the call graph has no cycle to recurse into forever.
+
+    `params` threads each invocation's own concrete parameter values through
+    `run_script` calls exactly like `_collect_role_usage` does — a `repeat`
+    step's `count` may itself be a `"{{ paramName }}"` reference (see
+    `docs/ScriptSchema.md#parameter-references`), and every parameter value
+    reachable from the top-level call is already known before any step
+    runs, so this can resolve it exactly rather than falling back to `None`.
 
     This is only ever exact or `None`, never an estimate presented as if it
     were exact:
@@ -703,20 +712,24 @@ def _count_total_steps(script: Script, scripts: dict[str, Script]) -> int | None
       they happen to match, the count is unambiguous regardless of which
       branch actually runs.
     """
-    return _count_steps_list(script.steps, scripts)
+    return _count_steps_list(script.steps, scripts, params)
 
 
-def _count_steps_list(steps: list[Step], scripts: dict[str, Script]) -> int | None:
+def _count_steps_list(
+    steps: list[Step], scripts: dict[str, Script], params: dict[str, Any]
+) -> int | None:
     total = 0
     for step in steps:
-        count = _count_one_step(step, scripts)
+        count = _count_one_step(step, scripts, params)
         if count is None:
             return None
         total += count
     return total
 
 
-def _count_one_step(step: Step, scripts: dict[str, Script]) -> int | None:
+def _count_one_step(
+    step: Step, scripts: dict[str, Script], params: dict[str, Any]
+) -> int | None:
     if isinstance(step, RepeatStep):
         if step.until is not None:
             return None
@@ -725,16 +738,20 @@ def _count_one_step(step: Step, scripts: dict[str, Script]) -> int | None:
                 f"repeat step {step!r} has neither count nor until; "
                 "schema validation should have rejected this"
             )
-        body = _count_steps_list(step.steps, scripts)
-        return None if body is None else 1 + body * step.count
+        resolved_count = int(_substitute(step.count, params))
+        body = _count_steps_list(step.steps, scripts, params)
+        return None if body is None else 1 + body * resolved_count
     if isinstance(step, IfStep):
-        then_count = _count_steps_list(step.then, scripts)
-        else_count = _count_steps_list(step.else_, scripts)
+        then_count = _count_steps_list(step.then, scripts, params)
+        else_count = _count_steps_list(step.else_, scripts, params)
         if then_count is None or else_count is None or then_count != else_count:
             return None
         return 1 + then_count
     if isinstance(step, RunScriptStep):
-        callee_total = _count_total_steps(scripts[step.script], scripts)
+        callee = scripts[step.script]
+        call_args = {name: _substitute(value, params) for name, value in step.parameters.items()}
+        callee_params = _resolve_parameters(callee, call_args)
+        callee_total = _count_total_steps(callee, scripts, callee_params)
         return None if callee_total is None else 1 + callee_total
     return 1
 
@@ -1117,7 +1134,8 @@ async def _execute_repeat(
     pausable: bool,
 ) -> None:
     if step.count is not None:
-        for iteration in range(1, step.count + 1):
+        count = int(_substitute(step.count, params))
+        for iteration in range(1, count + 1):
             await _run_repeat_iteration(step.steps, ctx, params, script_id, pausable, iteration)
         return
 

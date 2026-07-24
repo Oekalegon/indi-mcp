@@ -5,11 +5,12 @@ committed, primitive/composed scripts (see `docs/Design.md`'s "Composing
 scripts" section) are meant to ship with the project. `slew` (INDIMCP-8),
 `park`/`unpark` (INDIMCP-48), a generic `connect`/`disconnect` pair,
 role-parameterized (INDIMCP-52), `cool_camera` (INDIMCP-41), `select_filter`,
-`set_focus_position` (INDIMCP-63), and `capture_frame` (INDIMCP-44) ship so
-far; the remaining primitives, tracking control, and a composed sequence
-are tracked separately (INDIMCP-45 through INDIMCP-47, INDIMCP-49). This
-just confirms whatever's here loads and validates cleanly, the way any
-script a client might upload would.
+`set_focus_position` (INDIMCP-63), `capture_frame` (INDIMCP-44), and a set of
+composed capture sequences — `capture_light_sequence`, `capture_flat_sequence`,
+`capture_dark_sequence`, `capture_bias_sequence` (INDIMCP-46) — ship so far;
+the remaining primitives and tracking control are tracked separately
+(INDIMCP-45, INDIMCP-47, INDIMCP-49). This just confirms whatever's here
+loads and validates cleanly, the way any script a client might upload would.
 """
 
 from pathlib import Path
@@ -243,3 +244,120 @@ def test_builtin_unpark_script_sets_unpark_and_waits() -> None:
     assert wait_step.condition.property == "TELESCOPE_PARK"
     assert wait_step.condition.element is None
     assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_capture_light_sequence_composes_cool_slew_filter_focus_and_repeat() -> None:
+    """A general-purpose composed sequence (INDIMCP-46), following docs/ScriptSchema.md's
+    own top-of-doc example, but with a fixed raDec/focusPosition rather than objectName
+    resolution or an autofocus loop, since neither primitive exists yet."""
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    lights = script_store.get_script("capture_light_sequence")
+
+    assert lights.pausable is True
+    assert set(lights.parameters) == {
+        "ra",
+        "dec",
+        "objectName",
+        "filterName",
+        "focusPosition",
+        "targetTempC",
+        "exposureSeconds",
+        "count",
+    }
+    assert lights.parameters["ra"].required is True
+    assert lights.parameters["dec"].required is True
+    assert lights.parameters["objectName"].required is False
+    assert lights.parameters["filterName"].required is True
+    assert lights.parameters["focusPosition"].required is True
+    assert lights.parameters["targetTempC"].required is False
+    assert lights.parameters["targetTempC"].default == -10
+    assert lights.parameters["exposureSeconds"].required is True
+    assert lights.parameters["count"].required is True
+    assert len(lights.steps) == 5
+    cool_step, slew_step, filter_step, focus_step, repeat_step = lights.steps
+    assert isinstance(cool_step, script_store.RunScriptStep)
+    assert cool_step.script == "cool_camera"
+    assert cool_step.parameters == {"targetTempC": "{{ targetTempC }}"}
+    assert isinstance(slew_step, script_store.SlewStep)
+    assert slew_step.role == "mount"
+    assert slew_step.target.raDec is not None
+    assert slew_step.target.raDec.ra == "{{ ra }}"
+    assert slew_step.target.raDec.dec == "{{ dec }}"
+    assert slew_step.target.objectName is None
+    assert isinstance(filter_step, script_store.SelectFilterStep)
+    assert filter_step.role == "filterWheel"
+    assert filter_step.filterName == "{{ filterName }}"
+    assert isinstance(focus_step, script_store.SetFocusPositionStep)
+    assert focus_step.role == "focuser"
+    assert focus_step.position == "{{ focusPosition }}"
+    assert isinstance(repeat_step, script_store.RepeatStep)
+    assert repeat_step.count == "{{ count }}"
+    assert len(repeat_step.steps) == 1
+    capture_step = repeat_step.steps[0]
+    assert isinstance(capture_step, script_store.CaptureFrameStep)
+    assert capture_step.role == "camera"
+    assert capture_step.exposureSeconds == "{{ exposureSeconds }}"
+    assert capture_step.frameType == "Light"
+    assert capture_step.objectName == "{{ objectName }}"
+
+
+def test_builtin_capture_flat_sequence_skips_mount_and_cooling() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    flats = script_store.get_script("capture_flat_sequence")
+
+    assert flats.pausable is True
+    assert set(flats.parameters) == {"filterName", "focusPosition", "exposureSeconds", "count"}
+    assert flats.parameters["exposureSeconds"].required is True
+    assert flats.parameters["count"].required is True
+    assert len(flats.steps) == 3
+    filter_step, focus_step, repeat_step = flats.steps
+    assert isinstance(filter_step, script_store.SelectFilterStep)
+    assert isinstance(focus_step, script_store.SetFocusPositionStep)
+    assert isinstance(repeat_step, script_store.RepeatStep)
+    assert repeat_step.count == "{{ count }}"
+    capture_step = repeat_step.steps[0]
+    assert isinstance(capture_step, script_store.CaptureFrameStep)
+    assert capture_step.frameType == "Flat"
+
+
+def test_builtin_capture_dark_sequence_skips_mount_filter_and_focus() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    darks = script_store.get_script("capture_dark_sequence")
+
+    assert darks.pausable is True
+    assert set(darks.parameters) == {"targetTempC", "exposureSeconds", "count"}
+    assert darks.parameters["targetTempC"].default == -10
+    assert darks.parameters["exposureSeconds"].required is True
+    assert darks.parameters["count"].required is True
+    assert len(darks.steps) == 2
+    cool_step, repeat_step = darks.steps
+    assert isinstance(cool_step, script_store.RunScriptStep)
+    assert cool_step.script == "cool_camera"
+    assert isinstance(repeat_step, script_store.RepeatStep)
+    assert repeat_step.count == "{{ count }}"
+    capture_step = repeat_step.steps[0]
+    assert isinstance(capture_step, script_store.CaptureFrameStep)
+    assert capture_step.frameType == "Dark"
+
+
+def test_builtin_capture_bias_sequence_has_no_setup_steps() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    bias = script_store.get_script("capture_bias_sequence")
+
+    assert bias.pausable is True
+    assert set(bias.parameters) == {"exposureSeconds", "count"}
+    assert bias.parameters["exposureSeconds"].required is False
+    assert bias.parameters["exposureSeconds"].default == 0.0
+    assert bias.parameters["count"].required is True
+    assert len(bias.steps) == 1
+    repeat_step = bias.steps[0]
+    assert isinstance(repeat_step, script_store.RepeatStep)
+    assert repeat_step.count == "{{ count }}"
+    capture_step = repeat_step.steps[0]
+    assert isinstance(capture_step, script_store.CaptureFrameStep)
+    assert capture_step.role == "camera"
+    assert capture_step.frameType == "Bias"

@@ -305,7 +305,7 @@ class RunScriptStep(_StepBase):
 
 class RepeatStep(_StepBase):
     step: Literal["repeat"]
-    count: int | None = None
+    count: IntOrReference | None = None
     until: Condition | None = None
     maxIterations: int | None = None
     steps: "list[Step]"

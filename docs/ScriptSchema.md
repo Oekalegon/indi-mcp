@@ -270,7 +270,7 @@ never becomes true would otherwise loop forever.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `count` | integer | one of `count`/`until` | Run `steps` exactly this many times. |
+| `count` | integer | one of `count`/`until` | Run `steps` exactly this many times. May be a `"{{ paramName }}"` reference to one of the enclosing script's own declared `parameters` (see "Parameter references" above), same as `exposureSeconds`/`ra`/`dec`/... elsewhere in this schema — `stepsExecuted`'s total-step count still resolves exactly in this case, since every parameter value reachable from the top-level call is known before any step runs. |
 | `until` | [Condition](#condition-fields) | one of `count`/`until` | Run `steps` repeatedly, checking `until` after each iteration, stopping once it's met. |
 | `maxIterations` | integer | required with `until` | Hard cap on iterations; reaching it without `until` becoming true fails the script (`scriptFailed`) rather than looping forever. |
 | `steps` | list of [Step](#step-primitives) | yes | The loop body. |
