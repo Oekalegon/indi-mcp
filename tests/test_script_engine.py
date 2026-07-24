@@ -3608,6 +3608,38 @@ async def test_execute_script_total_steps_counts_through_run_script(
     assert progress[0]["totalSteps"] == 2
 
 
+async def test_execute_script_total_steps_counts_identical_run_script_calls_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling the same script with the same arguments twice must count its steps twice —
+    unlike `_collect_role_usage`'s `_visited` set (a correct no-op on a role-usage revisit),
+    a step count has no such dedup: each call site genuinely executes its own steps. This
+    guards the `ResolvedCallArgsCache` shared between `_collect_role_usage` and
+    `_count_total_steps` — it must only memoize the deterministic argument resolution, never
+    skip re-counting a call site "already seen" elsewhere."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "callee",
+        steps=[_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+    )
+    _script(
+        "caller",
+        steps=[
+            {"step": "run_script", "script": "callee"},
+            {"step": "run_script", "script": "callee"},
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("caller", "test-rig", {}, on_progress=progress.append)
+
+    # 2x (run_script step) + 2x (the callee's own set_property step) = 4
+    assert progress[0]["totalSteps"] == 4
+    assert send_property.await_count == 2
+
+
 async def test_execute_script_total_steps_is_none_when_if_branches_have_different_lengths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -350,7 +350,11 @@ async def execute_script(
     observatory = _get_observatory(location_id) if location_id is not None else None
     scripts = _collect_reachable_scripts(script)
     resolved_params = _resolve_parameters(script, parameters)
-    usage = _collect_role_usage(script, resolved_params, scripts)
+    # Shared between _collect_role_usage and _count_total_steps below: both walk the same
+    # run_script call tree and would otherwise redundantly resolve the same callee arguments
+    # twice — see ResolvedCallArgsCache.
+    call_args_cache: ResolvedCallArgsCache = {}
+    usage = _collect_role_usage(script, resolved_params, scripts, call_args_cache=call_args_cache)
     role_to_component = _resolve_role_to_component(rig, usage.roles)
     # `_resolve_role_to_component` only ever matches components with `device is not None`
     # (see its docstring), so this is always a `str`, never `None`, despite `Component.device`'s
@@ -377,7 +381,7 @@ async def execute_script(
         on_progress=on_progress,
         scripts=scripts,
         run_id=run_id,
-        total_steps=_count_total_steps(script, scripts, resolved_params),
+        total_steps=_count_total_steps(script, scripts, resolved_params, call_args_cache),
         role_to_slots={
             role: component.slots or {} for role, component in role_to_component.items()
         },
@@ -580,12 +584,42 @@ def _params_cache_key(params: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     return tuple(sorted(params.items()))
 
 
+ResolvedCallArgsCache = dict[tuple[int, tuple[tuple[str, Any], ...]], dict[str, Any]]
+"""Memoizes a `RunScriptStep`'s resolved callee arguments (`_substitute` + `_resolve_parameters`),
+keyed by `(id(step), _params_cache_key(caller's params))` — the same `RunScriptStep` object can
+recur with different caller params (e.g. the enclosing script itself called twice with different
+top-level arguments), so the step's identity alone isn't a safe key, but identity is fine to
+combine with the caller's resolved params since a given `RunScriptStep` object only ever exists
+at one position in one script's `steps` tree. Shared between `_collect_role_usage` and
+`_count_total_steps` — both walk the same call tree and need the exact same resolution for every
+`run_script` step they cross, so `execute_script` builds one cache and threads it through both
+rather than each re-doing the same substitution/validation work independently."""
+
+
+def _resolve_call_args(
+    step: RunScriptStep,
+    callee: Script,
+    params: dict[str, Any],
+    cache: ResolvedCallArgsCache,
+) -> dict[str, Any]:
+    """Resolve `step`'s arguments against `callee`'s declared parameters, memoized in `cache`."""
+    cache_key = (id(step), _params_cache_key(params))
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    call_args = {name: _substitute(value, params) for name, value in step.parameters.items()}
+    callee_params = _resolve_parameters(callee, call_args)
+    cache[cache_key] = callee_params
+    return callee_params
+
+
 def _collect_role_usage(
     script: Script,
     params: dict[str, Any],
     scripts: dict[str, Script],
     usage: _RoleUsage | None = None,
     _visited: set[tuple[str, tuple[tuple[str, Any], ...]]] | None = None,
+    call_args_cache: ResolvedCallArgsCache | None = None,
 ) -> _RoleUsage:
     """Walk the whole call tree rooted at `script` (run with `params`), resolving every role.
 
@@ -615,17 +649,27 @@ def _collect_role_usage(
     composed sequence connecting several roles by repeatedly calling
     `connect` — each distinct role is its own cache entry, but a role
     connected more than once in one run is only walked once).
+
+    `_visited` is *not* safe to reuse for `_count_total_steps`'s own walk of the same
+    tree, even though both walks visit the same `run_script` calls — role usage is a set
+    union (revisiting a node is a correct no-op), while a step count must add every call
+    site's contribution again even when the same (script, params) recurs. `call_args_cache`
+    is the piece that *is* safe to share between the two walks (see `ResolvedCallArgsCache`):
+    it memoizes only the deterministic argument resolution, not whether a node has been
+    "counted" yet.
     """
     if usage is None:
         usage = _RoleUsage()
     if _visited is None:
         _visited = set()
+    if call_args_cache is None:
+        call_args_cache = {}
     cache_key = (script.id, _params_cache_key(params))
     if cache_key in _visited:
         return usage
     _visited.add(cache_key)
 
-    _walk_role_usage(script.steps, params, scripts, usage, _visited)
+    _walk_role_usage(script.steps, params, scripts, usage, _visited, call_args_cache)
     return usage
 
 
@@ -635,6 +679,7 @@ def _walk_role_usage(
     scripts: dict[str, Script],
     usage: _RoleUsage,
     _visited: set[tuple[str, tuple[tuple[str, Any], ...]]],
+    call_args_cache: ResolvedCallArgsCache,
 ) -> None:
     """Record `steps`' role usage in execution order, inlining `run_script` calls in place.
 
@@ -651,11 +696,8 @@ def _walk_role_usage(
     for step in steps:
         if isinstance(step, RunScriptStep):
             callee = scripts[step.script]
-            call_args = {
-                name: _substitute(value, params) for name, value in step.parameters.items()
-            }
-            callee_params = _resolve_parameters(callee, call_args)
-            _collect_role_usage(callee, callee_params, scripts, usage, _visited)
+            callee_params = _resolve_call_args(step, callee, params, call_args_cache)
+            _collect_role_usage(callee, callee_params, scripts, usage, _visited, call_args_cache)
             continue
 
         role = _step_role(step, params)
@@ -670,14 +712,17 @@ def _walk_role_usage(
                 usage.connection_managed_roles.add(role)
 
         if isinstance(step, RepeatStep):
-            _walk_role_usage(step.steps, params, scripts, usage, _visited)
+            _walk_role_usage(step.steps, params, scripts, usage, _visited, call_args_cache)
         elif isinstance(step, IfStep):
-            _walk_role_usage(step.then, params, scripts, usage, _visited)
-            _walk_role_usage(step.else_, params, scripts, usage, _visited)
+            _walk_role_usage(step.then, params, scripts, usage, _visited, call_args_cache)
+            _walk_role_usage(step.else_, params, scripts, usage, _visited, call_args_cache)
 
 
 def _count_total_steps(
-    script: Script, scripts: dict[str, Script], params: dict[str, Any]
+    script: Script,
+    scripts: dict[str, Script],
+    params: dict[str, Any],
+    call_args_cache: ResolvedCallArgsCache | None = None,
 ) -> int | None:
     """The exact number of steps a run of `script` (with `params`) will dispatch, or `None`.
 
@@ -699,6 +744,13 @@ def _count_total_steps(
     reachable from the top-level call is already known before any step
     runs, so this can resolve it exactly rather than falling back to `None`.
 
+    `call_args_cache` (see `ResolvedCallArgsCache`) is normally the same cache
+    `execute_script` already built while calling `_collect_role_usage` on this exact
+    call tree just before this — both walks cross the same `run_script` steps and would
+    otherwise redundantly re-run the same `_substitute`/`_resolve_parameters` work a
+    second time for every one of them. Defaults to a fresh cache so this still works
+    correctly (just without the cross-walk sharing) when called on its own, e.g. in tests.
+
     This is only ever exact or `None`, never an estimate presented as if it
     were exact:
 
@@ -712,15 +764,20 @@ def _count_total_steps(
       they happen to match, the count is unambiguous regardless of which
       branch actually runs.
     """
-    return _count_steps_list(script.steps, scripts, params)
+    if call_args_cache is None:
+        call_args_cache = {}
+    return _count_steps_list(script.steps, scripts, params, call_args_cache)
 
 
 def _count_steps_list(
-    steps: list[Step], scripts: dict[str, Script], params: dict[str, Any]
+    steps: list[Step],
+    scripts: dict[str, Script],
+    params: dict[str, Any],
+    call_args_cache: ResolvedCallArgsCache,
 ) -> int | None:
     total = 0
     for step in steps:
-        count = _count_one_step(step, scripts, params)
+        count = _count_one_step(step, scripts, params, call_args_cache)
         if count is None:
             return None
         total += count
@@ -744,7 +801,12 @@ def _resolve_repeat_count(step: RepeatStep, params: dict[str, Any]) -> int:
         raise ScriptValidationError(f"repeat.count did not resolve to an integer: {exc}") from exc
 
 
-def _count_one_step(step: Step, scripts: dict[str, Script], params: dict[str, Any]) -> int | None:
+def _count_one_step(
+    step: Step,
+    scripts: dict[str, Script],
+    params: dict[str, Any],
+    call_args_cache: ResolvedCallArgsCache,
+) -> int | None:
     if isinstance(step, RepeatStep):
         if step.until is not None:
             return None
@@ -754,19 +816,18 @@ def _count_one_step(step: Step, scripts: dict[str, Script], params: dict[str, An
                 "schema validation should have rejected this"
             )
         resolved_count = _resolve_repeat_count(step, params)
-        body = _count_steps_list(step.steps, scripts, params)
+        body = _count_steps_list(step.steps, scripts, params, call_args_cache)
         return None if body is None else 1 + body * resolved_count
     if isinstance(step, IfStep):
-        then_count = _count_steps_list(step.then, scripts, params)
-        else_count = _count_steps_list(step.else_, scripts, params)
+        then_count = _count_steps_list(step.then, scripts, params, call_args_cache)
+        else_count = _count_steps_list(step.else_, scripts, params, call_args_cache)
         if then_count is None or else_count is None or then_count != else_count:
             return None
         return 1 + then_count
     if isinstance(step, RunScriptStep):
         callee = scripts[step.script]
-        call_args = {name: _substitute(value, params) for name, value in step.parameters.items()}
-        callee_params = _resolve_parameters(callee, call_args)
-        callee_total = _count_total_steps(callee, scripts, callee_params)
+        callee_params = _resolve_call_args(step, callee, params, call_args_cache)
+        callee_total = _count_total_steps(callee, scripts, callee_params, call_args_cache)
         return None if callee_total is None else 1 + callee_total
     return 1
 
