@@ -727,9 +727,24 @@ def _count_steps_list(
     return total
 
 
-def _count_one_step(
-    step: Step, scripts: dict[str, Script], params: dict[str, Any]
-) -> int | None:
+def _resolve_repeat_count(step: RepeatStep, params: dict[str, Any]) -> int:
+    """Resolve a `repeat` step's `count` (literal or `"{{ paramName }}"` reference) to an `int`.
+
+    Unlike a literal `count` (guaranteed `int` by the schema before this PR), a parameter
+    reference's resolved value is never type-checked against its declared parameter `type`
+    before use (a pre-existing gap shared by every other `NumberOrReference`/`IntOrReference`
+    field) — so this raises the engine's own documented `ScriptValidationError` rather than
+    letting a bad value's raw `int()` `TypeError`/`ValueError` fall through to the generic
+    "unexpected error" safety net in `script_runs.py`, which is meant for genuine bugs, not
+    routine bad caller input.
+    """
+    try:
+        return int(_substitute(step.count, params))
+    except (TypeError, ValueError) as exc:
+        raise ScriptValidationError(f"repeat.count did not resolve to an integer: {exc}") from exc
+
+
+def _count_one_step(step: Step, scripts: dict[str, Script], params: dict[str, Any]) -> int | None:
     if isinstance(step, RepeatStep):
         if step.until is not None:
             return None
@@ -738,7 +753,7 @@ def _count_one_step(
                 f"repeat step {step!r} has neither count nor until; "
                 "schema validation should have rejected this"
             )
-        resolved_count = int(_substitute(step.count, params))
+        resolved_count = _resolve_repeat_count(step, params)
         body = _count_steps_list(step.steps, scripts, params)
         return None if body is None else 1 + body * resolved_count
     if isinstance(step, IfStep):
@@ -1134,7 +1149,7 @@ async def _execute_repeat(
     pausable: bool,
 ) -> None:
     if step.count is not None:
-        count = int(_substitute(step.count, params))
+        count = _resolve_repeat_count(step, params)
         for iteration in range(1, count + 1):
             await _run_repeat_iteration(step.steps, ctx, params, script_id, pausable, iteration)
         return

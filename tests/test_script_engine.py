@@ -1036,7 +1036,7 @@ async def test_execute_script_repeat_count_accepts_a_parameter_reference(
     )
     send_property = AsyncMock()
     monkeypatch.setattr(indi_messaging, "send_property", send_property)
-    progress: list[dict] = []
+    progress: list[script_engine.ScriptProgress] = []
 
     result = await script_engine.execute_script(
         "repeat-count-param", "test-rig", {"count": 5}, on_progress=progress.append
@@ -1045,6 +1045,35 @@ async def test_execute_script_repeat_count_accepts_a_parameter_reference(
     assert send_property.await_count == 5
     assert result["stepsExecuted"] == 6
     assert all(event["totalSteps"] == 6 for event in progress)
+
+
+async def test_execute_script_repeat_count_rejects_a_non_numeric_parameter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `repeat.count` reference that resolves to something non-numeric fails with the
+    engine's documented `ScriptValidationError` (mapped to `scriptFailed` by `script_runs.py`),
+    not a raw `ValueError`/`TypeError` from the underlying `int()` call — nothing validates a
+    top-level `run_script` call's `parameters` against the script's declared parameter types
+    before use, so this guard is the engine's own responsibility."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "repeat-count-bad-param",
+        parameters={"count": script_store.Parameter(type="integer", required=True)},
+        steps=[
+            {
+                "step": "repeat",
+                "count": "{{ count }}",
+                "steps": [_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(script_engine.ScriptValidationError, match="repeat.count"):
+        await script_engine.execute_script("repeat-count-bad-param", "test-rig", {"count": "abc"})
+
+    send_property.assert_not_awaited()
 
 
 async def test_execute_script_repeat_honors_every(monkeypatch: pytest.MonkeyPatch) -> None:
