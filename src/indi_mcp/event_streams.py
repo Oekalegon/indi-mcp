@@ -35,7 +35,6 @@ without bound.
 """
 
 import asyncio
-import contextlib
 import logging
 from collections import deque
 from collections.abc import Mapping
@@ -125,14 +124,24 @@ async def drain() -> None:
     can close without blocking future publishes indefinitely. Each
     notification task already handles its own errors internally (`_notify`
     drops a failed subscriber), and `_record_worker` logs and swallows a
-    failed write, so nothing here needs to re-raise on a failure.
+    failed write, so nothing here needs to re-raise on a failure — the final
+    `await _record_worker_task` below matches that same guarantee explicitly
+    (see its own comment), rather than assuming cancellation is the only way
+    that task can ever end.
 
     `_record_queue.join()` waits for every currently queued event to be
     *durably written*, not just dequeued — `_record_worker` only calls
     `task_done()` after its write attempt finishes (success or logged
     failure) — so this returns only once the worker has actually caught up,
-    then stops the now-idle worker task before returning.
+    then stops the now-idle worker task before returning. Both globals are
+    reset to `None` afterwards (whether the worker stopped cleanly or with
+    an unexpected exception) — leaving a finished `Task` referenced by
+    `_record_worker_task` would mean *any* later `await` of it (a repeat
+    `drain()` call, a test's own cleanup, ...) re-raises whatever exception
+    it ended with, every time, since awaiting an already-completed `Task`
+    doesn't consume that exception.
     """
+    global _record_queue, _record_worker_task
     pending = [task for task in _background_tasks if not task.done()]
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
@@ -140,8 +149,19 @@ async def drain() -> None:
         await _record_queue.join()
     if _record_worker_task is not None:
         _record_worker_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        try:
             await _record_worker_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            # `_record_worker`'s own loop only wraps its write attempt in try/except, not
+            # `queue.get()` itself — if the task ever ended some other way (a bug there, not
+            # cancellation), it would otherwise still be sitting on an unretrieved exception at
+            # this point; re-raising it here would break the "never raises" contract this whole
+            # function otherwise documents and tests hold it to.
+            logger.exception("Durable-write worker task ended with an unexpected error")
+    _record_queue = None
+    _record_worker_task = None
 
 
 def messages_uri(device: str | None) -> str:

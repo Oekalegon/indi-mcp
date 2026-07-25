@@ -295,6 +295,23 @@ async def test_drain_does_not_raise_even_if_a_background_task_failed() -> None:
     await event_streams.drain()  # must not raise
 
 
+async def test_drain_does_not_raise_even_if_the_record_worker_crashed() -> None:
+    """Unlike cancellation (the only way `drain()` expects `_record_worker_task` to end),
+    a bug in `_record_worker` outside its own try/except (e.g. in `queue.get()` itself) would
+    leave the task completed with an unretrieved exception — `.cancel()` on an already-done
+    task is a no-op, so `drain()` must handle that case explicitly rather than only suppressing
+    `CancelledError`, or it would propagate here and break server shutdown."""
+
+    async def _boom(queue: "asyncio.Queue") -> None:
+        raise RuntimeError("something unexpected broke")
+
+    event_streams._record_queue = asyncio.Queue(maxsize=event_streams._RECORD_QUEUE_MAXSIZE)
+    event_streams._record_worker_task = asyncio.create_task(_boom(event_streams._record_queue))
+    await asyncio.sleep(0)  # let the task actually run and complete-with-exception
+
+    await event_streams.drain()  # must not raise
+
+
 async def test_durable_writes_are_serialized_through_one_worker_not_one_task_per_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
