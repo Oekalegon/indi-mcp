@@ -1015,6 +1015,67 @@ async def test_execute_script_repeat_count_runs_the_right_number_of_times(
     assert result["stepsExecuted"] == 4
 
 
+async def test_execute_script_repeat_count_accepts_a_parameter_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`repeat.count` may be a `"{{ paramName }}"` reference, not just a literal — the caller
+    picks the frame count per run instead of it being fixed in the script file. This also
+    exercises `_count_total_steps` resolving the reference (not falling back to `None`),
+    since `stepsExecuted`'s total is only reported when it can be computed exactly."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "repeat-count-param",
+        parameters={"count": script_store.Parameter(type="integer", required=True)},
+        steps=[
+            {
+                "step": "repeat",
+                "count": "{{ count }}",
+                "steps": [_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    progress: list[script_engine.ScriptProgress] = []
+
+    result = await script_engine.execute_script(
+        "repeat-count-param", "test-rig", {"count": 5}, on_progress=progress.append
+    )
+
+    assert send_property.await_count == 5
+    assert result["stepsExecuted"] == 6
+    assert all(event["totalSteps"] == 6 for event in progress)
+
+
+async def test_execute_script_repeat_count_rejects_a_non_numeric_parameter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `repeat.count` reference that resolves to something non-numeric fails with the
+    engine's documented `ScriptValidationError` (mapped to `scriptFailed` by `script_runs.py`),
+    not a raw `ValueError`/`TypeError` from the underlying `int()` call — nothing validates a
+    top-level `run_script` call's `parameters` against the script's declared parameter types
+    before use, so this guard is the engine's own responsibility."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "repeat-count-bad-param",
+        parameters={"count": script_store.Parameter(type="integer", required=True)},
+        steps=[
+            {
+                "step": "repeat",
+                "count": "{{ count }}",
+                "steps": [_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    with pytest.raises(script_engine.ScriptValidationError, match="repeat.count"):
+        await script_engine.execute_script("repeat-count-bad-param", "test-rig", {"count": "abc"})
+
+    send_property.assert_not_awaited()
+
+
 async def test_execute_script_repeat_honors_every(monkeypatch: pytest.MonkeyPatch) -> None:
     _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
     _script(
@@ -3545,6 +3606,38 @@ async def test_execute_script_total_steps_counts_through_run_script(
 
     # 1 (run_script step) + 1 (the callee's own set_property step)
     assert progress[0]["totalSteps"] == 2
+
+
+async def test_execute_script_total_steps_counts_identical_run_script_calls_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling the same script with the same arguments twice must count its steps twice —
+    unlike `_collect_role_usage`'s `_visited` set (a correct no-op on a role-usage revisit),
+    a step count has no such dedup: each call site genuinely executes its own steps. This
+    guards the `ResolvedCallArgsCache` shared between `_collect_role_usage` and
+    `_count_total_steps` — it must only memoize the deterministic argument resolution, never
+    skip re-counting a call site "already seen" elsewhere."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "callee",
+        steps=[_set_property("camera", "CCD_EXPOSURE", {"X": "1"})],
+    )
+    _script(
+        "caller",
+        steps=[
+            {"step": "run_script", "script": "callee"},
+            {"step": "run_script", "script": "callee"},
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    progress: list[script_engine.ScriptProgress] = []
+
+    await script_engine.execute_script("caller", "test-rig", {}, on_progress=progress.append)
+
+    # 2x (run_script step) + 2x (the callee's own set_property step) = 4
+    assert progress[0]["totalSteps"] == 4
+    assert send_property.await_count == 2
 
 
 async def test_execute_script_total_steps_is_none_when_if_branches_have_different_lengths(

@@ -1,0 +1,47 @@
+id: capture_flat_sequence
+name: Capture a sequence of flat frames
+description: >
+  Selects a filter and sets a fixed focuser position, then captures count
+  flat frames — a composed sequence built from select_filter,
+  set_focus_position, and capture_frame (see docs/Design.md's "Composing
+  scripts" section). Unlike capture_light_sequence, this deliberately skips
+  mount positioning and camera cooling: a flat frame only needs the filter
+  and focus position to match the light frames it will calibrate, never a
+  mount target or a specific sensor temperature. Pausable: capture_frame is
+  the only step inside the repeat loop, so a pause request only ever lands
+  between frames, never mid-exposure.
+pausable: true
+parameters:
+  filterName:
+    type: string
+    required: true
+    description: Name of the filter to select, matching the rig's filterWheel slots map.
+  focusPosition:
+    type: integer
+    required: true
+    description: >
+      Target absolute focuser position, within the rig's focuser component's
+      minPosition/maxPosition range — normally matching the light frames this
+      calibrates.
+  exposureSeconds:
+    type: number
+    required: true
+    description: Exposure length per frame, in seconds.
+  count:
+    type: integer
+    required: true
+    description: Number of flat frames to capture.
+steps:
+  - step: select_filter
+    role: filterWheel
+    filterName: "{{ filterName }}"
+  - step: set_focus_position
+    role: focuser
+    position: "{{ focusPosition }}"
+  - step: repeat
+    count: "{{ count }}"
+    steps:
+      - step: capture_frame
+        role: camera
+        exposureSeconds: "{{ exposureSeconds }}"
+        frameType: Flat

@@ -1,0 +1,38 @@
+id: capture_dark_sequence
+name: Capture a sequence of dark frames
+description: >
+  Cools the camera to a target sensor temperature, then captures count dark
+  frames — a composed sequence built from cool_camera and capture_frame (see
+  docs/Design.md's "Composing scripts" section). Unlike
+  capture_light_sequence, this deliberately skips mount positioning, filter
+  selection, and focus: a dark frame is captured with the shutter/optical
+  path irrelevant, so only the sensor temperature (and matching
+  exposureSeconds) needs to match the light frames it will calibrate.
+  Pausable: capture_frame is the only step inside the repeat loop, so a
+  pause request only ever lands between frames, never mid-exposure.
+pausable: true
+parameters:
+  targetTempC:
+    type: number
+    required: false
+    default: -10
+    description: Target sensor temperature, in degrees Celsius — normally matching the light frames this calibrates.
+  exposureSeconds:
+    type: number
+    required: true
+    description: Exposure length per frame, in seconds — normally matching the light frames this calibrates.
+  count:
+    type: integer
+    required: true
+    description: Number of dark frames to capture.
+steps:
+  - step: run_script
+    script: cool_camera
+    parameters: { targetTempC: "{{ targetTempC }}" }
+  - step: repeat
+    count: "{{ count }}"
+    steps:
+      - step: capture_frame
+        role: camera
+        exposureSeconds: "{{ exposureSeconds }}"
+        frameType: Dark
