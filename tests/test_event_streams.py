@@ -22,6 +22,9 @@ class _FakeSession:
 
 @pytest.fixture(autouse=True)
 def _reset_state() -> None:
+    # `_record_queue`/`_record_worker_task` (INDIMCP-59) are reset separately, by
+    # `conftest.py`'s `_reset_event_streams_record_worker` — see its docstring for why that
+    # one specifically needs to be async (it awaits cancelling the worker task).
     event_streams._messages.clear()
     event_streams._scripts.clear()
     event_streams._subscribers.clear()
@@ -290,3 +293,64 @@ async def test_drain_does_not_raise_even_if_a_background_task_failed() -> None:
     task.add_done_callback(event_streams._background_tasks.discard)
 
     await event_streams.drain()  # must not raise
+
+
+async def test_durable_writes_are_serialized_through_one_worker_not_one_task_per_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INDIMCP-59: a burst of events must never spawn more than one concurrent durable write —
+    the old fire-and-forget-per-event model could pile up arbitrarily many `asyncio.to_thread`
+    writers all contending for the same SQLite write lock. Confirms this by making one write
+    deliberately slow and checking a second one hasn't started while it's still in flight."""
+    in_flight = 0
+    max_in_flight = 0
+
+    def counting_record_event(*args, **kwargs) -> None:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.02)
+        in_flight -= 1
+
+    monkeypatch.setattr(event_log, "record_event", counting_record_event)
+
+    for i in range(5):
+        event_streams.publish_message_event({"kind": "message", "device": None, "i": i})
+    await asyncio.sleep(0.2)
+
+    assert max_in_flight == 1
+
+
+async def test_schedule_record_drops_the_oldest_queued_event_once_the_queue_is_full(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Once `_RECORD_QUEUE_MAXSIZE` events are queued and the worker hasn't drained any yet,
+    publishing more must drop the *oldest* queued event(s) to make room — bounding memory
+    instead of letting the queue grow without limit under a sustained burst — and log it."""
+    recorded: list[int] = []
+
+    def fake_record_event(stream, payload, *, device, run_id, db_path=None) -> None:
+        recorded.append(payload["i"])
+
+    monkeypatch.setattr(event_log, "record_event", fake_record_event)
+
+    maxsize = event_streams._RECORD_QUEUE_MAXSIZE
+    with caplog.at_level("WARNING"):
+        # No `await` occurs anywhere in this loop, so the worker task `_schedule_record`
+        # creates on the very first iteration never actually gets a chance to run until we
+        # await below — every one of these publishes lands purely as queue puts/drops.
+        for i in range(maxsize + 5):
+            event_streams.publish_message_event({"kind": "message", "device": None, "i": i})
+        queue = event_streams._record_queue
+        assert queue is not None
+        assert queue.qsize() == maxsize
+
+        # Deterministically wait for the worker to fully drain the queue, rather than a fixed
+        # sleep — draining `maxsize` items each through a real asyncio.to_thread round trip can
+        # take longer than a short fixed sleep would reliably allow.
+        await queue.join()
+
+    assert len(recorded) == maxsize
+    assert recorded[0] == 5  # the oldest 5 (i=0..4) were dropped to make room
+    assert recorded[-1] == maxsize + 4
+    assert any("dropping the oldest queued" in r.message for r in caplog.records)

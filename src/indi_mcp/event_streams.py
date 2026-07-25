@@ -17,13 +17,29 @@ What actually lets a reconnecting client catch up is the separate, durable
 SQLite log this module also writes every event to (`event_log.record_event`,
 INDIMCP-15) — see `event_log`'s own module docstring and its `get_events`
 catch-up query.
+
+**Durable writes go through one bounded queue, not one task per event**
+(INDIMCP-59). `record_event` is a blocking `sqlite3` call, and a "chatty"
+device can publish many events a second (per `docs/Design.md#event-streams`)
+— spawning a fresh `asyncio.to_thread` per event would let an arbitrary
+number of threads pile up all contending for the same SQLite write lock,
+exhausting the default thread-pool executor every other blocking call in
+this process also shares (`frame_store`, `event_log.run_purge_loop`, ...).
+A single persistent worker task drains a bounded `asyncio.Queue` one item at
+a time instead, so at most one durable write is ever in flight. If the
+queue fills (the writer falling behind a sustained burst), the *oldest*
+queued event is dropped to make room for the newest — consistent with the
+in-memory buffers above, which already drop their oldest entry once full —
+and logged, rather than growing the queue (and the process's memory)
+without bound.
 """
 
 import asyncio
+import contextlib
 import logging
 from collections import deque
 from collections.abc import Mapping
-from typing import Protocol
+from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
 from pydantic import AnyUrl
@@ -55,43 +71,77 @@ class _NotifiableSession(Protocol):
     async def send_resource_updated(self, uri: AnyUrl) -> None: ...
 
 
+class _QueuedEvent(NamedTuple):
+    """One durable-write job queued for `_record_worker` — see `_schedule_record`."""
+
+    stream: event_log.Stream
+    payload: Mapping
+    device: str | None
+    run_id: str | None
+
+
 _messages: deque[Mapping] = deque(maxlen=_MAX_BUFFERED_EVENTS)
 _scripts: deque[Mapping] = deque(maxlen=_MAX_BUFFERED_EVENTS)
 
 _subscribers: dict[str, set[_NotifiableSession]] = {}
 
 _background_tasks: set[asyncio.Task] = set()
-"""Strong references to in-flight notification/durable-recording tasks.
+"""Strong references to in-flight, one-off notification tasks (`_schedule_notify`).
 
 `asyncio.create_task` results must be held onto somewhere or the task can be
 garbage-collected mid-execution — a well-known asyncio footgun. Each task
-removes itself once done (see `_schedule_notify`/`_schedule_record`). Also
-what `drain()` waits on at shutdown, so an in-flight event_log write isn't
-silently abandoned mid-write when the process exits.
+removes itself once done. Durable-write tasks used to live here too, but
+now go through the persistent `_record_worker`/`_record_queue` pair below
+instead (INDIMCP-59) — `drain()` waits on both this set and that queue.
 """
+
+_RECORD_QUEUE_MAXSIZE = 1000
+"""Bounds memory if durable writes fall behind a sustained event burst — see module docstring."""
+
+_record_queue: "asyncio.Queue[_QueuedEvent] | None" = None
+"""Created lazily (`_ensure_record_worker`) against whichever event loop is actually running,
+the same lazy-start style `_schedule_notify`/`_schedule_record` already use — `asyncio.Queue`
+binds to the loop of its first `get`/`put` call, so a module-level instance created at import
+time (before any loop necessarily exists, and potentially reused across a test suite's several
+independent loops) would be wrong. `None` until the first event is ever published."""
+
+_record_worker_task: asyncio.Task | None = None
+"""The single persistent task draining `_record_queue` — see `_record_worker`."""
 
 
 async def drain() -> None:
-    """Wait for every currently in-flight background task to finish.
+    """Wait for every in-flight notification and queued durable write to finish.
 
     Meant to be called once, on shutdown (see `server.py`'s `_lifespan`),
     after any periodic work (`event_log.run_purge_loop`) has already been
     cancelled — without this, an event published right before the process
-    exits could have its `_schedule_record` write abandoned mid-flight,
-    silently losing exactly the kind of event a reconnecting client depends
-    on the durable log to still have (see this module's own docstring).
-    Only waits on tasks already scheduled at the moment it's called — a
+    exits could have its durable write abandoned mid-flight, silently
+    losing exactly the kind of event a reconnecting client depends on the
+    durable log to still have (see this module's own docstring). Only
+    waits on work already scheduled/queued at the moment it's called — a
     publish that happens *during* drain isn't covered, since there's no
     way to know about it in advance; that's an inherent limit of
     fire-and-forget scheduling ending at process exit, not something this
-    can close without blocking future publishes indefinitely. Each task
-    already handles its own errors internally (`_notify` drops a failed
-    subscriber; `_record` logs and swallows a failed write), so nothing
-    here needs to re-raise on a task that failed.
+    can close without blocking future publishes indefinitely. Each
+    notification task already handles its own errors internally (`_notify`
+    drops a failed subscriber), and `_record_worker` logs and swallows a
+    failed write, so nothing here needs to re-raise on a failure.
+
+    `_record_queue.join()` waits for every currently queued event to be
+    *durably written*, not just dequeued — `_record_worker` only calls
+    `task_done()` after its write attempt finishes (success or logged
+    failure) — so this returns only once the worker has actually caught up,
+    then stops the now-idle worker task before returning.
     """
     pending = [task for task in _background_tasks if not task.done()]
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
+    if _record_queue is not None:
+        await _record_queue.join()
+    if _record_worker_task is not None:
+        _record_worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _record_worker_task
 
 
 def messages_uri(device: str | None) -> str:
@@ -182,35 +232,99 @@ def _schedule_notify(uri: str) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-async def _record(
-    stream: event_log.Stream, payload: Mapping, *, device: str | None, run_id: str | None
-) -> None:
-    try:
-        await asyncio.to_thread(
-            event_log.record_event, stream, payload, device=device, run_id=run_id
-        )
-    except Exception:
-        logger.exception("Failed to durably record a %s event to the event log", stream)
+async def _record_worker(queue: "asyncio.Queue[_QueuedEvent]") -> None:
+    """Durably write queued events one at a time, forever, until cancelled.
+
+    A single persistent worker — not one ephemeral task per event, unlike
+    the old fire-and-forget model this replaced (INDIMCP-59) — is what
+    actually bounds concurrent SQLite writes to one at a time and bounds how
+    many `asyncio.to_thread` worker threads this module can occupy: a
+    "chatty" device's `propertyUpdate` burst (see
+    `docs/Design.md#event-streams`) no longer risks spawning dozens of
+    concurrent write attempts that all contend for the same SQLite write
+    lock and can exhaust the default thread-pool executor every other
+    blocking call in this process also shares (`frame_store`,
+    `event_log.run_purge_loop`, ...). A failed write is logged and
+    swallowed — matching the old `_record`'s behavior — so one bad write
+    never stops the worker from draining the rest of the queue.
+    """
+    while True:
+        item = await queue.get()
+        try:
+            await asyncio.to_thread(
+                event_log.record_event,
+                item.stream,
+                item.payload,
+                device=item.device,
+                run_id=item.run_id,
+            )
+        except Exception:
+            logger.exception("Failed to durably record a %s event to the event log", item.stream)
+        finally:
+            queue.task_done()
+
+
+def _ensure_record_worker() -> "asyncio.Queue[_QueuedEvent]":
+    """Return the durable-write queue, lazily creating it and its worker task if needed.
+
+    Lazy, on-demand creation (rather than an explicit `start`/`stop` pair
+    wired into `server.py`'s lifespan) matches `_schedule_notify`'s existing
+    style: the first real publish call, on whatever loop is actually
+    running, is what brings the queue and its worker to life — see
+    `_record_queue`'s own docstring for why the queue specifically can't
+    just be a module-level literal instead.
+    """
+    global _record_queue, _record_worker_task
+    if _record_queue is None:
+        _record_queue = asyncio.Queue(maxsize=_RECORD_QUEUE_MAXSIZE)
+    if _record_worker_task is None or _record_worker_task.done():
+        _record_worker_task = asyncio.create_task(_record_worker(_record_queue))
+    return _record_queue
 
 
 def _schedule_record(
     stream: event_log.Stream, payload: Mapping, *, device: str | None, run_id: str | None
 ) -> None:
-    """Fire-and-forget `event_log.record_event(...)` on a worker thread.
+    """Enqueue `event_log.record_event(...)` for the durable-write worker, applying backpressure.
 
     Unlike `_schedule_notify`, this always runs regardless of whether anyone
     is currently subscribed — durable persistence exists to serve a client
     that reconnects *later* (`event_log.get_events`), not to mirror live
-    delivery. `asyncio.to_thread` keeps the blocking `sqlite3` write off the
-    event loop: `indi_messaging`'s messaging-layer events in particular can
-    arrive many times a second for a "chatty" device (see
-    `docs/Design.md#event-streams`), and every other device's messaging and
-    every other script run's pause/cancel/progress polling shares this same
-    event loop.
+    delivery. If the queue is full (the worker falling behind a sustained
+    burst — see `_RECORD_QUEUE_MAXSIZE`), the oldest queued event is dropped
+    to make room for this newest one, and the drop is logged — the same
+    "bounded, newest-biased" policy `_messages`/`_scripts`'s `maxlen` deques
+    already apply to the live in-memory view, rather than letting the queue
+    (and the process's memory) grow without bound.
     """
-    task = asyncio.create_task(_record(stream, payload, device=device, run_id=run_id))
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+    queue = _ensure_record_worker()
+    item = _QueuedEvent(stream, payload, device, run_id)
+    try:
+        queue.put_nowait(item)
+        return
+    except asyncio.QueueFull:
+        pass
+    try:
+        dropped = queue.get_nowait()
+        queue.task_done()
+    except asyncio.QueueEmpty:
+        # The worker drained the queue between our put_nowait and get_nowait above — no
+        # cooperative yield point occurs in between on a single-threaded event loop, so this
+        # can't actually happen today, but there's no harm in not assuming it never will.
+        dropped = None
+    if dropped is not None:
+        logger.warning(
+            "Durable event-log queue is full (maxsize=%d); dropping the oldest queued "
+            "%s event to make room for a new one",
+            _RECORD_QUEUE_MAXSIZE,
+            dropped.stream,
+        )
+    try:
+        queue.put_nowait(item)
+    except asyncio.QueueFull:
+        # Lost a race with another producer refilling the slot we just freed above — drop
+        # this event rather than spin or block a synchronous, fire-and-forget call site.
+        logger.warning("Durable event-log queue is still full; dropping a new %s event", stream)
 
 
 def publish_message_event(event: Mapping) -> None:
