@@ -30,8 +30,11 @@ a time instead, so at most one durable write is ever in flight. If the
 queue fills (the writer falling behind a sustained burst), the *oldest*
 queued event is dropped to make room for the newest — consistent with the
 in-memory buffers above, which already drop their oldest entry once full —
-and logged, rather than growing the queue (and the process's memory)
-without bound.
+rather than growing the queue (and the process's memory) without bound.
+Only every Nth drop is actually logged (`_DROP_LOG_INTERVAL`), not every
+one: during the one scenario this path exists for (a sustained overload),
+logging every single drop would itself pile more small synchronous work
+back onto the event loop, working against the whole point of bounding it.
 """
 
 import asyncio
@@ -106,6 +109,19 @@ independent loops) would be wrong. `None` until the first event is ever publishe
 
 _record_worker_task: asyncio.Task | None = None
 """The single persistent task draining `_record_queue` — see `_record_worker`."""
+
+_DROP_LOG_INTERVAL = 100
+"""Log only every Nth dropped event during a sustained overload, not every single one.
+
+Logging isn't free (formatting, handler I/O) — during the one scenario this drop path actually
+exists for (a sustained burst overwhelming the queue), unconditionally logging every drop would
+itself add a steady stream of small synchronous work back onto the event loop, working against
+the very goal (bounding how much work a burst can pile onto this process) `_RECORD_QUEUE_MAXSIZE`
+exists for.
+"""
+
+_dropped_event_count = 0
+"""Total events dropped by `_schedule_record` since the process started (or the last test reset)."""
 
 
 async def drain() -> None:
@@ -312,11 +328,15 @@ def _schedule_record(
     that reconnects *later* (`event_log.get_events`), not to mirror live
     delivery. If the queue is full (the worker falling behind a sustained
     burst — see `_RECORD_QUEUE_MAXSIZE`), the oldest queued event is dropped
-    to make room for this newest one, and the drop is logged — the same
-    "bounded, newest-biased" policy `_messages`/`_scripts`'s `maxlen` deques
-    already apply to the live in-memory view, rather than letting the queue
-    (and the process's memory) grow without bound.
+    to make room for this newest one — the same "bounded, newest-biased"
+    policy `_messages`/`_scripts`'s `maxlen` deques already apply to the live
+    in-memory view, rather than letting the queue (and the process's
+    memory) grow without bound. Every drop counts against
+    `_dropped_event_count`, but only every `_DROP_LOG_INTERVAL`th one is
+    actually logged, so a sustained overload doesn't turn logging itself
+    into more of the very load this is meant to bound.
     """
+    global _dropped_event_count
     queue = _ensure_record_worker()
     item = _QueuedEvent(stream, payload, device, run_id)
     try:
@@ -328,23 +348,34 @@ def _schedule_record(
         dropped = queue.get_nowait()
         queue.task_done()
     except asyncio.QueueEmpty:
-        # The worker drained the queue between our put_nowait and get_nowait above — no
-        # cooperative yield point occurs in between on a single-threaded event loop, so this
-        # can't actually happen today, but there's no harm in not assuming it never will.
+        # By the same single-threaded, no-yield-point-in-between reasoning as below, another
+        # producer can't actually have refilled/drained this queue out from under us right
+        # here today — but there's no harm in not assuming that never changes.
         dropped = None
     if dropped is not None:
-        logger.warning(
-            "Durable event-log queue is full (maxsize=%d); dropping the oldest queued "
-            "%s event to make room for a new one",
-            _RECORD_QUEUE_MAXSIZE,
-            dropped.stream,
-        )
+        _dropped_event_count += 1
+        if _dropped_event_count % _DROP_LOG_INTERVAL == 1:
+            logger.warning(
+                "Durable event-log queue is full (maxsize=%d); dropped %d event(s) so far "
+                "(most recently a %s event) to make room for new ones",
+                _RECORD_QUEUE_MAXSIZE,
+                _dropped_event_count,
+                dropped.stream,
+            )
     try:
         queue.put_nowait(item)
     except asyncio.QueueFull:
-        # Lost a race with another producer refilling the slot we just freed above — drop
-        # this event rather than spin or block a synchronous, fire-and-forget call site.
-        logger.warning("Durable event-log queue is still full; dropping a new %s event", stream)
+        # Same single-threaded reasoning as the QueueEmpty branch above — this can't actually
+        # happen today either, but drop rather than spin or block a synchronous,
+        # fire-and-forget call site if it ever does.
+        _dropped_event_count += 1
+        if _dropped_event_count % _DROP_LOG_INTERVAL == 1:
+            logger.warning(
+                "Durable event-log queue is still full; dropped %d event(s) so far "
+                "(most recently a %s event)",
+                _dropped_event_count,
+                stream,
+            )
 
 
 def publish_message_event(event: Mapping) -> None:

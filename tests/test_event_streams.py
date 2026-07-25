@@ -370,4 +370,27 @@ async def test_schedule_record_drops_the_oldest_queued_event_once_the_queue_is_f
     assert len(recorded) == maxsize
     assert recorded[0] == 5  # the oldest 5 (i=0..4) were dropped to make room
     assert recorded[-1] == maxsize + 4
-    assert any("dropping the oldest queued" in r.message for r in caplog.records)
+    assert any("dropped" in r.message and "event(s) so far" in r.message for r in caplog.records)
+
+
+async def test_schedule_record_only_logs_every_nth_drop_during_a_sustained_overload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Logging every single dropped event during a sustained overload would itself add a
+    steady stream of small synchronous work back onto the event loop — see `_DROP_LOG_INTERVAL`.
+    Only every Nth drop should actually log a warning, though every drop still counts."""
+    monkeypatch.setattr(event_log, "record_event", lambda *a, **k: None)
+
+    maxsize = event_streams._RECORD_QUEUE_MAXSIZE
+    total_drops = event_streams._DROP_LOG_INTERVAL + 5
+    with caplog.at_level("WARNING"):
+        for i in range(maxsize + total_drops):
+            event_streams.publish_message_event({"kind": "message", "device": None, "i": i})
+        queue = event_streams._record_queue
+        assert queue is not None
+        await queue.join()
+
+    assert event_streams._dropped_event_count == total_drops
+    drop_warnings = [r for r in caplog.records if "dropped" in r.message]
+    # Drop #1 and drop #(_DROP_LOG_INTERVAL + 1) each log; the ones in between don't.
+    assert len(drop_warnings) == 2
