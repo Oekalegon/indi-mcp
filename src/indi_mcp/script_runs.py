@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from indi_mcp import event_streams, script_engine, script_store
+from indi_mcp.issues import Issue
 
 logger = logging.getLogger(__name__)
 
@@ -118,13 +119,14 @@ class ScriptRunMessage(TypedDict):
 class ScriptRunError(TypedDict):
     """The error accompanying a `scriptFailed` status.
 
-    Just `message` for now: `script_engine`'s exceptions (`ScriptValidationError`/
-    `ScriptPreconditionError`/`ScriptExecutionError`) carry a human-readable
-    message but no structured `propertyState`-style detail to surface
-    beyond it yet.
+    `warnings` (INDIMCP-73) is every non-fatal `Issue` collected before the run failed —
+    `script_engine`'s exceptions carry this on their own `warnings` attribute (see
+    `script_engine.ScriptEngineError`), populated from whatever `execute_script`'s
+    `_ExecutionContext` had accumulated up to the point of failure.
     """
 
     message: str
+    warnings: list[Issue]
 
 
 class ScriptRunCompleted(TypedDict):
@@ -148,13 +150,21 @@ class ScriptRunFailed(TypedDict):
 
 
 class ScriptRunCancelled(TypedDict):
-    """The terminal status of a run stopped via `cancel_script`."""
+    """The terminal status of a run stopped via `cancel_script`.
+
+    `warnings` (INDIMCP-73) is whatever non-fatal `Issue`s were collected before
+    cancellation — for consistency with `ScriptRunCompleted`/`ScriptRunFailed`: a run doesn't
+    stop collecting warnings just because it was cancelled rather than finishing or failing on
+    its own, and `script_engine.ScriptCancelled` carries them the same way every other
+    `ScriptEngineError` does.
+    """
 
     kind: str
     runId: str
     rigId: str
     cancelledAtStep: int
     finishedAt: str
+    warnings: list[Issue]
 
 
 class ScriptRunPaused(TypedDict):
@@ -381,13 +391,14 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             on_status=on_status,
             run_id=run.run_id,
         )
-    except script_engine.ScriptCancelled:
+    except script_engine.ScriptCancelled as exc:
         run.latest_status = {
             "kind": "scriptCancelled",
             "runId": run.run_id,
             "rigId": run.rig_id,
             "cancelledAtStep": run.latest_step,
             "finishedAt": _now(),
+            "warnings": exc.warnings,
         }
     except (
         script_engine.ScriptValidationError,
@@ -399,7 +410,7 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             "runId": run.run_id,
             "rigId": run.rig_id,
             "failedAtStep": run.latest_step,
-            "error": {"message": str(exc)},
+            "error": {"message": str(exc), "warnings": exc.warnings},
         }
     except Exception as exc:  # safety net for anything undocumented, see docstring above
         logger.exception("Unexpected error while running script run %s", run.run_id)
@@ -408,7 +419,10 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             "runId": run.run_id,
             "rigId": run.rig_id,
             "failedAtStep": run.latest_step,
-            "error": {"message": f"internal error: {exc}"},
+            "error": {
+                "message": f"internal error: {exc}",
+                "warnings": getattr(exc, "warnings", []),
+            },
         }
     else:
         run.latest_status = {

@@ -42,6 +42,7 @@ __all__ = [
     "Role",
     "check_rig",
     "draft_rig",
+    "filter_slots",
     "get_rig",
     "list_rigs",
     "load_rigs",
@@ -435,7 +436,7 @@ def _draft_component(role: Role, device: DraftDeviceInfo) -> Component:
             bitDepth=bit_depth,
         )
     if role == "filterWheel":
-        slots = _filter_slots(device["filterNames"])
+        slots = filter_slots(device["filterNames"])
         return Component(role=role, id=device["name"], device=device["name"], slots=slots or None)
     if role == "focuser" and device["focusRange"] is not None:
         min_position, max_position = device["focusRange"]
@@ -467,8 +468,13 @@ def _ccd_info_fields(
     )
 
 
-def _filter_slots(filter_names: dict[str, str] | None) -> dict[int, str]:
-    """Parse a `FILTER_NAME` property's `FILTER_SLOT_NAME_<n>` members into `{slot: name}`."""
+def filter_slots(filter_names: dict[str, str] | None) -> dict[int, str]:
+    """Parse a `FILTER_NAME` property's `FILTER_SLOT_NAME_<n>` members into `{slot: name}`.
+
+    Public (INDIMCP-73): `script_engine._check_filter_config_matches_driver` calls this too,
+    to parse a filter wheel driver's own live `FILTER_NAME` into the exact same shape as a rig
+    component's configured `slots` map, so the two can be compared directly.
+    """
     if not filter_names:
         return {}
     slots: dict[int, str] = {}
