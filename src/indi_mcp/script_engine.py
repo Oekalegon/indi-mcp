@@ -2008,7 +2008,7 @@ def _check_filter_config_matches_driver(ctx: _ExecutionContext, role: str, devic
     live_values = indi_messaging.get_property_values(device, "FILTER_NAME")
     if live_values is None:
         return
-    live_slots = rig_store._filter_slots(live_values)
+    live_slots = rig_store.filter_slots(live_values)
     if live_slots != rig_slots:
         _report_issue(
             ctx,

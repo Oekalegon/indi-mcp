@@ -150,13 +150,21 @@ class ScriptRunFailed(TypedDict):
 
 
 class ScriptRunCancelled(TypedDict):
-    """The terminal status of a run stopped via `cancel_script`."""
+    """The terminal status of a run stopped via `cancel_script`.
+
+    `warnings` (INDIMCP-73) is whatever non-fatal `Issue`s were collected before
+    cancellation — for consistency with `ScriptRunCompleted`/`ScriptRunFailed`: a run doesn't
+    stop collecting warnings just because it was cancelled rather than finishing or failing on
+    its own, and `script_engine.ScriptCancelled` carries them the same way every other
+    `ScriptEngineError` does.
+    """
 
     kind: str
     runId: str
     rigId: str
     cancelledAtStep: int
     finishedAt: str
+    warnings: list[Issue]
 
 
 class ScriptRunPaused(TypedDict):
@@ -383,13 +391,14 @@ async def _run_and_record(run: _Run, parameters: dict[str, Any]) -> None:
             on_status=on_status,
             run_id=run.run_id,
         )
-    except script_engine.ScriptCancelled:
+    except script_engine.ScriptCancelled as exc:
         run.latest_status = {
             "kind": "scriptCancelled",
             "runId": run.run_id,
             "rigId": run.rig_id,
             "cancelledAtStep": run.latest_step,
             "finishedAt": _now(),
+            "warnings": exc.warnings,
         }
     except (
         script_engine.ScriptValidationError,

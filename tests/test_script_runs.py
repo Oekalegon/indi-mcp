@@ -351,9 +351,73 @@ async def test_cancel_script_stops_a_running_script_and_reports_scriptCancelled(
     assert cancelled["runId"] == started["runId"]
     assert cancelled["rigId"] == "test-rig"
     assert cancelled["cancelledAtStep"] == 0
+    assert cancelled["warnings"] == []
 
     # get_script_status agrees with what cancel_script returned.
     assert script_runs.get_script_status(started["runId"]) == status
+
+
+async def test_cancel_script_after_a_warning_still_reports_it_on_scriptCancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A warning (INDIMCP-73) collected before a run is cancelled isn't dropped just because
+    the run ended via cancellation rather than completing or failing on its own — consistent
+    with `ScriptRunCompleted`/`ScriptRunFailed` both carrying `warnings` too."""
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        ),
+        rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
+    )
+    _script(
+        "select_filter-then-wait",
+        steps=[
+            {"step": "select_filter", "role": "filterWheel", "filterName": "Red"},
+            _wait_for("mount", "CONNECTION", "equals", "On", element="DISCONNECT", timeout=100),
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_state",
+        lambda device, name: "Ok" if device == "Filter Wheel Simulator" else "Idle",
+    )
+
+    started = await script_runs.start_script("select_filter-then-wait", "test-rig", {})
+
+    # Let the `select_filter` step (step 1) actually run — and collect its warning — before
+    # cancelling; `wait_for` (step 2) reporting progress means step 1 already fully completed
+    # (steps run strictly sequentially), unlike cancelling immediately, which would land before
+    # `select_filter`'s own cancellation check ever lets it start.
+    async def _await_step_2_progress() -> None:
+        while True:
+            current = script_runs.get_script_status(started["runId"])
+            if current["kind"] == "scriptProgress":
+                progress = cast(script_runs.ScriptRunProgress, current)
+                if progress["step"] == 2:
+                    return
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(_await_step_2_progress(), timeout=2)
+
+    status = await asyncio.wait_for(script_runs.cancel_script(started["runId"]), timeout=2)
+
+    assert status["kind"] == "scriptCancelled"
+    cancelled = cast(script_runs.ScriptRunCancelled, status)
+    assert len(cancelled["warnings"]) == 1
+    assert cancelled["warnings"][0]["code"] == "filterConfigMismatch"
 
 
 async def test_pause_script_rejects_when_script_is_not_pausable() -> None:
