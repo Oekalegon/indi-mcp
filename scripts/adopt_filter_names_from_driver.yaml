@@ -1,0 +1,14 @@
+id: adopt_filter_names_from_driver
+name: Copy the filter wheel driver's filter names onto the rig
+description: >
+  Explicitly copies the EFW driver's live FILTER_NAME onto the rig's filterWheel slots map,
+  overwriting whatever the rig currently declares. A thin, reusable wrapper around the
+  adopt_filter_names_from_driver step primitive so composed sequences can
+  `run_script: adopt_filter_names_from_driver` instead of repeating a raw
+  adopt_filter_names_from_driver step — see docs/Design.md's "Composing scripts" section. The
+  reverse direction from sync_filter_names.yaml; never run implicitly by select_filter, this
+  is a deliberate action to opt into (INDIMCP-64).
+pausable: false
+steps:
+  - step: adopt_filter_names_from_driver
+    role: filterWheel

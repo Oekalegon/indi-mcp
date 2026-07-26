@@ -48,6 +48,7 @@ __all__ = [
     "load_rigs",
     "save_rig",
     "suggest_rig",
+    "update_component_slots",
 ]
 
 RIGS_DIR_ENV = "INDI_MCP_RIGS_DIR"
@@ -317,6 +318,39 @@ def save_rig(rig: Rig, *, overwrite: bool = False, directory: Path | None = None
     return get_rig(rig.id)
 
 
+def update_component_slots(rig_id: str, role: str, slots: dict[int, str]) -> Rig:
+    """Persist `slots` onto rig `rig_id`'s `role` component and reload it (INDIMCP-64).
+
+    Used both when `select_filter` auto-adopts the driver's `FILTER_NAME` onto a filter wheel
+    component that has no `slots` configured at all yet
+    (`script_engine._reconcile_filter_config_with_driver`), and when
+    `script_engine.adopt_filter_names_from_driver` deliberately overwrites an *existing*
+    `slots` map instead — in both cases so the rig's YAML file (not just the in-memory `Rig`)
+    is updated, since it's the durable source of truth (`docs/RigSchema.md`). `overwrite=True`
+    here is an update to an existing, already-owned rig file (adding/replacing data on one of
+    its own components), not the "reusing an id could silently destroy someone else's rig"
+    case `save_rig`'s `overwrite` guard exists to prevent.
+
+    Raises `ValueError` if `role` doesn't resolve to exactly one component — a rig's `role` is
+    explicitly allowed to be shared by more than one component (`Component.role`'s own
+    docstring), so silently updating every matching component (or an arbitrary one) could
+    apply one physical device's filter names to a rig entry that actually describes a
+    different device.
+    """
+    rig = get_rig(rig_id)
+    matches = [component for component in rig.components if component.role == role]
+    if len(matches) != 1:
+        raise ValueError(
+            f"rig {rig_id!r} has {len(matches)} component(s) for role {role!r}; "
+            "expected exactly one"
+        )
+    updated_components = [
+        component.model_copy(update={"slots": slots}) if component.role == role else component
+        for component in rig.components
+    ]
+    return save_rig(rig.model_copy(update={"components": updated_components}), overwrite=True)
+
+
 def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
     """Propose which loaded rig is likely mounted, by matching connected INDI device names.
 
@@ -471,9 +505,10 @@ def _ccd_info_fields(
 def filter_slots(filter_names: dict[str, str] | None) -> dict[int, str]:
     """Parse a `FILTER_NAME` property's `FILTER_SLOT_NAME_<n>` members into `{slot: name}`.
 
-    Public (INDIMCP-73): `script_engine._check_filter_config_matches_driver` calls this too,
-    to parse a filter wheel driver's own live `FILTER_NAME` into the exact same shape as a rig
-    component's configured `slots` map, so the two can be compared directly.
+    Public (INDIMCP-64): `script_engine._reconcile_filter_config_with_driver` and
+    `script_engine.sync_filter_names` both call this too, to parse a filter wheel driver's own
+    live `FILTER_NAME` into the exact same shape as a rig component's configured `slots` map,
+    so the two can be compared directly.
     """
     if not filter_names:
         return {}

@@ -1,6 +1,6 @@
 import asyncio
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -283,17 +283,12 @@ async def test_run_with_an_undocumented_exception_still_reports_scriptFailed(
 async def test_run_that_warns_then_fails_reports_the_warning_on_scriptFailed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A run that collects a non-fatal warning (INDIMCP-73) before later failing fatally still
-    reports that warning on `ScriptRunFailed.error.warnings` — nothing collected earlier is
-    lost just because the run ultimately aborts."""
-    _rig(
-        rig_store.Component(
-            role="filterWheel",
-            id="fw-1",
-            device="Filter Wheel Simulator",
-            slots={1: "Luminance", 2: "Red"},
-        )
-    )
+    """A run that collects a non-fatal issue (INDIMCP-73) before later failing fatally still
+    reports that issue on `ScriptRunFailed.error.warnings` — nothing collected earlier is lost
+    just because the run ultimately aborts. Step 1's rig component has no filter slots
+    configured, so it adopts the driver's `FILTER_NAME` (an `INFO` issue, INDIMCP-64) before
+    step 2 fails outright resolving an unknown filter name."""
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
     _script(
         "select_filter-then-fail",
         steps=[
@@ -307,11 +302,12 @@ async def test_run_that_warns_then_fails_reports_the_warning_on_scriptFailed(
         indi_messaging,
         "get_property_values",
         lambda device, name: (
-            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
             if name == "FILTER_NAME"
             else _default_get_property_values(device, name)
         ),
     )
+    monkeypatch.setattr(rig_store, "update_component_slots", MagicMock())
 
     started = await script_runs.start_script("select_filter-then-fail", "test-rig", {})
     await _await_run(started["runId"])
@@ -322,7 +318,7 @@ async def test_run_that_warns_then_fails_reports_the_warning_on_scriptFailed(
     failed = cast(script_runs.ScriptRunFailed, status)
     assert "no slot named 'Nonexistent'" in failed["error"]["message"]
     assert len(failed["error"]["warnings"]) == 1
-    assert failed["error"]["warnings"][0]["code"] == "filterConfigMismatch"
+    assert failed["error"]["warnings"][0]["code"] == "filterSlotsCopiedFromDriver"
 
 
 async def test_get_script_status_raises_for_unknown_run_id() -> None:
@@ -360,16 +356,13 @@ async def test_cancel_script_stops_a_running_script_and_reports_scriptCancelled(
 async def test_cancel_script_after_a_warning_still_reports_it_on_scriptCancelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A warning (INDIMCP-73) collected before a run is cancelled isn't dropped just because
-    the run ended via cancellation rather than completing or failing on its own — consistent
-    with `ScriptRunCompleted`/`ScriptRunFailed` both carrying `warnings` too."""
+    """A non-fatal issue (INDIMCP-73) collected before a run is cancelled isn't dropped just
+    because the run ended via cancellation rather than completing or failing on its own —
+    consistent with `ScriptRunCompleted`/`ScriptRunFailed` both carrying `warnings` too. Step
+    1's rig component has no filter slots configured, so it adopts the driver's `FILTER_NAME`
+    (an `INFO` issue, INDIMCP-64)."""
     _rig(
-        rig_store.Component(
-            role="filterWheel",
-            id="fw-1",
-            device="Filter Wheel Simulator",
-            slots={1: "Luminance", 2: "Red"},
-        ),
+        rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"),
         rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"),
     )
     _script(
@@ -384,7 +377,7 @@ async def test_cancel_script_after_a_warning_still_reports_it_on_scriptCancelled
         indi_messaging,
         "get_property_values",
         lambda device, name: (
-            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
             if name == "FILTER_NAME"
             else _default_get_property_values(device, name)
         ),
@@ -394,10 +387,11 @@ async def test_cancel_script_after_a_warning_still_reports_it_on_scriptCancelled
         "get_property_state",
         lambda device, name: "Ok" if device == "Filter Wheel Simulator" else "Idle",
     )
+    monkeypatch.setattr(rig_store, "update_component_slots", MagicMock())
 
     started = await script_runs.start_script("select_filter-then-wait", "test-rig", {})
 
-    # Let the `select_filter` step (step 1) actually run — and collect its warning — before
+    # Let the `select_filter` step (step 1) actually run — and collect its issue — before
     # cancelling; `wait_for` (step 2) reporting progress means step 1 already fully completed
     # (steps run strictly sequentially), unlike cancelling immediately, which would land before
     # `select_filter`'s own cancellation check ever lets it start.
@@ -417,7 +411,7 @@ async def test_cancel_script_after_a_warning_still_reports_it_on_scriptCancelled
     assert status["kind"] == "scriptCancelled"
     cancelled = cast(script_runs.ScriptRunCancelled, status)
     assert len(cancelled["warnings"]) == 1
-    assert cancelled["warnings"][0]["code"] == "filterConfigMismatch"
+    assert cancelled["warnings"][0]["code"] == "filterSlotsCopiedFromDriver"
 
 
 async def test_pause_script_rejects_when_script_is_not_pausable() -> None:

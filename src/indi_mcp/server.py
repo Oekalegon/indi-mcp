@@ -24,6 +24,7 @@ from indi_mcp import (
     indi_server,
     observatory_store,
     rig_store,
+    script_engine,
     script_runs,
     script_store,
 )
@@ -33,6 +34,7 @@ from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
 from indi_mcp.observatory_store import Observatory, ObservatorySummary
 from indi_mcp.rig_store import DraftDeviceInfo, Rig, RigCheck, RigDraft, RigSuggestion, RigSummary
+from indi_mcp.script_engine import FilterAdoptOutcome, FilterSyncOutcome
 from indi_mcp.script_runs import (
     ScriptRunPaused,
     ScriptRunPauseRejected,
@@ -306,6 +308,71 @@ def check_rig(rig_id: str) -> RigCheck:
     used without one of its devices (e.g. imaging without a guide camera).
     """
     return rig_store.check_rig(rig_id, indi_messaging.list_devices())
+
+
+def _resolve_unique_connected_component(rig_id: str, role: str) -> rig_store.Component:
+    """The single, device-connected component of `rig_id` matching `role` (INDIMCP-64).
+
+    A rig's `role` is explicitly allowed to be shared by more than one component
+    (`rig_store.Component.role`'s own docstring), so `sync_filter_names`/
+    `adopt_filter_names_from_driver` can't just take the first match the way a careless
+    `next(...)` would — that risks silently reading one physical filter wheel's `device`/
+    `slots` while `rig_store.update_component_slots` (called by both tools) writes to *every*
+    component sharing the role. Raising here if `role` doesn't resolve to exactly one
+    connected component mirrors `script_engine._resolve_role_to_component`'s own strict
+    behavior for a script run resolving roles to devices.
+    """
+    rig = rig_store.get_rig(rig_id)
+    matches = [c for c in rig.components if c.role == role and c.device is not None]
+    if len(matches) != 1:
+        raise ValueError(
+            f"rig {rig_id!r} has {len(matches)} connected component(s) for role {role!r}; "
+            "expected exactly one"
+        )
+    return matches[0]
+
+
+@mcp.tool()
+async def sync_filter_names(rig_id: str, role: str) -> FilterSyncOutcome:
+    """Push `rig_id`'s configured filter names for `role` to the EFW driver's live
+    `FILTER_NAME`, if they disagree (INDIMCP-64).
+
+    A deliberate action only: `select_filter` never does this on its own — it either adopts
+    the driver's names onto the rig if the rig has no `slots` configured, or fails fatally if
+    it does and they disagree, but never overwrites the driver itself — since overwriting a
+    live device's own configuration should always be something an operator or client
+    explicitly asked for. Call this tool (or use a script's own explicit `sync_filter_names`
+    step) when that's actually what's wanted; see `adopt_filter_names_from_driver` for the
+    reverse direction (copying the driver's config onto the rig instead). Raises if `role`
+    isn't a connected `filterWheel`-like component with `slots` configured, if the device
+    doesn't expose `FILTER_NAME`, or if the rig and driver declare a different *number* of
+    filter slots (refuses to push a configuration for what's likely a differently-sized wheel).
+    """
+    component = _resolve_unique_connected_component(rig_id, role)
+    assert component.device is not None  # guaranteed by _resolve_unique_connected_component
+    return await script_engine.sync_filter_names(role, component.device, component.slots or {})
+
+
+@mcp.tool()
+async def adopt_filter_names_from_driver(rig_id: str, role: str) -> FilterAdoptOutcome:
+    """Copy the EFW driver's live `FILTER_NAME` for `role` onto rig `rig_id`, overwriting
+    whatever filter `slots` the rig currently declares (INDIMCP-64) — the reverse direction
+    from `sync_filter_names`.
+
+    A deliberate action only, for when a rig and its driver disagree and the operator decides
+    the *driver* is the source of truth this time. `select_filter`'s own automatic
+    reconciliation never overwrites a rig that already has `slots` configured (it fails
+    fatally on disagreement instead, requiring the operator to choose a direction explicitly);
+    this tool (or a script's own explicit `adopt_filter_names_from_driver` step) is that
+    choice. Raises if `role` isn't a connected `filterWheel`-like component, if the device
+    doesn't expose `FILTER_NAME`, if the driver declares no filter slots at all, or if
+    persisting the change to the rig's YAML file fails.
+    """
+    component = _resolve_unique_connected_component(rig_id, role)
+    assert component.device is not None  # guaranteed by _resolve_unique_connected_component
+    return await script_engine.adopt_filter_names_from_driver(
+        rig_id, role, component.device, component.slots or {}
+    )
 
 
 @mcp.tool()

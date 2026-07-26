@@ -353,6 +353,86 @@ def test_referenced_roles_includes_a_select_filter_steps_role() -> None:
     assert script_store.referenced_roles(script) == {"filterWheel"}
 
 
+def test_sync_filter_names_step_parses_with_just_a_role() -> None:
+    step = script_store.SyncFilterNamesStep(step="sync_filter_names", role="filterWheel")
+
+    assert step.role == "filterWheel"
+
+
+def test_load_scripts_parses_a_sync_filter_names_step(tmp_path: Path) -> None:
+    (tmp_path / "sync_filters.yaml").write_text(
+        """
+        id: sync_filters
+        name: Sync filter names
+        pausable: false
+        steps:
+          - step: sync_filter_names
+            role: filterWheel
+        """
+    )
+
+    scripts = script_store.load_scripts(tmp_path)
+
+    assert len(scripts) == 1
+    (step,) = scripts[0].steps
+    assert isinstance(step, script_store.SyncFilterNamesStep)
+    assert step.role == "filterWheel"
+
+
+def test_referenced_roles_includes_a_sync_filter_names_steps_role() -> None:
+    script = script_store.Script(
+        id="sync_filters",
+        name="Sync filter names",
+        pausable=False,
+        steps=[script_store.SyncFilterNamesStep(step="sync_filter_names", role="filterWheel")],
+    )
+
+    assert script_store.referenced_roles(script) == {"filterWheel"}
+
+
+def test_adopt_filter_names_from_driver_step_parses_with_just_a_role() -> None:
+    step = script_store.AdoptFilterNamesFromDriverStep(
+        step="adopt_filter_names_from_driver", role="filterWheel"
+    )
+
+    assert step.role == "filterWheel"
+
+
+def test_load_scripts_parses_an_adopt_filter_names_from_driver_step(tmp_path: Path) -> None:
+    (tmp_path / "adopt_filters.yaml").write_text(
+        """
+        id: adopt_filters
+        name: Adopt filter names from driver
+        pausable: false
+        steps:
+          - step: adopt_filter_names_from_driver
+            role: filterWheel
+        """
+    )
+
+    scripts = script_store.load_scripts(tmp_path)
+
+    assert len(scripts) == 1
+    (step,) = scripts[0].steps
+    assert isinstance(step, script_store.AdoptFilterNamesFromDriverStep)
+    assert step.role == "filterWheel"
+
+
+def test_referenced_roles_includes_an_adopt_filter_names_from_driver_steps_role() -> None:
+    script = script_store.Script(
+        id="adopt_filters",
+        name="Adopt filter names from driver",
+        pausable=False,
+        steps=[
+            script_store.AdoptFilterNamesFromDriverStep(
+                step="adopt_filter_names_from_driver", role="filterWheel"
+            )
+        ],
+    )
+
+    assert script_store.referenced_roles(script) == {"filterWheel"}
+
+
 def test_set_focus_position_step_parses_with_default_timeout() -> None:
     step = script_store.SetFocusPositionStep(
         step="set_focus_position", role="focuser", position=7000

@@ -21,6 +21,7 @@ from indi_mcp import (
     indi_messaging,
     observatory_store,
     rig_store,
+    script_engine,
     script_runs,
     script_store,
     server,
@@ -136,6 +137,138 @@ async def test_save_rig_delegates_to_rig_store_with_the_overwrite_flag(
 
     assert result == rig
     assert calls == [(rig, True)]
+
+
+async def test_sync_filter_names_delegates_to_script_engine_with_resolved_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(
+        id="test-rig",
+        name="Test rig",
+        components=[
+            rig_store.Component(
+                role="filterWheel",
+                id="fw-1",
+                device="Filter Wheel Simulator",
+                slots={1: "Luminance", 2: "Red"},
+            )
+        ],
+    )
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+
+    calls: list[tuple[str, str, dict[int, str]]] = []
+
+    async def fake_sync_filter_names(
+        role: str, device: str, rig_slots: dict[int, str]
+    ) -> script_engine.FilterSyncOutcome:
+        calls.append((role, device, rig_slots))
+        return {"status": "matched", "rigSlots": rig_slots, "liveSlots": rig_slots}
+
+    monkeypatch.setattr(script_engine, "sync_filter_names", fake_sync_filter_names)
+
+    result = await server.sync_filter_names("test-rig", "filterWheel")
+
+    assert calls == [("filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"})]
+    assert result == {
+        "status": "matched",
+        "rigSlots": {1: "Luminance", 2: "Red"},
+        "liveSlots": {1: "Luminance", 2: "Red"},
+    }
+
+
+async def test_sync_filter_names_raises_when_role_has_no_connected_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+
+    with pytest.raises(ValueError, match="expected exactly one"):
+        await server.sync_filter_names("test-rig", "filterWheel")
+
+
+async def test_sync_filter_names_raises_when_role_matches_more_than_one_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(
+        id="test-rig",
+        name="Test rig",
+        components=[
+            rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"),
+            rig_store.Component(role="filterWheel", id="fw-2", device="Filter Wheel Simulator 2"),
+        ],
+    )
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+
+    with pytest.raises(ValueError, match="expected exactly one"):
+        await server.sync_filter_names("test-rig", "filterWheel")
+
+
+async def test_adopt_filter_names_from_driver_delegates_to_script_engine_with_resolved_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(
+        id="test-rig",
+        name="Test rig",
+        components=[
+            rig_store.Component(
+                role="filterWheel",
+                id="fw-1",
+                device="Filter Wheel Simulator",
+                slots={1: "Luminance", 2: "Red"},
+            )
+        ],
+    )
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+
+    calls: list[tuple[str, str, str, dict[int, str]]] = []
+
+    async def fake_adopt_filter_names_from_driver(
+        rig_id: str, role: str, device: str, rig_slots: dict[int, str]
+    ) -> script_engine.FilterAdoptOutcome:
+        calls.append((rig_id, role, device, rig_slots))
+        return {"status": "matched", "rigSlots": rig_slots, "liveSlots": rig_slots}
+
+    monkeypatch.setattr(
+        script_engine, "adopt_filter_names_from_driver", fake_adopt_filter_names_from_driver
+    )
+
+    result = await server.adopt_filter_names_from_driver("test-rig", "filterWheel")
+
+    assert calls == [
+        ("test-rig", "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"})
+    ]
+    assert result == {
+        "status": "matched",
+        "rigSlots": {1: "Luminance", 2: "Red"},
+        "liveSlots": {1: "Luminance", 2: "Red"},
+    }
+
+
+async def test_adopt_filter_names_from_driver_raises_when_role_has_no_connected_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+
+    with pytest.raises(ValueError, match="expected exactly one"):
+        await server.adopt_filter_names_from_driver("test-rig", "filterWheel")
+
+
+async def test_adopt_filter_names_from_driver_raises_when_role_matches_more_than_one_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(
+        id="test-rig",
+        name="Test rig",
+        components=[
+            rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"),
+            rig_store.Component(role="filterWheel", id="fw-2", device="Filter Wheel Simulator 2"),
+        ],
+    )
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+
+    with pytest.raises(ValueError, match="expected exactly one"):
+        await server.adopt_filter_names_from_driver("test-rig", "filterWheel")
 
 
 async def test_save_observatory_delegates_to_observatory_store_with_the_overwrite_flag(
