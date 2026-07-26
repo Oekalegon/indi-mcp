@@ -20,7 +20,8 @@ see "Script composition" below.
 
 This is deliberately a **closed, fixed vocabulary of step primitives** (`set_property`,
 `wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`, `sync_filter_names`,
-`set_focus_position`, `run_script`, `repeat`, `if`) — unlike a rig component's
+`adopt_filter_names_from_driver`, `set_focus_position`, `run_script`, `repeat`, `if`) — unlike
+a rig component's
 `role`, which accepts any string for extensibility, a step's `step` field must be one of these
 exact values. There is no embedded expression language: conditionals are a fixed, closed set of
 comparison operators over known INDI property state, not arbitrary code — see "Design notes"
@@ -127,7 +128,7 @@ can express in YAML alone — not just a stylistic choice:
   `if` are pure control flow with no INDI interaction of their own. Nothing about these needs
   device- or operation-specific code — the same handler serves every script.
 * **Engine-implemented primitives** — `capture_frame`, `slew`, `cool_camera`, `select_filter`,
-  `sync_filter_names`, `set_focus_position` —
+  `sync_filter_names`, `adopt_filter_names_from_driver`, `set_focus_position` —
   each bundle a *sequence* of INDI commands (and sometimes non-INDI work) that isn't reducible to
   a single `set_property`/`wait_for` pair. `capture_frame`, for example, is really "set frame
   type, set exposure, wait through the `Busy`→`Ok` transition, drain the BLOB, write it to frame
@@ -145,8 +146,10 @@ can express in YAML alone — not just a stylistic choice:
   if the rig has none configured yet, otherwise failing fatally on any disagreement, rather than
   risking the wrong physical filter moving into the light path (INDIMCP-64, see below).
   `sync_filter_names` explicitly pushes the rig's `slots` onto the driver's `FILTER_NAME` when
-  they disagree — a deliberate, standalone action (INDIMCP-64), never an automatic side effect
-  of `select_filter`. `set_focus_position` similarly needs
+  they disagree, and `adopt_filter_names_from_driver` explicitly copies the driver's
+  `FILTER_NAME` onto the rig's `slots` instead — both deliberate, standalone actions
+  (INDIMCP-64), never an automatic side effect of `select_filter`. `set_focus_position`
+  similarly needs
   rig configuration a plain `set_property` step has no access to: it checks its target `position`
   against the rig's own focuser `minPosition`/`maxPosition` (`docs/RigSchema.md`) before setting
   `ABS_FOCUS_POSITION` and waiting for `Ok` — not every focuser driver rejects an out-of-range
@@ -250,7 +253,9 @@ driver's own live `FILTER_NAME` (INDIMCP-64):
   names), the step fails with a `filterConfigMismatch` issue and the run aborts — selecting a
   filter under a config mismatch risks moving the wrong physical filter into the light path, so
   this never guesses which side is right or silently proceeds. Fix the disagreement (hand-edit
-  the rig, reconfigure the driver, or run `sync_filter_names`) before selecting a filter again.
+  the rig, reconfigure the driver, run `sync_filter_names` to push the rig's config onto the
+  driver, or run `adopt_filter_names_from_driver` to copy the driver's config onto the rig)
+  before selecting a filter again.
 * Skipped entirely if the driver doesn't expose `FILTER_NAME` at all, or if neither side has any
   slots configured.
 
@@ -273,6 +278,22 @@ overwrite the driver's own `FILTER_NAME`. Fails (`scriptFailed`) if the driver d
 `FILTER_NAME` at all, if the rig has no `slots` configured, or if the rig and the driver declare
 a *different number* of filter slots (refusing to push a configuration for what's likely a
 differently-sized wheel or the wrong device).
+
+#### `adopt_filter_names_from_driver`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `role` | string | yes | Typically `"filterWheel"`. |
+
+The reverse direction from `sync_filter_names`: explicitly copies the driver's live
+`FILTER_NAME` onto the rig component's own `slots` map, overwriting whatever the rig currently
+declares — persisted to the rig's YAML file, so every future run has the copied names too, not
+just this one. A deliberate, standalone action (INDIMCP-64): for when a rig and its driver
+disagree and the operator decides the *driver* is the source of truth this time (`select_filter`
+never overwrites a rig that already has `slots` configured on its own — it fails fatally on
+disagreement instead, see above). Fails (`scriptFailed`) if the driver doesn't expose
+`FILTER_NAME` at all, if the driver's live `FILTER_NAME` declares no filter slots, or if
+persisting the change to the rig's YAML file fails.
 
 #### `set_focus_position`
 
@@ -437,7 +458,8 @@ than being written and silently dropped at the next load.
 
 * **Fixed step vocabulary, no embedded expression language.** `step` is a closed enum
   (`set_property`, `wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`,
-  `sync_filter_names`, `set_focus_position`, `run_script`, `repeat`, `if`); condition
+  `sync_filter_names`, `adopt_filter_names_from_driver`, `set_focus_position`, `run_script`,
+  `repeat`, `if`); condition
   `operator`s are a closed enum; parameter substitution (`"{{ name }}"`) is plain value lookup,
   never code to evaluate. A script is declarative data, safe to author on the Client Computer and
   upload, consistent with [Design.md](Design.md#architecture-overview)'s scripting-layer intro.

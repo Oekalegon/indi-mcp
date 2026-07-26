@@ -3870,6 +3870,199 @@ async def test_execute_script_sync_filter_names_fails_when_slot_counts_differ(
     send_property.assert_not_awaited()
 
 
+async def test_adopt_filter_names_from_driver_returns_matched_when_already_equal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"},
+    )
+    update_component_slots = MagicMock()
+    monkeypatch.setattr(rig_store, "update_component_slots", update_component_slots)
+
+    outcome = await script_engine.adopt_filter_names_from_driver(
+        "test-rig", "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"}
+    )
+
+    assert outcome == {
+        "status": "matched",
+        "rigSlots": {1: "Luminance", 2: "Red"},
+        "liveSlots": {1: "Luminance", 2: "Red"},
+    }
+    update_component_slots.assert_not_called()
+
+
+async def test_adopt_filter_names_from_driver_persists_and_returns_adopted_when_they_disagree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"},
+    )
+    update_component_slots = MagicMock()
+    monkeypatch.setattr(rig_store, "update_component_slots", update_component_slots)
+
+    outcome = await script_engine.adopt_filter_names_from_driver(
+        "test-rig", "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"}
+    )
+
+    update_component_slots.assert_called_once_with(
+        "test-rig", "filterWheel", {1: "Luminance", 2: "Green"}
+    )
+    assert outcome == {
+        "status": "adopted",
+        "rigSlots": {1: "Luminance", 2: "Green"},
+        "liveSlots": {1: "Luminance", 2: "Green"},
+    }
+
+
+async def test_adopt_filter_names_from_driver_raises_when_driver_lacks_filter_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(indi_messaging, "get_property_values", lambda device, name: None)
+
+    with pytest.raises(ValueError, match="does not expose FILTER_NAME"):
+        await script_engine.adopt_filter_names_from_driver(
+            "test-rig", "filterWheel", "Filter Wheel Simulator", {1: "Luminance"}
+        )
+
+
+async def test_adopt_filter_names_from_driver_raises_when_driver_has_no_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(indi_messaging, "get_property_values", lambda device, name: {})
+
+    with pytest.raises(ValueError, match="declares no filter slots"):
+        await script_engine.adopt_filter_names_from_driver(
+            "test-rig", "filterWheel", "Filter Wheel Simulator", {1: "Luminance"}
+        )
+
+
+async def test_adopt_filter_names_from_driver_raises_when_persisting_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"},
+    )
+    monkeypatch.setattr(
+        rig_store, "update_component_slots", MagicMock(side_effect=OSError("disk full"))
+    )
+
+    with pytest.raises(ValueError, match="persisting filter names copied from driver"):
+        await script_engine.adopt_filter_names_from_driver(
+            "test-rig", "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"}
+        )
+
+
+async def test_execute_script_adopt_filter_names_from_driver_reports_info_issue_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        )
+    )
+    _script(
+        "adopt_filter_names_from_driver",
+        steps=[{"step": "adopt_filter_names_from_driver", "role": "filterWheel"}],
+    )
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+    update_component_slots = MagicMock()
+    monkeypatch.setattr(rig_store, "update_component_slots", update_component_slots)
+
+    result = await script_engine.execute_script("adopt_filter_names_from_driver", "test-rig", {})
+
+    update_component_slots.assert_called_once_with(
+        "test-rig", "filterWheel", {1: "Luminance", 2: "Green"}
+    )
+    assert len(result["warnings"]) == 1
+    issue = result["warnings"][0]
+    assert issue["kind"] == "issue"
+    assert issue["severity"] == script_engine.Severity.INFO
+    assert issue["code"] == "filterConfigAdopted"
+    assert issue["role"] == "filterWheel"
+    assert issue["device"] == "Filter Wheel Simulator"
+
+
+async def test_execute_script_adopt_filter_names_from_driver_reports_no_issue_when_already_matched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        )
+    )
+    _script(
+        "adopt_filter_names_from_driver",
+        steps=[{"step": "adopt_filter_names_from_driver", "role": "filterWheel"}],
+    )
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+    update_component_slots = MagicMock()
+    monkeypatch.setattr(rig_store, "update_component_slots", update_component_slots)
+
+    result = await script_engine.execute_script("adopt_filter_names_from_driver", "test-rig", {})
+
+    update_component_slots.assert_not_called()
+    assert result["warnings"] == []
+
+
+async def test_execute_script_adopt_filter_names_from_driver_fails_when_driver_has_no_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        )
+    )
+    _script(
+        "adopt_filter_names_from_driver",
+        steps=[{"step": "adopt_filter_names_from_driver", "role": "filterWheel"}],
+    )
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {} if name == "FILTER_NAME" else _default_get_property_values(device, name)
+        ),
+    )
+    update_component_slots = MagicMock()
+    monkeypatch.setattr(rig_store, "update_component_slots", update_component_slots)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="declares no filter slots"):
+        await script_engine.execute_script("adopt_filter_names_from_driver", "test-rig", {})
+
+    update_component_slots.assert_not_called()
+
+
 async def test_execute_script_set_focus_position_sets_position_and_waits_for_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4357,6 +4550,7 @@ def test_step_handlers_covers_every_closed_step_type() -> None:
         script_store.CoolCameraStep,
         script_store.SelectFilterStep,
         script_store.SyncFilterNamesStep,
+        script_store.AdoptFilterNamesFromDriverStep,
         script_store.SetFocusPositionStep,
         script_store.RunScriptStep,
         script_store.RepeatStep,

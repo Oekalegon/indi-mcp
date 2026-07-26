@@ -38,6 +38,7 @@ from indi_mcp import (
 from indi_mcp.issues import Issue, Severity
 from indi_mcp.observatory_store import Observatory
 from indi_mcp.script_store import (
+    AdoptFilterNamesFromDriverStep,
     CaptureFrameStep,
     Condition,
     ConditionOperator,
@@ -67,6 +68,7 @@ __all__ = [
     "ScriptStatusMessage",
     "ScriptValidationError",
     "Severity",
+    "adopt_filter_names_from_driver",
     "execute_script",
     "sync_filter_names",
 ]
@@ -631,6 +633,7 @@ def _step_role(step: Step, params: dict[str, Any]) -> str | None:
         | CoolCameraStep
         | SelectFilterStep
         | SyncFilterNamesStep
+        | AdoptFilterNamesFromDriverStep
         | SetFocusPositionStep,
     ):
         return _substituted_role(step.role, params)
@@ -2165,6 +2168,90 @@ async def _execute_sync_filter_names(
         )
 
 
+class FilterAdoptOutcome(TypedDict):
+    """The result of `adopt_filter_names_from_driver` — always either `"matched"` (the rig
+    already agreed, nothing changed) or `"adopted"` (the rig's `slots` were overwritten with
+    the driver's), never a silent failure: anything that can't be safely adopted raises
+    `ValueError` instead (INDIMCP-64)."""
+
+    status: Literal["matched", "adopted"]
+    rigSlots: dict[int, str]
+    liveSlots: dict[int, str]
+
+
+async def adopt_filter_names_from_driver(
+    rig_id: str, role: str, device: str, rig_slots: dict[int, str]
+) -> FilterAdoptOutcome:
+    """Copy `device`'s live `FILTER_NAME` onto rig `rig_id`'s `role` component, persisting it
+    to the rig's YAML file (INDIMCP-64) — the reverse direction from `sync_filter_names` (which
+    pushes the rig's config onto the driver instead).
+
+    A deliberate action only, shared by the `adopt_filter_names_from_driver` MCP tool
+    (`server.py`) and script step (`_execute_adopt_filter_names_from_driver`) — for when a rig
+    and its driver disagree and the operator decides the *driver* is the source of truth this
+    time (the `select_filter` step's own automatic reconciliation,
+    `_reconcile_filter_config_with_driver`, only ever adopts the driver's names when the rig
+    has *no* slots configured at all; it never overwrites a rig that already has an opinion).
+
+    Raises `ValueError` rather than guessing or partially applying a change:
+    - `device` doesn't expose `FILTER_NAME` at all.
+    - The driver's live `FILTER_NAME` declares no filter slots at all — nothing to adopt.
+    - Persisting the change fails (disk full, permission denied, ...) — wrapped into a
+      `ValueError` too, so every failure mode this function can hit surfaces the same way to
+      callers.
+    """
+    live_values = indi_messaging.get_property_values(device, "FILTER_NAME")
+    if live_values is None:
+        raise ValueError(f"device {device!r} does not expose FILTER_NAME")
+    live_slots = rig_store.filter_slots(live_values)
+    if not live_slots:
+        raise ValueError(f"device {device!r}'s live FILTER_NAME declares no filter slots")
+    if live_slots == rig_slots:
+        return {"status": "matched", "rigSlots": rig_slots, "liveSlots": live_slots}
+    try:
+        await asyncio.to_thread(rig_store.update_component_slots, rig_id, role, live_slots)
+    except Exception as exc:
+        raise ValueError(
+            f"persisting filter names copied from driver {device!r} failed: {exc}"
+        ) from exc
+    return {"status": "adopted", "rigSlots": live_slots, "liveSlots": live_slots}
+
+
+async def _execute_adopt_filter_names_from_driver(
+    step: AdoptFilterNamesFromDriverStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    """Explicitly copy `step.role`'s device's live `FILTER_NAME` onto the rig (INDIMCP-64) —
+    see `adopt_filter_names_from_driver` for the shared adopt logic and why this is never done
+    automatically by `select_filter` when the rig already has slots configured.
+
+    A `ValueError` from `adopt_filter_names_from_driver` (no live `FILTER_NAME`, no slots to
+    adopt, or a failed persist) becomes a `ScriptExecutionError` — the script author explicitly
+    asked for this step to run, so an inability to safely do so is this step's own failure.
+    """
+    role = _substituted_role(step.role, params)
+    device = _resolve_device(role, ctx)
+    rig_slots = ctx.role_to_slots.get(role, {})
+    try:
+        outcome = await adopt_filter_names_from_driver(ctx.rig_id, role, device, rig_slots)
+    except ValueError as exc:
+        raise ScriptExecutionError(str(exc)) from exc
+    if outcome["status"] == "adopted":
+        ctx.role_to_slots[role] = outcome["rigSlots"]
+        _report_issue(
+            ctx,
+            Severity.INFO,
+            "filterConfigAdopted",
+            f"role {role!r}'s rig config slots {rig_slots} didn't match driver {device!r}'s "
+            f"live FILTER_NAME slots {outcome['liveSlots']}; adopted driver's config onto rig",
+            role=role,
+            device=device,
+        )
+
+
 def _resolve_filter_slot(
     step: SelectFilterStep, ctx: _ExecutionContext, role: str, params: dict[str, Any]
 ) -> int:
@@ -2260,6 +2347,7 @@ STEP_HANDLERS: dict[type, StepHandler] = {
     CoolCameraStep: _execute_cool_camera,
     SelectFilterStep: _execute_select_filter,
     SyncFilterNamesStep: _execute_sync_filter_names,
+    AdoptFilterNamesFromDriverStep: _execute_adopt_filter_names_from_driver,
     SetFocusPositionStep: _execute_set_focus_position,
     RunScriptStep: _execute_run_script,
     RepeatStep: _execute_repeat,
@@ -2271,7 +2359,7 @@ Every step type `script_store.Script` can produce must have a handler
 registered here — `_run_one_step` looks up `type(step)` in this dict and
 raises `ScriptValidationError` (rather than silently no-op'ing) if a step's
 runtime type isn't registered. Since `script_store`'s `Step` union is
-already closed to these same 10 types (INDIMCP-6's "no embedded expression
+already closed to these same 11 types (INDIMCP-6's "no embedded expression
 language" rule — see `docs/ScriptSchema.md`), this can't actually be missed
 for a script that loaded successfully; it exists as an explicit,
 inspectable whitelist rather than an implicit if/elif chain, and as a

@@ -40,6 +40,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationEr
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "AdoptFilterNamesFromDriverStep",
     "Condition",
     "CoolCameraStep",
     "IfStep",
@@ -284,14 +285,30 @@ class SyncFilterNamesStep(_StepBase):
     driver's live `FILTER_NAME` (INDIMCP-64).
 
     A deliberate, standalone action — never a side effect of `select_filter`, which only ever
-    warns about rig/driver drift (`filterConfigMismatch`) and never touches the driver. Include
-    this step explicitly wherever a script (or its author/operator) actually wants the rig's
-    filter names written back to the device, the same "engine-implemented primitive because it
-    needs rig configuration a plain `set_property` can't see" reasoning as `select_filter`
-    itself.
+    adopts the driver's names onto the rig if the rig has no `slots` configured, or fails
+    fatally if it does and they disagree, but never overwrites the driver itself. Include this
+    step explicitly wherever a script (or its author/operator) actually wants the rig's filter
+    names written back to the device, the same "engine-implemented primitive because it needs
+    rig configuration a plain `set_property` can't see" reasoning as `select_filter` itself.
     """
 
     step: Literal["sync_filter_names"]
+    role: str
+
+
+class AdoptFilterNamesFromDriverStep(_StepBase):
+    """Explicitly copy the EFW driver's own live `FILTER_NAME` onto the rig component's `slots`
+    map (`docs/RigSchema.md`), overwriting whatever the rig currently declares (INDIMCP-64) —
+    the reverse direction from `SyncFilterNamesStep`.
+
+    A deliberate, standalone action for when a rig and its driver disagree and the operator
+    decides the *driver* is the source of truth this time — `select_filter`'s own automatic
+    reconciliation never overwrites a rig that already has `slots` configured (it fails
+    fatally on disagreement instead); this step is how an operator chooses the driver's config
+    over the rig's when that's what they actually want.
+    """
+
+    step: Literal["adopt_filter_names_from_driver"]
     role: str
 
 
@@ -353,6 +370,7 @@ Step = Annotated[
     | CoolCameraStep
     | SelectFilterStep
     | SyncFilterNamesStep
+    | AdoptFilterNamesFromDriverStep
     | SetFocusPositionStep
     | RunScriptStep
     | RepeatStep
@@ -474,6 +492,7 @@ def referenced_roles(script: Script) -> set[str]:
             | CoolCameraStep
             | SelectFilterStep
             | SyncFilterNamesStep
+            | AdoptFilterNamesFromDriverStep
             | SetFocusPositionStep,
         ):
             roles.add(step.role)
