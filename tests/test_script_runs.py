@@ -216,7 +216,7 @@ async def test_run_on_status_publishes_scriptMessage_without_touching_latest_sta
                 "device": "CCD Simulator",
             }
         )
-        return {"scriptId": "noop", "stepsExecuted": 0, "framesCaptured": 0}
+        return {"scriptId": "noop", "stepsExecuted": 0, "framesCaptured": 0, "warnings": []}
 
     monkeypatch.setattr(script_engine, "execute_script", fake_execute_script)
 
