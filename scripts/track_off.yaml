@@ -1,0 +1,20 @@
+id: track_off
+name: Turn off mount tracking
+description: >
+  Turns off the rig's mount tracking (TELESCOPE_TRACK_STATE.TRACK_OFF=On) and waits for it
+  to take effect. A thin, reusable wrapper around the generic set_property/wait_for
+  primitives so composed sequences can `run_script: track_off` instead of repeating the raw
+  steps — see docs/Design.md's "Composing scripts" section.
+pausable: false
+steps:
+  - step: set_property
+    role: mount
+    property: TELESCOPE_TRACK_STATE
+    elements: { TRACK_OFF: "On" }
+  - step: wait_for
+    condition:
+      role: mount
+      property: TELESCOPE_TRACK_STATE
+      operator: equals
+      value: Ok
+    timeoutSeconds: 30
