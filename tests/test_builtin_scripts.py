@@ -5,12 +5,16 @@ committed, primitive/composed scripts (see `docs/Design.md`'s "Composing
 scripts" section) are meant to ship with the project. `slew` (INDIMCP-8),
 `park`/`unpark` (INDIMCP-48), a generic `connect`/`disconnect` pair,
 role-parameterized (INDIMCP-52), `cool_camera` (INDIMCP-41), `select_filter`,
-`set_focus_position` (INDIMCP-63), `capture_frame` (INDIMCP-44), and a set of
+`set_focus_position` (INDIMCP-63), `capture_frame` (INDIMCP-44), a set of
 composed capture sequences — `capture_light_sequence`, `capture_flat_sequence`,
-`capture_dark_sequence`, `capture_bias_sequence` (INDIMCP-46) — ship so far;
-the remaining primitives and tracking control are tracked separately
-(INDIMCP-45, INDIMCP-47, INDIMCP-49). This just confirms whatever's here
-loads and validates cleanly, the way any script a client might upload would.
+`capture_dark_sequence`, `capture_bias_sequence` (INDIMCP-46) —,
+`sync_filter_names`/`adopt_filter_names_from_driver` (INDIMCP-64), and mount
+tracking control — `track_off`, `set_track_mode` (generic across
+sidereal/solar/lunar/custom via a parameterized `set_property` element key,
+INDIMCP-49), `set_custom_tracking_rate` — ship so far; the remaining
+primitives are tracked separately (INDIMCP-45, INDIMCP-47). This just
+confirms whatever's here loads and validates cleanly, the way any script a
+client might upload would.
 """
 
 from pathlib import Path
@@ -244,6 +248,76 @@ def test_builtin_unpark_script_sets_unpark_and_waits() -> None:
     assert wait_step.condition.property == "TELESCOPE_PARK"
     assert wait_step.condition.element is None
     assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_track_off_script_sets_track_state_off_and_waits() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    track_off = script_store.get_script("track_off")
+
+    assert track_off.pausable is False
+    assert track_off.parameters == {}
+    assert len(track_off.steps) == 2
+    set_step, wait_step = track_off.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "mount"
+    assert set_step.property == "TELESCOPE_TRACK_STATE"
+    assert set_step.elements == {"TRACK_OFF": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "mount"
+    assert wait_step.condition.property == "TELESCOPE_TRACK_STATE"
+    assert wait_step.condition.element is None
+    assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_set_track_mode_script_substitutes_the_switch_element_and_waits() -> None:
+    """One generic script covers every tracking mode: `modeSwitchElement` is substituted
+    into the `set_property` step's own `elements` *key* (INDIMCP-49), not just a value — the
+    engine capability that replaced three near-duplicate per-mode scripts."""
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    set_track_mode = script_store.get_script("set_track_mode")
+
+    assert set_track_mode.pausable is False
+    assert set(set_track_mode.parameters) == {"modeSwitchElement"}
+    assert set_track_mode.parameters["modeSwitchElement"].required is True
+    assert len(set_track_mode.steps) == 2
+    set_step, wait_step = set_track_mode.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "mount"
+    assert set_step.property == "TELESCOPE_TRACK_MODE"
+    assert set_step.elements == {"{{ modeSwitchElement }}": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "mount"
+    assert wait_step.condition.property == "TELESCOPE_TRACK_MODE"
+    assert wait_step.condition.element is None
+    assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_set_custom_tracking_rate_script_composes_set_track_mode_then_sets_rate() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    script = script_store.get_script("set_custom_tracking_rate")
+
+    assert script.pausable is False
+    assert set(script.parameters) == {"raRateArcsecPerSec", "decRateArcsecPerSec"}
+    assert script.parameters["raRateArcsecPerSec"].required is True
+    assert script.parameters["decRateArcsecPerSec"].required is True
+    assert len(script.steps) == 3
+    mode_step, rate_step, rate_wait = script.steps
+    assert isinstance(mode_step, script_store.RunScriptStep)
+    assert mode_step.script == "set_track_mode"
+    assert mode_step.parameters == {"modeSwitchElement": "TRACK_CUSTOM"}
+    assert isinstance(rate_step, script_store.SetPropertyStep)
+    assert rate_step.role == "mount"
+    assert rate_step.property == "TELESCOPE_TRACK_RATE"
+    assert rate_step.elements == {
+        "TRACK_RATE_RA": "{{ raRateArcsecPerSec }}",
+        "TRACK_RATE_DE": "{{ decRateArcsecPerSec }}",
+    }
+    assert isinstance(rate_wait, script_store.WaitForStep)
+    assert rate_wait.condition.property == "TELESCOPE_TRACK_RATE"
+    assert rate_wait.condition.value == "Ok"
 
 
 def test_builtin_capture_light_sequence_composes_cool_slew_filter_focus_and_repeat() -> None:

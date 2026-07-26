@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import threading
 import time
 from collections.abc import Iterator
@@ -27,6 +28,8 @@ from indi_mcp import (
     server,
 )
 
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+
 
 @pytest.fixture(autouse=True)
 def _reset_event_streams() -> None:
@@ -34,6 +37,11 @@ def _reset_event_streams() -> None:
     event_streams._scripts.clear()
     event_streams._subscribers.clear()
     event_streams._background_tasks.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_loaded_scripts() -> None:
+    script_store._scripts = {}
 
 
 @pytest.fixture
@@ -328,6 +336,215 @@ async def test_run_script_passes_location_id_through_to_start_script(
     await server.run_script("capture_sequence", "test-rig", {}, "home-backyard")
 
     assert calls == ["home-backyard"]
+
+
+def _fake_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, str, dict, str | None]]:
+    """Patch `script_runs.start_script` and return the list its calls get recorded into —
+    shared by every "convenience wrapper delegates to start_script" test below."""
+    calls: list[tuple[str, str, dict, str | None]] = []
+
+    async def fake_start_script(
+        script_id: str, rig_id: str, parameters: dict, *, location_id: str | None = None
+    ) -> dict:
+        calls.append((script_id, rig_id, parameters, location_id))
+        return {"kind": "scriptStarted", "runId": "abc"}
+
+    monkeypatch.setattr(script_runs, "start_script", fake_start_script)
+    return calls
+
+
+async def test_park_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    result = await server.park("test-rig")
+
+    assert result == {"kind": "scriptStarted", "runId": "abc"}
+    assert calls == [("park", "test-rig", {}, None)]
+
+
+async def test_unpark_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.unpark("test-rig")
+
+    assert calls == [("unpark", "test-rig", {}, None)]
+
+
+async def test_slew_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.slew("test-rig", ra=10.5, dec=41.2)
+
+    assert calls == [("slew", "test-rig", {"ra": 10.5, "dec": 41.2}, None)]
+
+
+async def test_cool_camera_delegates_to_start_script_with_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.cool_camera("test-rig")
+
+    assert calls == [("cool_camera", "test-rig", {"targetTempC": -10, "timeoutSeconds": 300}, None)]
+
+
+async def test_select_filter_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.select_filter("test-rig", filterName="Ha")
+
+    assert calls == [("select_filter", "test-rig", {"filterName": "Ha"}, None)]
+
+
+async def test_set_focus_position_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.set_focus_position("test-rig", position=15000)
+
+    assert calls == [("set_focus_position", "test-rig", {"position": 15000}, None)]
+
+
+async def test_connect_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.connect("test-rig", role="mount")
+
+    assert calls == [("connect", "test-rig", {"role": "mount"}, None)]
+
+
+async def test_disconnect_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.disconnect("test-rig", role="mount")
+
+    assert calls == [("disconnect", "test-rig", {"role": "mount"}, None)]
+
+
+async def test_capture_frame_delegates_to_start_script_with_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.capture_frame("test-rig", exposureSeconds=300)
+
+    assert calls == [
+        (
+            "capture_frame",
+            "test-rig",
+            {
+                "exposureSeconds": 300,
+                "frameType": "Light",
+                "binningX": 1,
+                "binningY": 1,
+                "gain": None,
+                "offset": None,
+                "frameX": None,
+                "frameY": None,
+                "frameWidth": None,
+                "frameHeight": None,
+            },
+            None,
+        )
+    ]
+
+
+async def test_capture_frame_passes_location_id_through_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.capture_frame("test-rig", exposureSeconds=300, location_id="home-backyard")
+
+    assert calls[0][3] == "home-backyard"
+
+
+async def test_track_off_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.track_off("test-rig")
+
+    assert calls == [("track_off", "test-rig", {}, None)]
+
+
+async def test_set_track_mode_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.set_track_mode("test-rig", modeSwitchElement="TRACK_SIDEREAL")
+
+    assert calls == [("set_track_mode", "test-rig", {"modeSwitchElement": "TRACK_SIDEREAL"}, None)]
+
+
+async def test_set_custom_tracking_rate_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.set_custom_tracking_rate(
+        "test-rig", raRateArcsecPerSec=15.0, decRateArcsecPerSec=-0.5
+    )
+
+    assert calls == [
+        (
+            "set_custom_tracking_rate",
+            "test-rig",
+            {"raRateArcsecPerSec": 15.0, "decRateArcsecPerSec": -0.5},
+            None,
+        )
+    ]
+
+
+_WRAPPER_TOOLS_BY_SCRIPT_ID = {
+    "park": server.park,
+    "unpark": server.unpark,
+    "slew": server.slew,
+    "cool_camera": server.cool_camera,
+    "select_filter": server.select_filter,
+    "set_focus_position": server.set_focus_position,
+    "connect": server.connect,
+    "disconnect": server.disconnect,
+    "capture_frame": server.capture_frame,
+    "track_off": server.track_off,
+    "set_track_mode": server.set_track_mode,
+    "set_custom_tracking_rate": server.set_custom_tracking_rate,
+}
+
+
+@pytest.mark.parametrize("script_id", sorted(_WRAPPER_TOOLS_BY_SCRIPT_ID))
+def test_wrapper_tool_signature_matches_the_scripts_own_parameters(script_id: str) -> None:
+    """Each convenience wrapper (INDIMCP-49) hand-encodes its script's own `parameters:`
+    block as Python parameter names/required-ness/defaults — nothing else keeps the two in
+    sync, so this cross-checks the wrapper's actual signature against the loaded script's
+    declared `Parameter`s directly, rather than against a third hardcoded expectations list,
+    turning a future YAML/Python desync into a fast, specific test failure instead of a
+    confusing `scriptFailed` at call time."""
+    script_store.load_scripts(SCRIPTS_DIR)
+    script = script_store.get_script(script_id)
+    signature = inspect.signature(_WRAPPER_TOOLS_BY_SCRIPT_ID[script_id])
+
+    # rig_id and (capture_frame's) location_id are wrapper-only, not script parameters.
+    wrapper_param_names = {
+        name for name in signature.parameters if name not in ("rig_id", "location_id")
+    }
+    assert wrapper_param_names == set(script.parameters), (
+        f"{script_id}'s wrapper parameters {sorted(wrapper_param_names)} don't match its "
+        f"script's declared parameters {sorted(script.parameters)}"
+    )
+    for name, parameter in script.parameters.items():
+        wrapper_default = signature.parameters[name].default
+        wrapper_has_default = wrapper_default is not inspect.Parameter.empty
+        assert wrapper_has_default != parameter.required, (
+            f"{script_id}.{name}: script declares required={parameter.required}, but the "
+            f"wrapper {'has' if wrapper_has_default else 'has no'} a default"
+        )
+        if wrapper_has_default:
+            assert wrapper_default == parameter.default, (
+                f"{script_id}.{name}: wrapper default {wrapper_default!r} != script "
+                f"default {parameter.default!r}"
+            )
 
 
 def test_get_script_status_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -104,6 +104,14 @@ already-validated, already-typed parameter — never an expression to evaluate �
 the no-embedded-expression-language rule. A reference to an undeclared parameter name is a
 validation error at load time, not a runtime failure.
 
+`set_property`'s `elements` map (below) is the one place a reference may also appear as a *key*,
+not just a value (INDIMCP-49) — e.g. `elements: { "{{ modeSwitchElement }}": "On" }` lets one
+parameterized script pick which switch member to enable, rather than needing a separate script
+per switch member. Still plain value lookup, not string building: the parameter's own value has
+to be the *entire* element name (e.g. `"TRACK_SIDEREAL"`), since there's no concatenation or
+other computation available — a reference used as a key is validated at load time exactly like
+one used as a value.
+
 ## Step primitives
 
 Every step is an object with a `step` field naming the primitive (matching the shape already
@@ -181,7 +189,7 @@ after it if the script needs to block until the property reaches a target state.
 |---|---|---|---|
 | `role` | string | yes | The rig component role (see "Resolving roles to devices" below) whose device this targets. |
 | `property` | string | yes | The INDI property (vector) name, e.g. `"CCD_EXPOSURE"`. |
-| `elements` | map of string → string | yes | Element name → value, as sent in a `new*Vector` command. |
+| `elements` | map of string → string | yes | Element name → value, as sent in a `new*Vector` command. Both the key and the value may be a `"{{ paramName }}"` reference (see "Parameter references" above) — a keyed reference lets one script pick which switch member to set based on a parameter, instead of one script per switch member. |
 
 #### `wait_for`
 

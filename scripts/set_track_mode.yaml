@@ -1,0 +1,30 @@
+id: set_track_mode
+name: Select the mount's tracking mode
+description: >
+  Selects a tracking mode on the rig's mount (TELESCOPE_TRACK_MODE.<modeSwitchElement>=On)
+  and waits for it to take effect. One generic script covers every tracking mode —
+  `modeSwitchElement` names the INDI switch member to enable directly, substituted into the
+  set_property step's own elements key (INDIMCP-49) — so composed sequences can
+  `run_script: set_track_mode` with `parameters: { modeSwitchElement: TRACK_SIDEREAL }`
+  instead of a mode-specific wrapper. See docs/Design.md's "Composing scripts" section.
+pausable: false
+parameters:
+  modeSwitchElement:
+    type: string
+    required: true
+    description: >
+      The TELESCOPE_TRACK_MODE switch element to enable, e.g. "TRACK_SIDEREAL",
+      "TRACK_SOLAR", "TRACK_LUNAR", or "TRACK_CUSTOM".
+steps:
+  - step: set_property
+    role: mount
+    property: TELESCOPE_TRACK_MODE
+    elements:
+      "{{ modeSwitchElement }}": "On"
+  - step: wait_for
+    condition:
+      role: mount
+      property: TELESCOPE_TRACK_MODE
+      operator: equals
+      value: Ok
+    timeoutSeconds: 30

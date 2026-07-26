@@ -715,6 +715,49 @@ async def test_execute_script_if_branch_exemption_is_coarse_across_branches(
     send_property.assert_awaited_once_with("Telescope Simulator", "TELESCOPE_PARK", {"PARK": "On"})
 
 
+async def test_execute_script_set_property_substitutes_parameter_references_in_element_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "set_rate",
+        parameters={"rate": script_store.Parameter(type="number", required=True)},
+        steps=[_set_property("mount", "TELESCOPE_TRACK_RATE", {"TRACK_RATE_RA": "{{ rate }}"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script("set_rate", "test-rig", {"rate": 15.04})
+
+    send_property.assert_awaited_once_with(
+        "Telescope Simulator", "TELESCOPE_TRACK_RATE", {"TRACK_RATE_RA": "15.04"}
+    )
+
+
+async def test_execute_script_set_property_substitutes_parameter_references_in_element_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `{{ paramName }}` reference in an `elements` *key*, not just a value, lets one
+    parameterized script pick which switch member to enable (INDIMCP-49) — e.g. a `mode`
+    parameter resolving to which `TELESCOPE_TRACK_MODE` element gets set to "On"."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "set_track_mode",
+        parameters={"modeSwitchElement": script_store.Parameter(type="string", required=True)},
+        steps=[_set_property("mount", "TELESCOPE_TRACK_MODE", {"{{ modeSwitchElement }}": "On"})],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script(
+        "set_track_mode", "test-rig", {"modeSwitchElement": "TRACK_SIDEREAL"}
+    )
+
+    send_property.assert_awaited_once_with(
+        "Telescope Simulator", "TELESCOPE_TRACK_MODE", {"TRACK_SIDEREAL": "On"}
+    )
+
+
 async def test_execute_script_wait_for_succeeds_once_condition_is_met(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
