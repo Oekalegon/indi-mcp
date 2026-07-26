@@ -455,8 +455,7 @@ def _iter_string_fields(value: Any) -> "list[str]":
     if isinstance(value, dict):
         strings = []
         for key, item in value.items():
-            if isinstance(key, str):
-                strings.append(key)
+            strings.append(key)
             strings.extend(_iter_string_fields(item))
         return strings
     if isinstance(value, list):
