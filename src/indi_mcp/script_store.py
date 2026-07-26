@@ -425,7 +425,7 @@ def _iter_string_fields(value: Any) -> "list[str]":
     """Collect every string value in a step's own fields (not nested step lists).
 
     Deliberately broader than the specific fields `script_engine._substitute`
-    actually resolves at runtime (`elements` values, `condition.value`,
+    actually resolves at runtime (`elements` keys and values, `condition.value`,
     `run_script.parameters`, `exposureSeconds`/`timeoutSeconds`/...) — this
     walks *every* string field of every step, including structural ones like
     `role`/`property`/`script` that are never substituted. That's
@@ -435,6 +435,12 @@ def _iter_string_fields(value: Any) -> "list[str]":
     field-by-field, with whichever fields the engine currently substitutes —
     a future field the engine starts substituting is already covered
     without a script_store change.
+
+    Dict *keys* are walked alongside their values (INDIMCP-49) — `set_property`'s
+    `elements` keys may themselves be `{{ paramName }}` references (e.g. a
+    `mode`-parameterized script selecting which switch member to enable), and an
+    undeclared reference there needs the same load-time validation an undeclared
+    reference in a value already gets.
     """
     if isinstance(value, str):
         return [value]
@@ -447,7 +453,9 @@ def _iter_string_fields(value: Any) -> "list[str]":
         return strings
     if isinstance(value, dict):
         strings = []
-        for item in value.values():
+        for key, item in value.items():
+            if isinstance(key, str):
+                strings.append(key)
             strings.extend(_iter_string_fields(item))
         return strings
     if isinstance(value, list):

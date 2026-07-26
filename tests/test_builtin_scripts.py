@@ -9,8 +9,9 @@ role-parameterized (INDIMCP-52), `cool_camera` (INDIMCP-41), `select_filter`,
 composed capture sequences — `capture_light_sequence`, `capture_flat_sequence`,
 `capture_dark_sequence`, `capture_bias_sequence` (INDIMCP-46) —,
 `sync_filter_names`/`adopt_filter_names_from_driver` (INDIMCP-64), and mount
-tracking control — `track_off`, `track_sidereal`, `track_solar`, `track_lunar`,
-`set_custom_tracking_rate` (INDIMCP-49) — ship so far; the remaining
+tracking control — `track_off`, `set_track_mode` (generic across
+sidereal/solar/lunar/custom via a parameterized `set_property` element key,
+INDIMCP-49), `set_custom_tracking_rate` — ship so far; the remaining
 primitives are tracked separately (INDIMCP-45, INDIMCP-47). This just
 confirms whatever's here loads and validates cleanly, the way any script a
 client might upload would.
@@ -269,32 +270,23 @@ def test_builtin_track_off_script_sets_track_state_off_and_waits() -> None:
     assert wait_step.condition.value == "Ok"
 
 
-@pytest.mark.parametrize(
-    ("script_id", "switch_element"),
-    [
-        ("track_sidereal", "TRACK_SIDEREAL"),
-        ("track_solar", "TRACK_SOLAR"),
-        ("track_lunar", "TRACK_LUNAR"),
-    ],
-)
-def test_builtin_track_mode_scripts_set_track_mode_and_wait(
-    script_id: str, switch_element: str
-) -> None:
-    """Separate scripts, not one parameterized `set_track_mode` script — parameter
-    substitution only applies to element values, not element names, so a single script
-    can't branch on which `TELESCOPE_TRACK_MODE` switch member to set."""
+def test_builtin_set_track_mode_script_substitutes_the_switch_element_and_waits() -> None:
+    """One generic script covers every tracking mode: `modeSwitchElement` is substituted
+    into the `set_property` step's own `elements` *key* (INDIMCP-49), not just a value — the
+    engine capability that replaced three near-duplicate per-mode scripts."""
     script_store.load_scripts(SCRIPTS_DIR)
 
-    track = script_store.get_script(script_id)
+    set_track_mode = script_store.get_script("set_track_mode")
 
-    assert track.pausable is False
-    assert track.parameters == {}
-    assert len(track.steps) == 2
-    set_step, wait_step = track.steps
+    assert set_track_mode.pausable is False
+    assert set(set_track_mode.parameters) == {"modeSwitchElement"}
+    assert set_track_mode.parameters["modeSwitchElement"].required is True
+    assert len(set_track_mode.steps) == 2
+    set_step, wait_step = set_track_mode.steps
     assert isinstance(set_step, script_store.SetPropertyStep)
     assert set_step.role == "mount"
     assert set_step.property == "TELESCOPE_TRACK_MODE"
-    assert set_step.elements == {switch_element: "On"}
+    assert set_step.elements == {"{{ modeSwitchElement }}": "On"}
     assert isinstance(wait_step, script_store.WaitForStep)
     assert wait_step.condition.role == "mount"
     assert wait_step.condition.property == "TELESCOPE_TRACK_MODE"
@@ -302,7 +294,7 @@ def test_builtin_track_mode_scripts_set_track_mode_and_wait(
     assert wait_step.condition.value == "Ok"
 
 
-def test_builtin_set_custom_tracking_rate_script_sets_mode_then_rate() -> None:
+def test_builtin_set_custom_tracking_rate_script_composes_set_track_mode_then_sets_rate() -> None:
     script_store.load_scripts(SCRIPTS_DIR)
 
     script = script_store.get_script("set_custom_tracking_rate")
@@ -311,15 +303,11 @@ def test_builtin_set_custom_tracking_rate_script_sets_mode_then_rate() -> None:
     assert set(script.parameters) == {"raRateArcsecPerSec", "decRateArcsecPerSec"}
     assert script.parameters["raRateArcsecPerSec"].required is True
     assert script.parameters["decRateArcsecPerSec"].required is True
-    assert len(script.steps) == 4
-    mode_step, mode_wait, rate_step, rate_wait = script.steps
-    assert isinstance(mode_step, script_store.SetPropertyStep)
-    assert mode_step.role == "mount"
-    assert mode_step.property == "TELESCOPE_TRACK_MODE"
-    assert mode_step.elements == {"TRACK_CUSTOM": "On"}
-    assert isinstance(mode_wait, script_store.WaitForStep)
-    assert mode_wait.condition.property == "TELESCOPE_TRACK_MODE"
-    assert mode_wait.condition.value == "Ok"
+    assert len(script.steps) == 3
+    mode_step, rate_step, rate_wait = script.steps
+    assert isinstance(mode_step, script_store.RunScriptStep)
+    assert mode_step.script == "set_track_mode"
+    assert mode_step.parameters == {"modeSwitchElement": "TRACK_CUSTOM"}
     assert isinstance(rate_step, script_store.SetPropertyStep)
     assert rate_step.role == "mount"
     assert rate_step.property == "TELESCOPE_TRACK_RATE"

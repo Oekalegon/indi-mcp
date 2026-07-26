@@ -1,11 +1,11 @@
 id: set_custom_tracking_rate
 name: Track at a custom RA/Dec rate
 description: >
-  Selects custom tracking on the rig's mount (TELESCOPE_TRACK_MODE.TRACK_CUSTOM=On) and sets
-  the custom tracking rate (TELESCOPE_TRACK_RATE.TRACK_RATE_RA/TRACK_RATE_DE), waiting for
-  each to take effect. A thin, reusable wrapper around the generic set_property/wait_for
-  primitives so composed sequences can `run_script: set_custom_tracking_rate` instead of
-  repeating the raw steps — see docs/Design.md's "Composing scripts" section.
+  Selects custom tracking on the rig's mount (via set_track_mode with
+  modeSwitchElement: TRACK_CUSTOM) and sets the custom tracking rate
+  (TELESCOPE_TRACK_RATE.TRACK_RATE_RA/TRACK_RATE_DE), waiting for each to take effect. A
+  thin, reusable wrapper so composed sequences can `run_script: set_custom_tracking_rate`
+  instead of repeating the raw steps — see docs/Design.md's "Composing scripts" section.
 pausable: false
 parameters:
   raRateArcsecPerSec:
@@ -17,17 +17,10 @@ parameters:
     required: true
     description: Custom Dec tracking rate, in arcseconds per second.
 steps:
-  - step: set_property
-    role: mount
-    property: TELESCOPE_TRACK_MODE
-    elements: { TRACK_CUSTOM: "On" }
-  - step: wait_for
-    condition:
-      role: mount
-      property: TELESCOPE_TRACK_MODE
-      operator: equals
-      value: Ok
-    timeoutSeconds: 30
+  - step: run_script
+    script: set_track_mode
+    parameters:
+      modeSwitchElement: TRACK_CUSTOM
   - step: set_property
     role: mount
     property: TELESCOPE_TRACK_RATE

@@ -1198,8 +1198,21 @@ async def _execute_set_property(
     script_id: str,
     pausable: bool,
 ) -> None:
+    """Send `step.elements` to `step.property`, substituting both element *values* and
+    element *names* against `params` (INDIMCP-49).
+
+    Substituting names too — not just values — lets one parameterized script pick which
+    switch member to enable (e.g. a `mode` parameter resolving to `"TRACK_SIDEREAL"` vs
+    `"TRACK_SOLAR"`), the one case a literal `elements` mapping can't express: parameter
+    substitution is plain value lookup, never string concatenation/computation (no embedded
+    expression language — see `docs/ScriptSchema.md#design-notes`), so the parameter's own
+    value has to be the *entire* element name, not a fragment of one built from it.
+    """
     device = _resolve_device(_substituted_role(step.role, params), ctx)
-    elements = {name: str(_substitute(value, params)) for name, value in step.elements.items()}
+    elements = {
+        str(_substitute(name, params)): str(_substitute(value, params))
+        for name, value in step.elements.items()
+    }
     await indi_messaging.send_property(device, step.property, elements)
 
 

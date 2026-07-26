@@ -609,6 +609,37 @@ def test_load_scripts_accepts_a_declared_parameter_reference(tmp_path: Path) -> 
     assert [s.id for s in scripts] == ["good-ref"]
 
 
+def test_load_scripts_rejects_an_undeclared_parameter_reference_in_an_element_key(
+    tmp_path: Path,
+) -> None:
+    """`elements` keys can be parameter references too (INDIMCP-49) — an undeclared one gets
+    the same load-time validation an undeclared reference in a *value* already gets."""
+    (tmp_path / "bad-key-ref.yaml").write_text(
+        'id: bad-key-ref\nname: "Bad key ref"\npausable: false\nsteps:\n'
+        "  - step: set_property\n    role: mount\n    property: TELESCOPE_TRACK_MODE\n"
+        '    elements: { "{{ undeclared }}": "On" }\n'
+    )
+
+    scripts = script_store.load_scripts(tmp_path)
+
+    assert scripts == []
+
+
+def test_load_scripts_accepts_a_declared_parameter_reference_in_an_element_key(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "good-key-ref.yaml").write_text(
+        'id: good-key-ref\nname: "Good key ref"\npausable: false\n'
+        "parameters:\n  modeSwitchElement:\n    type: string\n    required: true\n"
+        "steps:\n  - step: set_property\n    role: mount\n    property: TELESCOPE_TRACK_MODE\n"
+        '    elements: { "{{ modeSwitchElement }}": "On" }\n'
+    )
+
+    scripts = script_store.load_scripts(tmp_path)
+
+    assert [s.id for s in scripts] == ["good-key-ref"]
+
+
 def test_load_scripts_rejects_run_script_to_unknown_script(tmp_path: Path) -> None:
     (tmp_path / "caller.yaml").write_text(
         'id: caller\nname: "Caller"\npausable: false\nsteps:\n'
