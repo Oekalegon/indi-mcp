@@ -3352,19 +3352,20 @@ async def test_execute_script_select_filter_syncs_driver_when_it_disagrees_with_
     assert warning["device"] == "Filter Wheel Simulator"
 
 
-async def test_execute_script_select_filter_warns_when_no_rig_slots_exist_on_driver_vector(
+async def test_execute_script_select_filter_fails_fatally_when_slot_counts_differ(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If none of the rig's configured slots exist as `FILTER_SLOT_NAME_<n>` members on the
-    live `FILTER_NAME` vector (e.g. the rig was authored for a differently-sized wheel), there's
-    nothing safe to push — INDIMCP-64 falls back to a `WARNING`/`filterConfigMismatch` issue
-    instead of sending an unfiltered element dict that `indipyclient` could reject."""
+    """A rig declaring a *different number* of filter slots than the driver's live
+    `FILTER_NAME` (e.g. the rig was authored for a differently-sized wheel entirely) is treated
+    as `FATAL` (INDIMCP-64) rather than name drift — nothing is pushed to the driver and the
+    step aborts before the filter is even selected, instead of guessing which side is right or
+    sending a partial `FILTER_NAME` update."""
     _rig(
         rig_store.Component(
             role="filterWheel",
             id="fw-1",
             device="Filter Wheel Simulator",
-            slots={3: "Red"},
+            slots={1: "Luminance", 2: "Red"},
         )
     )
     _script(
@@ -3384,16 +3385,17 @@ async def test_execute_script_select_filter_warns_when_no_rig_slots_exist_on_dri
         ),
     )
 
-    result = await script_engine.execute_script("select_filter", "test-rig", {})
+    with pytest.raises(script_engine.ScriptExecutionError) as exc_info:
+        await script_engine.execute_script("select_filter", "test-rig", {})
 
-    # Nothing pushable existed, so only the FILTER_SLOT command was sent.
-    send_property.assert_awaited_once_with(
-        "Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "3"}
-    )
-    assert len(result["warnings"]) == 1
-    warning = result["warnings"][0]
-    assert warning["severity"] == script_engine.Severity.WARNING
-    assert warning["code"] == "filterConfigMismatch"
+    # Nothing was pushed to the driver, and the filter was never selected either.
+    send_property.assert_not_awaited()
+    assert len(exc_info.value.warnings) == 1
+    fatal = exc_info.value.warnings[0]
+    assert fatal["severity"] == script_engine.Severity.FATAL
+    assert fatal["code"] == "filterSlotCountMismatch"
+    assert fatal["role"] == "filterWheel"
+    assert fatal["device"] == "Filter Wheel Simulator"
 
 
 async def test_execute_script_select_filter_warns_when_pushing_config_to_driver_fails(

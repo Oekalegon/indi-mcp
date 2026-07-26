@@ -1990,18 +1990,23 @@ async def _sync_filter_config_with_driver(ctx: _ExecutionContext, role: str, dev
     whoever authored the rig, `FILTER_NAME` by whoever last configured the EFW driver (e.g.
     via a different client, or the driver's own config file, which typically starts out with
     generic defaults like "Filter 1", "Filter 2") — so a mismatch here means the rig config is
-    the intended state and the driver hasn't been told about it yet. The step always proceeds
-    using the rig's configured slot (`_resolve_filter_slot` already resolved it) regardless of
-    whether the push below succeeds.
+    the intended state and the driver hasn't been told about it yet.
 
-    Only rig slots that actually exist as `FILTER_SLOT_NAME_<n>` members on the live vector are
-    pushed — the rig may declare more slots than the physical wheel has (e.g. authored for a
-    different EFW, or simply wrong), and `indi_messaging.send_property` doesn't validate element
-    names against the vector itself, so an unfiltered push could raise deep inside
-    `indipyclient`. If nothing pushable is left, or the push itself fails (network hiccup,
-    driver rejects it, etc.), this falls back to a `WARNING`/`filterConfigMismatch` issue — the
-    same "report, don't crash the run over it" behavior this replaced — instead of letting the
-    exception propagate out of what INDIMCP-73 documents as a non-fatal check.
+    A rig declaring a *different number* of filter slots than the driver's live `FILTER_NAME`
+    vector is a bigger problem than ordinary name drift — it means the rig was very likely
+    authored for a differently-sized wheel entirely (or the wrong device), and
+    `_resolve_filter_slot` could already be resolving a `filterName` to a slot number the
+    physical wheel doesn't have. That's a `FATAL` issue (INDIMCP-73/INDIMCP-64): nothing is
+    pushed and the step aborts (unlike every other case here) rather than silently sending a
+    partial `FILTER_NAME` update or guessing which side is right — this is the one case where
+    "ask the operator, don't guess" means refusing to touch the driver at all.
+
+    Otherwise — same slot count, different names or slot numbers — the rig's slots are pushed
+    to the driver's `FILTER_NAME`, and the step proceeds using the rig's configured slot
+    (`_resolve_filter_slot` already resolved it) regardless of whether the push succeeds. If the
+    push itself fails (network hiccup, driver rejects it, etc.), this falls back to a
+    `WARNING`/`filterConfigMismatch` issue instead of letting the exception propagate out of
+    what INDIMCP-73 documents as a non-fatal check.
 
     An `INFO`/`filterConfigSynced` issue on success, not `WARNING` — once pushed, the drift is
     corrected rather than merely observed. Skipped entirely if the driver doesn't expose
@@ -2022,40 +2027,43 @@ async def _sync_filter_config_with_driver(ctx: _ExecutionContext, role: str, dev
     live_slots = rig_store.filter_slots(live_values)
     if live_slots == rig_slots:
         return
-    elements = {
-        f"FILTER_SLOT_NAME_{slot}": name
-        for slot, name in rig_slots.items()
-        if f"FILTER_SLOT_NAME_{slot}" in live_values
-    }
-    pushed = False
-    if elements:
-        try:
-            await indi_messaging.send_property(device, "FILTER_NAME", elements)
-            pushed = True
-        except Exception:
-            pushed = False
-    if pushed:
+    if len(rig_slots) != len(live_slots):
         _report_issue(
             ctx,
-            Severity.INFO,
-            "filterConfigSynced",
-            f"role {role!r}'s rig config slots {rig_slots} didn't match "
-            f"driver {device!r}'s live FILTER_NAME slots {live_slots}; pushed rig config to "
-            "driver",
+            Severity.FATAL,
+            "filterSlotCountMismatch",
+            f"role {role!r}'s rig config declares {len(rig_slots)} filter slot(s) "
+            f"{rig_slots}, but driver {device!r}'s live FILTER_NAME declares "
+            f"{len(live_slots)} {live_slots} — refusing to push a filter configuration for a "
+            "differently-sized wheel",
             role=role,
             device=device,
         )
-    else:
+        return  # unreachable: _report_issue always raises for FATAL; kept for readability
+    elements = {f"FILTER_SLOT_NAME_{slot}": name for slot, name in rig_slots.items()}
+    try:
+        await indi_messaging.send_property(device, "FILTER_NAME", elements)
+    except Exception:
         _report_issue(
             ctx,
             Severity.WARNING,
             "filterConfigMismatch",
             f"role {role!r}'s rig config slots {rig_slots} don't match "
             f"driver {device!r}'s live FILTER_NAME slots {live_slots}, and pushing the rig's "
-            "config to the driver wasn't possible",
+            "config to the driver failed",
             role=role,
             device=device,
         )
+        return
+    _report_issue(
+        ctx,
+        Severity.INFO,
+        "filterConfigSynced",
+        f"role {role!r}'s rig config slots {rig_slots} didn't match "
+        f"driver {device!r}'s live FILTER_NAME slots {live_slots}; pushed rig config to driver",
+        role=role,
+        device=device,
+    )
 
 
 def _resolve_filter_slot(
