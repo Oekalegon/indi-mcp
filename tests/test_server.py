@@ -330,6 +330,165 @@ async def test_run_script_passes_location_id_through_to_start_script(
     assert calls == ["home-backyard"]
 
 
+def _fake_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, str, dict, str | None]]:
+    """Patch `script_runs.start_script` and return the list its calls get recorded into —
+    shared by every "convenience wrapper delegates to start_script" test below."""
+    calls: list[tuple[str, str, dict, str | None]] = []
+
+    async def fake_start_script(
+        script_id: str, rig_id: str, parameters: dict, *, location_id: str | None = None
+    ) -> dict:
+        calls.append((script_id, rig_id, parameters, location_id))
+        return {"kind": "scriptStarted", "runId": "abc"}
+
+    monkeypatch.setattr(script_runs, "start_script", fake_start_script)
+    return calls
+
+
+async def test_park_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    result = await server.park("test-rig")
+
+    assert result == {"kind": "scriptStarted", "runId": "abc"}
+    assert calls == [("park", "test-rig", {}, None)]
+
+
+async def test_unpark_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.unpark("test-rig")
+
+    assert calls == [("unpark", "test-rig", {}, None)]
+
+
+async def test_slew_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.slew("test-rig", ra=10.5, dec=41.2)
+
+    assert calls == [("slew", "test-rig", {"ra": 10.5, "dec": 41.2}, None)]
+
+
+async def test_cool_camera_delegates_to_start_script_with_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.cool_camera("test-rig")
+
+    assert calls == [("cool_camera", "test-rig", {"targetTempC": -10, "timeoutSeconds": 300}, None)]
+
+
+async def test_select_filter_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.select_filter("test-rig", filterName="Ha")
+
+    assert calls == [("select_filter", "test-rig", {"filterName": "Ha"}, None)]
+
+
+async def test_set_focus_position_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.set_focus_position("test-rig", position=15000)
+
+    assert calls == [("set_focus_position", "test-rig", {"position": 15000}, None)]
+
+
+async def test_connect_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.connect("test-rig", role="mount")
+
+    assert calls == [("connect", "test-rig", {"role": "mount"}, None)]
+
+
+async def test_disconnect_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.disconnect("test-rig", role="mount")
+
+    assert calls == [("disconnect", "test-rig", {"role": "mount"}, None)]
+
+
+async def test_capture_frame_delegates_to_start_script_with_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.capture_frame("test-rig", exposureSeconds=300)
+
+    assert calls == [
+        (
+            "capture_frame",
+            "test-rig",
+            {
+                "exposureSeconds": 300,
+                "frameType": "Light",
+                "binningX": 1,
+                "binningY": 1,
+                "gain": None,
+                "offset": None,
+                "frameX": None,
+                "frameY": None,
+                "frameWidth": None,
+                "frameHeight": None,
+            },
+            None,
+        )
+    ]
+
+
+async def test_capture_frame_passes_location_id_through_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.capture_frame("test-rig", exposureSeconds=300, location_id="home-backyard")
+
+    assert calls[0][3] == "home-backyard"
+
+
+async def test_track_off_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.track_off("test-rig")
+
+    assert calls == [("track_off", "test-rig", {}, None)]
+
+
+async def test_set_track_mode_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.set_track_mode("test-rig", modeSwitchElement="TRACK_SIDEREAL")
+
+    assert calls == [("set_track_mode", "test-rig", {"modeSwitchElement": "TRACK_SIDEREAL"}, None)]
+
+
+async def test_set_custom_tracking_rate_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.set_custom_tracking_rate(
+        "test-rig", raRateArcsecPerSec=15.0, decRateArcsecPerSec=-0.5
+    )
+
+    assert calls == [
+        (
+            "set_custom_tracking_rate",
+            "test-rig",
+            {"raRateArcsecPerSec": 15.0, "decRateArcsecPerSec": -0.5},
+            None,
+        )
+    ]
+
+
 def test_get_script_status_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 

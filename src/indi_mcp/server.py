@@ -42,7 +42,7 @@ from indi_mcp.script_runs import (
     ScriptRunStarted,
     ScriptRunStatus,
 )
-from indi_mcp.script_store import Script, ScriptSummary
+from indi_mcp.script_store import FrameType, Script, ScriptSummary
 
 logger = logging.getLogger(__name__)
 
@@ -497,6 +497,164 @@ async def run_script(
     An unknown `location_id` fails the run (`scriptFailed`), matching a bad `rig_id`.
     """
     return await script_runs.start_script(script_id, rig_id, parameters, location_id=location_id)
+
+
+# Typed, named convenience wrappers around `run_script` for the most common built-in scripts
+# (INDIMCP-49) — each is a thin passthrough to `script_runs.start_script` with its `script_id`
+# fixed and its own parameters given proper types instead of a bare `dict[str, Any]`, for
+# better client-side discoverability (an MCP tool's declared parameter schema, not just its
+# docstring). Each still returns immediately with a `runId` exactly like `run_script` itself —
+# same execution path, same `get_script_status`/`cancel_script`/`pause_script`/`resume_script`
+# story — since a script run can take anywhere from sub-second (park) to many minutes
+# (capture_frame's exposure), and this project never blocks an MCP tool call on that (see
+# `run_script`'s own docstring). The underlying `scripts/*.yaml` file is still there and still
+# the thing a composed sequence's own `run_script`/`repeat`/`if` steps call into — this is an
+# additional entry point, not a replacement for the scripting layer, which stays how more
+# complex multi-step sequences (e.g. `capture_light_sequence`) get built.
+
+
+@mcp.tool()
+async def park(rig_id: str) -> ScriptRunStarted:
+    """Park the rig's mount — see `scripts/park.yaml` (INDIMCP-48)."""
+    return await script_runs.start_script("park", rig_id, {})
+
+
+@mcp.tool()
+async def unpark(rig_id: str) -> ScriptRunStarted:
+    """Unpark the rig's mount — see `scripts/unpark.yaml` (INDIMCP-48)."""
+    return await script_runs.start_script("unpark", rig_id, {})
+
+
+@mcp.tool()
+async def slew(rig_id: str, ra: float, dec: float) -> ScriptRunStarted:
+    """Slew the rig's mount to a fixed RA/Dec — see `scripts/slew.yaml` (INDIMCP-8).
+
+    `ra` is in hours, `dec` in degrees. Slewing to a named object (e.g. "M101") isn't
+    supported yet (INDIMCP-29).
+    """
+    return await script_runs.start_script("slew", rig_id, {"ra": ra, "dec": dec})
+
+
+@mcp.tool()
+async def cool_camera(
+    rig_id: str, targetTempC: float = -10, timeoutSeconds: float = 300
+) -> ScriptRunStarted:
+    """Cool the rig's camera to `targetTempC` and wait for it to stabilize — see
+    `scripts/cool_camera.yaml` (INDIMCP-56)."""
+    return await script_runs.start_script(
+        "cool_camera", rig_id, {"targetTempC": targetTempC, "timeoutSeconds": timeoutSeconds}
+    )
+
+
+@mcp.tool()
+async def select_filter(rig_id: str, filterName: str) -> ScriptRunStarted:
+    """Select a filter on the rig's filter wheel by name — see `scripts/select_filter.yaml`
+    (INDIMCP-61).
+
+    Reconciles the rig's configured filter names against the driver's live state before
+    selecting (adopts the driver's names if the rig has none configured, fails fatally on a
+    real disagreement) — see `sync_filter_names`/`adopt_filter_names_from_driver` for how to
+    resolve a disagreement explicitly.
+    """
+    return await script_runs.start_script("select_filter", rig_id, {"filterName": filterName})
+
+
+@mcp.tool()
+async def set_focus_position(rig_id: str, position: int) -> ScriptRunStarted:
+    """Move the rig's focuser to an absolute position — see `scripts/set_focus_position.yaml`
+    (INDIMCP-62/63). Checked against the rig component's own `minPosition`/`maxPosition`,
+    if declared.
+    """
+    return await script_runs.start_script("set_focus_position", rig_id, {"position": position})
+
+
+@mcp.tool()
+async def connect(rig_id: str, role: str) -> ScriptRunStarted:
+    """Connect whichever device fills `role` in `rig_id` — see `scripts/connect.yaml`."""
+    return await script_runs.start_script("connect", rig_id, {"role": role})
+
+
+@mcp.tool()
+async def disconnect(rig_id: str, role: str) -> ScriptRunStarted:
+    """Disconnect whichever device fills `role` in `rig_id` — see `scripts/disconnect.yaml`."""
+    return await script_runs.start_script("disconnect", rig_id, {"role": role})
+
+
+@mcp.tool()
+async def capture_frame(
+    rig_id: str,
+    exposureSeconds: float,
+    frameType: FrameType = "Light",
+    binningX: int = 1,
+    binningY: int = 1,
+    gain: float | None = None,
+    offset: float | None = None,
+    frameX: int | None = None,
+    frameY: int | None = None,
+    frameWidth: int | None = None,
+    frameHeight: int | None = None,
+    location_id: str | None = None,
+) -> ScriptRunStarted:
+    """Capture a single frame from the rig's camera — see `scripts/capture_frame.yaml`
+    (INDIMCP-44).
+
+    `gain`/`offset` omitted (the default) leave the device's current setting alone rather
+    than sending a fixed number. `frameX`/`frameY`/`frameWidth`/`frameHeight` default to the
+    full sensor; set all four together for a sub-frame. `location_id` is passed straight
+    through to `run_script` for this script's own celestial-context FITS header enrichment.
+    """
+    return await script_runs.start_script(
+        "capture_frame",
+        rig_id,
+        {
+            "exposureSeconds": exposureSeconds,
+            "frameType": frameType,
+            "binningX": binningX,
+            "binningY": binningY,
+            "gain": gain,
+            "offset": offset,
+            "frameX": frameX,
+            "frameY": frameY,
+            "frameWidth": frameWidth,
+            "frameHeight": frameHeight,
+        },
+        location_id=location_id,
+    )
+
+
+@mcp.tool()
+async def track_off(rig_id: str) -> ScriptRunStarted:
+    """Turn off the rig's mount tracking — see `scripts/track_off.yaml` (INDIMCP-49)."""
+    return await script_runs.start_script("track_off", rig_id, {})
+
+
+@mcp.tool()
+async def set_track_mode(rig_id: str, modeSwitchElement: str) -> ScriptRunStarted:
+    """Select the rig's mount tracking mode — see `scripts/set_track_mode.yaml` (INDIMCP-49).
+
+    `modeSwitchElement` is the INDI `TELESCOPE_TRACK_MODE` switch member to enable, e.g.
+    `"TRACK_SIDEREAL"`, `"TRACK_SOLAR"`, `"TRACK_LUNAR"`, or `"TRACK_CUSTOM"` (pair the last
+    with `set_custom_tracking_rate` to also set a custom rate).
+    """
+    return await script_runs.start_script(
+        "set_track_mode", rig_id, {"modeSwitchElement": modeSwitchElement}
+    )
+
+
+@mcp.tool()
+async def set_custom_tracking_rate(
+    rig_id: str, raRateArcsecPerSec: float, decRateArcsecPerSec: float
+) -> ScriptRunStarted:
+    """Select custom tracking on the rig's mount and set its RA/Dec rate — see
+    `scripts/set_custom_tracking_rate.yaml` (INDIMCP-49)."""
+    return await script_runs.start_script(
+        "set_custom_tracking_rate",
+        rig_id,
+        {
+            "raRateArcsecPerSec": raRateArcsecPerSec,
+            "decRateArcsecPerSec": decRateArcsecPerSec,
+        },
+    )
 
 
 @mcp.tool()

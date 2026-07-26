@@ -43,6 +43,7 @@ __all__ = [
     "AdoptFilterNamesFromDriverStep",
     "Condition",
     "CoolCameraStep",
+    "FrameType",
     "IfStep",
     "PARAMETER_REFERENCE",
     "Parameter",
