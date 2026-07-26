@@ -3290,13 +3290,15 @@ async def test_execute_script_select_filter_reports_no_warning_when_driver_match
     assert result["warnings"] == []
 
 
-async def test_execute_script_select_filter_warns_when_driver_disagrees_with_rig(
+async def test_execute_script_select_filter_syncs_driver_when_it_disagrees_with_rig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The EFW driver's own live `FILTER_NAME` config can drift from the rig's configured
-    `slots` map (e.g. someone reconfigured the wheel from a different client) — INDIMCP-73
-    reports this as a `WARNING`-severity issue rather than failing the step or silently
-    picking a side; the step still proceeds with the rig's configured slot."""
+    `slots` map (e.g. the driver still has its factory-default names, or someone reconfigured
+    the wheel from a different client) — INDIMCP-64 pushes the rig's config to the driver's
+    `FILTER_NAME` and reports an `INFO`-severity issue rather than failing the step or
+    silently leaving the drift in place; the step still proceeds with the rig's configured
+    slot."""
     _rig(
         rig_store.Component(
             role="filterWheel",
@@ -3324,15 +3326,23 @@ async def test_execute_script_select_filter_warns_when_driver_disagrees_with_rig
 
     result = await script_engine.execute_script("select_filter", "test-rig", {})
 
-    # The step still used the rig's own configured slot (2, "Red") despite the mismatch.
-    send_property.assert_awaited_once_with(
-        "Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "2"}
+    # The rig's config was pushed to the driver before the step used the rig's own
+    # configured slot (2, "Red") despite the mismatch.
+    send_property.assert_has_awaits(
+        [
+            call(
+                "Filter Wheel Simulator",
+                "FILTER_NAME",
+                {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"},
+            ),
+            call("Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "2"}),
+        ]
     )
     assert len(result["warnings"]) == 1
     warning = result["warnings"][0]
     assert warning["kind"] == "issue"
-    assert warning["severity"] == script_engine.Severity.WARNING
-    assert warning["code"] == "filterConfigMismatch"
+    assert warning["severity"] == script_engine.Severity.INFO
+    assert warning["code"] == "filterConfigSynced"
     assert warning["role"] == "filterWheel"
     assert warning["device"] == "Filter Wheel Simulator"
 
@@ -3426,7 +3436,7 @@ async def test_execute_script_repeat_accumulates_one_warning_per_iteration(
     result = await script_engine.execute_script("select_filter-repeat", "test-rig", {})
 
     assert len(result["warnings"]) == 3
-    assert all(w["code"] == "filterConfigMismatch" for w in result["warnings"])
+    assert all(w["code"] == "filterConfigSynced" for w in result["warnings"])
 
 
 async def test_execute_script_run_script_forwards_a_nested_warning_to_the_caller(
@@ -3466,7 +3476,7 @@ async def test_execute_script_run_script_forwards_a_nested_warning_to_the_caller
     result = await script_engine.execute_script("caller", "test-rig", {})
 
     assert len(result["warnings"]) == 1
-    assert result["warnings"][0]["code"] == "filterConfigMismatch"
+    assert result["warnings"][0]["code"] == "filterConfigSynced"
 
 
 async def test_execute_script_fatal_failure_still_carries_warnings_collected_earlier(
@@ -3508,7 +3518,7 @@ async def test_execute_script_fatal_failure_still_carries_warnings_collected_ear
         await script_engine.execute_script("select_filter-then-fail", "test-rig", {})
 
     assert len(exc_info.value.warnings) == 1
-    assert exc_info.value.warnings[0]["code"] == "filterConfigMismatch"
+    assert exc_info.value.warnings[0]["code"] == "filterConfigSynced"
 
 
 async def test_report_issue_fatal_raises_and_includes_itself_in_the_exceptions_warnings() -> None:

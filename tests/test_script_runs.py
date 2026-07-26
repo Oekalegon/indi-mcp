@@ -322,7 +322,7 @@ async def test_run_that_warns_then_fails_reports_the_warning_on_scriptFailed(
     failed = cast(script_runs.ScriptRunFailed, status)
     assert "no slot named 'Nonexistent'" in failed["error"]["message"]
     assert len(failed["error"]["warnings"]) == 1
-    assert failed["error"]["warnings"][0]["code"] == "filterConfigMismatch"
+    assert failed["error"]["warnings"][0]["code"] == "filterConfigSynced"
 
 
 async def test_get_script_status_raises_for_unknown_run_id() -> None:
@@ -417,7 +417,7 @@ async def test_cancel_script_after_a_warning_still_reports_it_on_scriptCancelled
     assert status["kind"] == "scriptCancelled"
     cancelled = cast(script_runs.ScriptRunCancelled, status)
     assert len(cancelled["warnings"]) == 1
-    assert cancelled["warnings"][0]["code"] == "filterConfigMismatch"
+    assert cancelled["warnings"][0]["code"] == "filterConfigSynced"
 
 
 async def test_pause_script_rejects_when_script_is_not_pausable() -> None:

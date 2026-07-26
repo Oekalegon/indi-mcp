@@ -30,7 +30,7 @@ class Issue(TypedDict):
     """One reported condition, `kind`-tagged like every other event/status envelope in this
     project (e.g. `script_runs.ScriptRunMessage`).
 
-    `code` is a short, stable, machine-readable slug (e.g. `"filterConfigMismatch"`) a caller
+    `code` is a short, stable, machine-readable slug (e.g. `"filterConfigSynced"`) a caller
     can match on without parsing `message`. `role`/`device` follow the same "who this is about,
     if anyone in particular" convention as `script_engine.ScriptProgress`'s own fields — `None`
     when an issue isn't about a single resolved role/device.

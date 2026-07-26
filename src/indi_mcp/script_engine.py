@@ -1973,7 +1973,7 @@ async def _execute_select_filter(
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
     slot = _resolve_filter_slot(step, ctx, role, params)
-    _check_filter_config_matches_driver(ctx, role, device)
+    await _sync_filter_config_with_driver(ctx, role, device)
     timeout = float(_substitute(step.timeoutSeconds, params))
     await indi_messaging.send_property(device, "FILTER_SLOT", {"FILTER_SLOT_VALUE": str(slot)})
     await _wait_for_property_state(
@@ -1981,24 +1981,26 @@ async def _execute_select_filter(
     )
 
 
-def _check_filter_config_matches_driver(ctx: _ExecutionContext, role: str, device: str) -> None:
-    """Warn (INDIMCP-73) if `device`'s live `FILTER_NAME` disagrees with `role`'s rig-configured
-    `slots` map, rather than silently picking one side or failing the step.
+async def _sync_filter_config_with_driver(ctx: _ExecutionContext, role: str, device: str) -> None:
+    """Push `role`'s rig-configured `slots` map to `device`'s live `FILTER_NAME` (INDIMCP-64)
+    if the two disagree, rather than silently picking one side, failing the step, or merely
+    warning about the drift forever.
 
     The two are independent sources of truth for the same thing — the rig config is set by
     whoever authored the rig, `FILTER_NAME` by whoever last configured the EFW driver (e.g.
-    via a different client, or the driver's own config file) — so a real-world mismatch is a
-    configuration drift bug, not a script bug: the step still proceeds using the rig's
-    configured slot (`_resolve_filter_slot` already resolved it), the same "ask the operator,
-    don't guess" spirit as `rig_store.check_rig`'s own missing-device reporting.
+    via a different client, or the driver's own config file, which typically starts out with
+    generic defaults like "Filter 1", "Filter 2") — so a mismatch here means the rig config is
+    the intended state and the driver hasn't been told about it yet. The step still proceeds
+    using the rig's configured slot (`_resolve_filter_slot` already resolved it) regardless of
+    whether the push below succeeds.
 
-    A `WARNING`, not `FATAL` — the todo's own wording is "issue a warning instead of failing
-    or guessing." Skipped entirely (no warning) if the driver doesn't expose `FILTER_NAME` at
-    all, matching every other optional-property check in this module (`_check_not_parked`,
+    An `INFO` issue (INDIMCP-73), not `WARNING` — once pushed, the drift is corrected rather
+    than merely observed. Skipped entirely if the driver doesn't expose `FILTER_NAME` at all,
+    matching every other optional-property check in this module (`_check_not_parked`,
     `_ensure_track_on_slew`, `_ensure_cooler_on`): plenty of EFW drivers may not. Also skipped
     if `role`'s rig component has no `slots` map configured at all — a script addressing
-    filters purely by numeric `step.slot` never needs one, and that's not a misconfiguration
-    to warn about; without this, any such rig would spuriously "mismatch" the driver's own
+    filters purely by numeric `step.slot` never needs one, and that's not a misconfiguration to
+    push over; without this, any such rig would spuriously overwrite the driver's own
     `FILTER_NAME` on every single `select_filter` call, since an empty rig config trivially
     never equals a non-empty live one.
     """
@@ -2009,16 +2011,19 @@ def _check_filter_config_matches_driver(ctx: _ExecutionContext, role: str, devic
     if live_values is None:
         return
     live_slots = rig_store.filter_slots(live_values)
-    if live_slots != rig_slots:
-        _report_issue(
-            ctx,
-            Severity.WARNING,
-            "filterConfigMismatch",
-            f"role {role!r}'s rig config slots {rig_slots} don't match "
-            f"driver {device!r}'s live FILTER_NAME slots {live_slots}",
-            role=role,
-            device=device,
-        )
+    if live_slots == rig_slots:
+        return
+    elements = {f"FILTER_SLOT_NAME_{slot}": name for slot, name in rig_slots.items()}
+    await indi_messaging.send_property(device, "FILTER_NAME", elements)
+    _report_issue(
+        ctx,
+        Severity.INFO,
+        "filterConfigSynced",
+        f"role {role!r}'s rig config slots {rig_slots} didn't match "
+        f"driver {device!r}'s live FILTER_NAME slots {live_slots}; pushed rig config to driver",
+        role=role,
+        device=device,
+    )
 
 
 def _resolve_filter_slot(
