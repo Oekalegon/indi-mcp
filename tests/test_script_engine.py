@@ -3412,6 +3412,43 @@ async def test_execute_script_select_filter_copies_driver_slots_onto_rig_when_ri
     assert issue["device"] == "Filter Wheel Simulator"
 
 
+async def test_execute_script_select_filter_wraps_a_failed_slot_copy_as_script_execution_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure persisting the copied slots (disk full, permission denied, ...) must not leak
+    a bare exception out of `execute_script` — this module's documented exception contract
+    (`ScriptValidationError`/`ScriptPreconditionError`/`ScriptExecutionError`/`ScriptCancelled`,
+    never anything else) applies here too. `ctx.role_to_slots` is left untouched since the
+    persist never actually succeeded."""
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+    monkeypatch.setattr(
+        rig_store,
+        "update_component_slots",
+        MagicMock(side_effect=OSError("disk full")),
+    )
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="failed to persist filter slots"):
+        await script_engine.execute_script("select_filter", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
 async def test_execute_script_select_filter_skips_the_check_when_neither_side_has_slots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1984,7 +1984,7 @@ async def _execute_select_filter(
     """
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
-    _reconcile_filter_config_with_driver(ctx, role, device)
+    await _reconcile_filter_config_with_driver(ctx, role, device)
     slot = _resolve_filter_slot(step, ctx, role, params)
     timeout = float(_substitute(step.timeoutSeconds, params))
     await indi_messaging.send_property(device, "FILTER_SLOT", {"FILTER_SLOT_VALUE": str(slot)})
@@ -1993,7 +1993,9 @@ async def _execute_select_filter(
     )
 
 
-def _reconcile_filter_config_with_driver(ctx: _ExecutionContext, role: str, device: str) -> None:
+async def _reconcile_filter_config_with_driver(
+    ctx: _ExecutionContext, role: str, device: str
+) -> None:
     """Reconcile `role`'s rig-configured `slots` map against `device`'s live `FILTER_NAME`
     before a filter is actually selected — i.e. before telling the wheel to physically rotate a
     given filter into the light path (INDIMCP-64/INDIMCP-73). "Select filter X" only means the
@@ -2007,9 +2009,11 @@ def _reconcile_filter_config_with_driver(ctx: _ExecutionContext, role: str, devi
       `FILTER_NAME` does: there was never any rig-authored intent to override, so the driver's
       slot names are adopted onto the rig — both for the rest of *this* run
       (`ctx.role_to_slots[role]`) and persisted to the rig's YAML file
-      (`rig_store.update_component_slots`) so every future run has them too, not just this
-      one. Reported as an `INFO` issue, not silent, since it's still a rig definition changing
-      out from under whoever authored it.
+      (`rig_store.update_component_slots`, offloaded via `asyncio.to_thread` since it does
+      blocking file I/O — a full rig-directory read/parse, not just a single write — and this
+      function runs on the event loop) so every future run has them too, not just this one.
+      Reported as an `INFO` issue, not silent, since it's still a rig definition changing out
+      from under whoever authored it.
     - Otherwise — the rig *does* have `slots` configured, and they disagree with the driver's
       `FILTER_NAME` (slot count or names, checked together via plain dict equality) — that's a
       `FATAL` issue: selecting a filter under a config mismatch risks moving the wrong physical
@@ -2018,6 +2022,11 @@ def _reconcile_filter_config_with_driver(ctx: _ExecutionContext, role: str, devi
       driver, or explicitly push the rig's config to the driver via the `sync_filter_names`
       MCP tool/script step (`sync_filter_names`, `_execute_sync_filter_names`) — before a
       filter can be selected again.
+
+    A failure persisting the copied slots (disk full, permission denied, a concurrent write,
+    ...) is wrapped into a `ScriptExecutionError` rather than left to leak whatever exception
+    type `rig_store.update_component_slots` happens to raise — this module's documented
+    exception contract (see `_get_script`) never lets a bare exception escape `execute_script`.
 
     Skipped entirely (no reconciliation, no issue) if the driver doesn't expose `FILTER_NAME`
     at all, matching every other optional-property check in this module (`_check_not_parked`,
@@ -2033,7 +2042,13 @@ def _reconcile_filter_config_with_driver(ctx: _ExecutionContext, role: str, devi
     if not rig_slots:
         if not live_slots:
             return
-        rig_store.update_component_slots(ctx.rig_id, role, live_slots)
+        try:
+            await asyncio.to_thread(rig_store.update_component_slots, ctx.rig_id, role, live_slots)
+        except Exception as exc:
+            raise ScriptExecutionError(
+                f"role {role!r}: failed to persist filter slots copied from driver "
+                f"{device!r}: {exc}"
+            ) from exc
         ctx.role_to_slots[role] = live_slots
         _report_issue(
             ctx,
