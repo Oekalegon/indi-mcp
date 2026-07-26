@@ -24,6 +24,7 @@ from indi_mcp import (
     indi_server,
     observatory_store,
     rig_store,
+    script_engine,
     script_runs,
     script_store,
 )
@@ -33,6 +34,7 @@ from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
 from indi_mcp.observatory_store import Observatory, ObservatorySummary
 from indi_mcp.rig_store import DraftDeviceInfo, Rig, RigCheck, RigDraft, RigSuggestion, RigSummary
+from indi_mcp.script_engine import FilterSyncOutcome
 from indi_mcp.script_runs import (
     ScriptRunPaused,
     ScriptRunPauseRejected,
@@ -306,6 +308,27 @@ def check_rig(rig_id: str) -> RigCheck:
     used without one of its devices (e.g. imaging without a guide camera).
     """
     return rig_store.check_rig(rig_id, indi_messaging.list_devices())
+
+
+@mcp.tool()
+async def sync_filter_names(rig_id: str, role: str) -> FilterSyncOutcome:
+    """Push `rig_id`'s configured filter names for `role` to the EFW driver's live
+    `FILTER_NAME`, if they disagree (INDIMCP-64).
+
+    A deliberate action only: `run_script`ing a `select_filter` step never does this on its
+    own — it only ever warns about rig/driver drift (`filterConfigMismatch`) — since
+    overwriting a live device's own configuration should always be something an operator or
+    client explicitly asked for. Call this tool (or use a script's own explicit
+    `sync_filter_names` step) when that's actually what's wanted. Raises if `role` isn't a
+    connected `filterWheel`-like component with `slots` configured, if the device doesn't
+    expose `FILTER_NAME`, or if the rig and driver declare a different *number* of filter
+    slots (refuses to push a configuration for what's likely a differently-sized wheel).
+    """
+    rig = rig_store.get_rig(rig_id)
+    component = next((c for c in rig.components if c.role == role), None)
+    if component is None or component.device is None:
+        raise ValueError(f"rig {rig_id!r} has no connected device for role {role!r}")
+    return await script_engine.sync_filter_names(role, component.device, component.slots or {})
 
 
 @mcp.tool()

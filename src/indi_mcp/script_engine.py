@@ -25,7 +25,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from indi_mcp import (
     fits_headers,
@@ -51,6 +51,7 @@ from indi_mcp.script_store import (
     SetPropertyStep,
     SlewStep,
     Step,
+    SyncFilterNamesStep,
     WaitForStep,
 )
 
@@ -67,6 +68,7 @@ __all__ = [
     "ScriptValidationError",
     "Severity",
     "execute_script",
+    "sync_filter_names",
 ]
 
 _WAIT_POLL_INTERVAL_SECONDS = 0.2
@@ -248,7 +250,8 @@ class ScriptResult(TypedDict):
 
 @dataclass
 class _ExecutionContext:
-    """State shared, unchanged, across an entire run — including into nested `run_script` calls.
+    """State shared across an entire run — including into nested `run_script` calls — mutated
+    in exactly one place (`role_to_slots`, below) and otherwise unchanged.
 
     `scripts` is a snapshot of every script reachable from the top-level
     script via `run_script`, taken once at the start of the run — nested
@@ -264,7 +267,13 @@ class _ExecutionContext:
     `role_to_slots` is each resolved role's rig-component `slots` map
     (empty if it has none) — only consulted by `select_filter`'s
     `filterName` resolution (`_resolve_filter_slot`); every other step
-    ignores it.
+    ignores it. The one exception to this dataclass's "unchanged" rule:
+    `_reconcile_filter_config_with_driver` overwrites a role's entry here
+    (and persists the same change to the rig's YAML file via
+    `rig_store.update_component_slots`) when the rig had no `slots` at all
+    for that role and the driver's own `FILTER_NAME` does — so a later
+    `filterName` resolution in the *same* run sees the freshly-adopted
+    slots too, not just the next run.
 
     `role_to_focus_range` is each resolved role's rig-component
     `(minPosition, maxPosition)` pair, absent entirely for a role whose
@@ -303,6 +312,7 @@ class _ExecutionContext:
     value (`ScriptResult.warnings`) is built from, with no separate propagation step needed.
     """
 
+    rig_id: str
     role_to_device: dict[str, str]
     cancel_event: asyncio.Event | None
     pause_event: asyncio.Event | None
@@ -413,6 +423,7 @@ async def execute_script(
             optional_role_components[optional_role] = component
 
     ctx = _ExecutionContext(
+        rig_id=rig_id,
         role_to_device=role_to_device,
         cancel_event=cancel_event,
         pause_event=pause_event,
@@ -619,6 +630,7 @@ def _step_role(step: Step, params: dict[str, Any]) -> str | None:
         | SlewStep
         | CoolCameraStep
         | SelectFilterStep
+        | SyncFilterNamesStep
         | SetFocusPositionStep,
     ):
         return _substituted_role(step.role, params)
@@ -1972,8 +1984,8 @@ async def _execute_select_filter(
     """
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
+    _reconcile_filter_config_with_driver(ctx, role, device)
     slot = _resolve_filter_slot(step, ctx, role, params)
-    await _sync_filter_config_with_driver(ctx, role, device)
     timeout = float(_substitute(step.timeoutSeconds, params))
     await indi_messaging.send_property(device, "FILTER_SLOT", {"FILTER_SLOT_VALUE": str(slot)})
     await _wait_for_property_state(
@@ -1981,89 +1993,161 @@ async def _execute_select_filter(
     )
 
 
-async def _sync_filter_config_with_driver(ctx: _ExecutionContext, role: str, device: str) -> None:
-    """Push `role`'s rig-configured `slots` map to `device`'s live `FILTER_NAME` (INDIMCP-64)
-    if the two disagree, rather than silently picking one side, failing the step, or merely
-    warning about the drift forever.
+def _reconcile_filter_config_with_driver(ctx: _ExecutionContext, role: str, device: str) -> None:
+    """Reconcile `role`'s rig-configured `slots` map against `device`'s live `FILTER_NAME`
+    before a filter is actually selected — i.e. before telling the wheel to physically rotate a
+    given filter into the light path (INDIMCP-64/INDIMCP-73). "Select filter X" only means the
+    right thing if the rig and the driver agree on what slot X is; this runs first, ahead of
+    `_resolve_filter_slot`, precisely so a same-run `filterName` lookup sees any slots adopted
+    below.
 
-    The two are independent sources of truth for the same thing — the rig config is set by
-    whoever authored the rig, `FILTER_NAME` by whoever last configured the EFW driver (e.g.
-    via a different client, or the driver's own config file, which typically starts out with
-    generic defaults like "Filter 1", "Filter 2") — so a mismatch here means the rig config is
-    the intended state and the driver hasn't been told about it yet.
+    Two outcomes if they disagree:
 
-    A rig declaring a *different number* of filter slots than the driver's live `FILTER_NAME`
-    vector is a bigger problem than ordinary name drift — it means the rig was very likely
-    authored for a differently-sized wheel entirely (or the wrong device), and
-    `_resolve_filter_slot` could already be resolving a `filterName` to a slot number the
-    physical wheel doesn't have. That's a `FATAL` issue (INDIMCP-73/INDIMCP-64): nothing is
-    pushed and the step aborts (unlike every other case here) rather than silently sending a
-    partial `FILTER_NAME` update or guessing which side is right — this is the one case where
-    "ask the operator, don't guess" means refusing to touch the driver at all.
+    - `role`'s rig component has no `slots` map configured at all, and the driver's own
+      `FILTER_NAME` does: there was never any rig-authored intent to override, so the driver's
+      slot names are adopted onto the rig — both for the rest of *this* run
+      (`ctx.role_to_slots[role]`) and persisted to the rig's YAML file
+      (`rig_store.update_component_slots`) so every future run has them too, not just this
+      one. Reported as an `INFO` issue, not silent, since it's still a rig definition changing
+      out from under whoever authored it.
+    - Otherwise — the rig *does* have `slots` configured, and they disagree with the driver's
+      `FILTER_NAME` (slot count or names, checked together via plain dict equality) — that's a
+      `FATAL` issue: selecting a filter under a config mismatch risks moving the wrong physical
+      filter into the light path, so this refuses to guess which side is right or silently
+      pick one. The operator must make the two agree — hand-edit the rig, reconfigure the
+      driver, or explicitly push the rig's config to the driver via the `sync_filter_names`
+      MCP tool/script step (`sync_filter_names`, `_execute_sync_filter_names`) — before a
+      filter can be selected again.
 
-    Otherwise — same slot count, different names or slot numbers — the rig's slots are pushed
-    to the driver's `FILTER_NAME`, and the step proceeds using the rig's configured slot
-    (`_resolve_filter_slot` already resolved it) regardless of whether the push succeeds. If the
-    push itself fails (network hiccup, driver rejects it, etc.), this falls back to a
-    `WARNING`/`filterConfigMismatch` issue instead of letting the exception propagate out of
-    what INDIMCP-73 documents as a non-fatal check.
-
-    An `INFO`/`filterConfigSynced` issue on success, not `WARNING` — once pushed, the drift is
-    corrected rather than merely observed. Skipped entirely if the driver doesn't expose
-    `FILTER_NAME` at all, matching every other optional-property check in this module
-    (`_check_not_parked`, `_ensure_track_on_slew`, `_ensure_cooler_on`): plenty of EFW drivers
-    may not. Also skipped if `role`'s rig component has no `slots` map configured at all — a
-    script addressing filters purely by numeric `step.slot` never needs one, and that's not a
-    misconfiguration to push over; without this, any such rig would spuriously overwrite the
-    driver's own `FILTER_NAME` on every single `select_filter` call, since an empty rig config
-    trivially never equals a non-empty live one.
+    Skipped entirely (no reconciliation, no issue) if the driver doesn't expose `FILTER_NAME`
+    at all, matching every other optional-property check in this module (`_check_not_parked`,
+    `_ensure_track_on_slew`, `_ensure_cooler_on`): plenty of EFW drivers may not, and there's
+    nothing to compare against. Also skipped if neither the rig nor the driver has any slots
+    at all — nothing to reconcile either way.
     """
     rig_slots = ctx.role_to_slots.get(role, {})
-    if not rig_slots:
-        return
     live_values = indi_messaging.get_property_values(device, "FILTER_NAME")
     if live_values is None:
         return
     live_slots = rig_store.filter_slots(live_values)
-    if live_slots == rig_slots:
+    if not rig_slots:
+        if not live_slots:
+            return
+        rig_store.update_component_slots(ctx.rig_id, role, live_slots)
+        ctx.role_to_slots[role] = live_slots
+        _report_issue(
+            ctx,
+            Severity.INFO,
+            "filterSlotsCopiedFromDriver",
+            f"role {role!r}'s rig had no filter slots configured; copied driver {device!r}'s "
+            f"live FILTER_NAME slots {live_slots} onto the rig",
+            role=role,
+            device=device,
+        )
         return
-    if len(rig_slots) != len(live_slots):
+    if live_slots != rig_slots:
         _report_issue(
             ctx,
             Severity.FATAL,
-            "filterSlotCountMismatch",
-            f"role {role!r}'s rig config declares {len(rig_slots)} filter slot(s) "
-            f"{rig_slots}, but driver {device!r}'s live FILTER_NAME declares "
-            f"{len(live_slots)} {live_slots} — refusing to push a filter configuration for a "
-            "differently-sized wheel",
+            "filterConfigMismatch",
+            f"role {role!r}'s rig config slots {rig_slots} don't match "
+            f"driver {device!r}'s live FILTER_NAME slots {live_slots} — make them agree "
+            "(edit the rig, reconfigure the driver, or push the rig's config to the driver "
+            "via sync_filter_names) before selecting a filter",
             role=role,
             device=device,
         )
-        return  # unreachable: _report_issue always raises for FATAL; kept for readability
+
+
+class FilterSyncOutcome(TypedDict):
+    """The result of `sync_filter_names` — always either `"matched"` (nothing to do) or
+    `"synced"` (a push happened), never a silent failure: anything that can't be safely pushed
+    raises `ValueError` instead (INDIMCP-64)."""
+
+    status: Literal["matched", "synced"]
+    rigSlots: dict[int, str]
+    liveSlots: dict[int, str]
+
+
+async def sync_filter_names(role: str, device: str, rig_slots: dict[int, str]) -> FilterSyncOutcome:
+    """Push `rig_slots` to `device`'s live `FILTER_NAME` if it disagrees (INDIMCP-64).
+
+    A deliberate action only, shared by the `sync_filter_names` MCP tool (`server.py`) and the
+    `sync_filter_names` script step (`_execute_sync_filter_names`) — never called automatically
+    by `select_filter`, which reconciles rig/driver drift its own way
+    (`_reconcile_filter_config_with_driver`: adopt the driver's names onto the rig if the rig
+    has none configured, otherwise fail fatally rather than silently pick a side). Pushing the
+    rig's config onto the driver should always be something an operator or client explicitly
+    asked for, not a side effect of selecting a filter mid-script.
+
+    Raises `ValueError` (translated by each caller into whatever failure mode fits it — an MCP
+    tool error, or a `ScriptExecutionError`) rather than guessing or partially applying a
+    change:
+    - `device` doesn't expose `FILTER_NAME` at all.
+    - `rig_slots` and the live vector declare a *different number* of slots — almost certainly
+      the rig was authored for a differently-sized wheel entirely, or the wrong device, so
+      nothing is pushed rather than sending a partial/mismatched `FILTER_NAME` update.
+    - The push itself fails (network hiccup, driver rejects it, etc.) — wrapped into a
+      `ValueError` too, so every failure mode this function can hit surfaces the same way to
+      callers, rather than leaking whatever exception type `indi_messaging.send_property`
+      happens to raise.
+    """
+    if not rig_slots:
+        raise ValueError("no filter slots are configured for this role")
+    live_values = indi_messaging.get_property_values(device, "FILTER_NAME")
+    if live_values is None:
+        raise ValueError(f"device {device!r} does not expose FILTER_NAME")
+    live_slots = rig_store.filter_slots(live_values)
+    if live_slots == rig_slots:
+        return {"status": "matched", "rigSlots": rig_slots, "liveSlots": live_slots}
+    if len(rig_slots) != len(live_slots):
+        raise ValueError(
+            f"rig config declares {len(rig_slots)} filter slot(s) {rig_slots}, but driver "
+            f"{device!r}'s live FILTER_NAME declares {len(live_slots)} {live_slots} — refusing "
+            "to push a filter configuration for a differently-sized wheel"
+        )
     elements = {f"FILTER_SLOT_NAME_{slot}": name for slot, name in rig_slots.items()}
     try:
         await indi_messaging.send_property(device, "FILTER_NAME", elements)
-    except Exception:
+    except Exception as exc:
+        raise ValueError(f"pushing filter names to driver {device!r} failed: {exc}") from exc
+    return {"status": "synced", "rigSlots": rig_slots, "liveSlots": live_slots}
+
+
+async def _execute_sync_filter_names(
+    step: SyncFilterNamesStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    """Explicitly push `step.role`'s rig-configured filter names to the EFW driver's live
+    `FILTER_NAME` (INDIMCP-64) — see `sync_filter_names` for the shared push logic and why this
+    is never done automatically by `select_filter`.
+
+    A `ValueError` from `sync_filter_names` (no live `FILTER_NAME`, or a slot-count mismatch)
+    becomes a `ScriptExecutionError` — the script author explicitly asked for this step to run,
+    so an inability to safely do so is this step's own failure, not a silently-skipped optional
+    check the way `select_filter`'s drift warning is.
+    """
+    role = _substituted_role(step.role, params)
+    device = _resolve_device(role, ctx)
+    rig_slots = ctx.role_to_slots.get(role, {})
+    try:
+        outcome = await sync_filter_names(role, device, rig_slots)
+    except ValueError as exc:
+        raise ScriptExecutionError(str(exc)) from exc
+    if outcome["status"] == "synced":
         _report_issue(
             ctx,
-            Severity.WARNING,
-            "filterConfigMismatch",
-            f"role {role!r}'s rig config slots {rig_slots} don't match "
-            f"driver {device!r}'s live FILTER_NAME slots {live_slots}, and pushing the rig's "
-            "config to the driver failed",
+            Severity.INFO,
+            "filterConfigSynced",
+            f"role {role!r}'s rig config slots {outcome['rigSlots']} didn't match driver "
+            f"{device!r}'s live FILTER_NAME slots {outcome['liveSlots']}; pushed rig config to "
+            "driver",
             role=role,
             device=device,
         )
-        return
-    _report_issue(
-        ctx,
-        Severity.INFO,
-        "filterConfigSynced",
-        f"role {role!r}'s rig config slots {rig_slots} didn't match "
-        f"driver {device!r}'s live FILTER_NAME slots {live_slots}; pushed rig config to driver",
-        role=role,
-        device=device,
-    )
 
 
 def _resolve_filter_slot(
@@ -2160,6 +2244,7 @@ STEP_HANDLERS: dict[type, StepHandler] = {
     SlewStep: _execute_slew,
     CoolCameraStep: _execute_cool_camera,
     SelectFilterStep: _execute_select_filter,
+    SyncFilterNamesStep: _execute_sync_filter_names,
     SetFocusPositionStep: _execute_set_focus_position,
     RunScriptStep: _execute_run_script,
     RepeatStep: _execute_repeat,
@@ -2171,7 +2256,7 @@ Every step type `script_store.Script` can produce must have a handler
 registered here — `_run_one_step` looks up `type(step)` in this dict and
 raises `ScriptValidationError` (rather than silently no-op'ing) if a step's
 runtime type isn't registered. Since `script_store`'s `Step` union is
-already closed to these same 9 types (INDIMCP-6's "no embedded expression
+already closed to these same 10 types (INDIMCP-6's "no embedded expression
 language" rule — see `docs/ScriptSchema.md`), this can't actually be missed
 for a script that loaded successfully; it exists as an explicit,
 inspectable whitelist rather than an implicit if/elif chain, and as a

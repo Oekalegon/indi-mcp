@@ -56,6 +56,7 @@ __all__ = [
     "SlewStep",
     "SlewTarget",
     "Step",
+    "SyncFilterNamesStep",
     "WaitForStep",
     "get_script",
     "list_scripts",
@@ -278,6 +279,22 @@ class SelectFilterStep(_StepBase):
         return self
 
 
+class SyncFilterNamesStep(_StepBase):
+    """Explicitly push the rig component's own `slots` map (`docs/RigSchema.md`) to the EFW
+    driver's live `FILTER_NAME` (INDIMCP-64).
+
+    A deliberate, standalone action — never a side effect of `select_filter`, which only ever
+    warns about rig/driver drift (`filterConfigMismatch`) and never touches the driver. Include
+    this step explicitly wherever a script (or its author/operator) actually wants the rig's
+    filter names written back to the device, the same "engine-implemented primitive because it
+    needs rig configuration a plain `set_property` can't see" reasoning as `select_filter`
+    itself.
+    """
+
+    step: Literal["sync_filter_names"]
+    role: str
+
+
 class SetFocusPositionStep(_StepBase):
     """Move the focuser to an absolute position, checked against the rig component's own
     travel range.
@@ -335,6 +352,7 @@ Step = Annotated[
     | SlewStep
     | CoolCameraStep
     | SelectFilterStep
+    | SyncFilterNamesStep
     | SetFocusPositionStep
     | RunScriptStep
     | RepeatStep
@@ -455,6 +473,7 @@ def referenced_roles(script: Script) -> set[str]:
             | SlewStep
             | CoolCameraStep
             | SelectFilterStep
+            | SyncFilterNamesStep
             | SetFocusPositionStep,
         ):
             roles.add(step.role)

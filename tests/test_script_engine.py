@@ -2684,6 +2684,7 @@ async def test_wait_for_property_state_fails_fast_on_alert(
     monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
     monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
     ctx = script_engine._ExecutionContext(
+        rig_id="test-rig",
         role_to_device={},
         cancel_event=None,
         pause_event=None,
@@ -3289,21 +3290,21 @@ async def test_execute_script_select_filter_reports_no_warning_when_driver_match
     result = await script_engine.execute_script("select_filter", "test-rig", {})
 
     assert result["warnings"] == []
-    # Config already matched, so only the FILTER_SLOT command was sent — no FILTER_NAME push.
     send_property.assert_awaited_once_with(
         "Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "2"}
     )
 
 
-async def test_execute_script_select_filter_syncs_driver_when_it_disagrees_with_rig(
+async def test_execute_script_select_filter_fails_fatally_when_driver_disagrees_with_rig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The EFW driver's own live `FILTER_NAME` config can drift from the rig's configured
-    `slots` map (e.g. the driver still has its factory-default names, or someone reconfigured
-    the wheel from a different client) — INDIMCP-64 pushes the rig's config to the driver's
-    `FILTER_NAME` and reports an `INFO`-severity issue rather than failing the step or
-    silently leaving the drift in place; the step still proceeds with the rig's configured
-    slot."""
+    `slots` map (e.g. someone reconfigured the wheel from a different client) — INDIMCP-64
+    treats this as `FATAL` rather than a warning: selecting a filter under a config mismatch
+    risks moving the wrong physical filter into the light path, so the step must not proceed
+    (or touch the driver) until an operator makes the rig and the driver agree — whether by
+    hand-editing the rig, reconfiguring the driver, or explicitly pushing the rig's config to
+    the driver via the `sync_filter_names` tool/step."""
     _rig(
         rig_store.Component(
             role="filterWheel",
@@ -3324,62 +3325,6 @@ async def test_execute_script_select_filter_syncs_driver_when_it_disagrees_with_
         "get_property_values",
         lambda device, name: (
             {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
-            if name == "FILTER_NAME"
-            else _default_get_property_values(device, name)
-        ),
-    )
-
-    result = await script_engine.execute_script("select_filter", "test-rig", {})
-
-    # The rig's config was pushed to the driver before the step used the rig's own
-    # configured slot (2, "Red") despite the mismatch.
-    send_property.assert_has_awaits(
-        [
-            call(
-                "Filter Wheel Simulator",
-                "FILTER_NAME",
-                {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"},
-            ),
-            call("Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "2"}),
-        ]
-    )
-    assert len(result["warnings"]) == 1
-    warning = result["warnings"][0]
-    assert warning["kind"] == "issue"
-    assert warning["severity"] == script_engine.Severity.INFO
-    assert warning["code"] == "filterConfigSynced"
-    assert warning["role"] == "filterWheel"
-    assert warning["device"] == "Filter Wheel Simulator"
-
-
-async def test_execute_script_select_filter_fails_fatally_when_slot_counts_differ(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A rig declaring a *different number* of filter slots than the driver's live
-    `FILTER_NAME` (e.g. the rig was authored for a differently-sized wheel entirely) is treated
-    as `FATAL` (INDIMCP-64) rather than name drift — nothing is pushed to the driver and the
-    step aborts before the filter is even selected, instead of guessing which side is right or
-    sending a partial `FILTER_NAME` update."""
-    _rig(
-        rig_store.Component(
-            role="filterWheel",
-            id="fw-1",
-            device="Filter Wheel Simulator",
-            slots={1: "Luminance", 2: "Red"},
-        )
-    )
-    _script(
-        "select_filter",
-        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
-    )
-    send_property = AsyncMock()
-    monkeypatch.setattr(indi_messaging, "send_property", send_property)
-    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
-    monkeypatch.setattr(
-        indi_messaging,
-        "get_property_values",
-        lambda device, name: (
-            {"FILTER_SLOT_NAME_1": "Luminance"}
             if name == "FILTER_NAME"
             else _default_get_property_values(device, name)
         ),
@@ -3392,65 +3337,11 @@ async def test_execute_script_select_filter_fails_fatally_when_slot_counts_diffe
     send_property.assert_not_awaited()
     assert len(exc_info.value.warnings) == 1
     fatal = exc_info.value.warnings[0]
+    assert fatal["kind"] == "issue"
     assert fatal["severity"] == script_engine.Severity.FATAL
-    assert fatal["code"] == "filterSlotCountMismatch"
+    assert fatal["code"] == "filterConfigMismatch"
     assert fatal["role"] == "filterWheel"
     assert fatal["device"] == "Filter Wheel Simulator"
-
-
-async def test_execute_script_select_filter_warns_when_pushing_config_to_driver_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed `FILTER_NAME` push (network hiccup, driver rejects it, ...) falls back to a
-    `WARNING`/`filterConfigMismatch` issue rather than letting the exception abort the whole
-    step — this non-fatal check must never turn a config drift into a hard script failure."""
-    _rig(
-        rig_store.Component(
-            role="filterWheel",
-            id="fw-1",
-            device="Filter Wheel Simulator",
-            slots={1: "Luminance", 2: "Red"},
-        )
-    )
-    _script(
-        "select_filter",
-        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
-    )
-
-    def _raise_for_filter_name(device: str, name: str, elements: dict[str, str]) -> None:
-        if name == "FILTER_NAME":
-            raise RuntimeError("driver rejected FILTER_NAME")
-
-    send_property = AsyncMock(side_effect=_raise_for_filter_name)
-    monkeypatch.setattr(indi_messaging, "send_property", send_property)
-    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
-    monkeypatch.setattr(
-        indi_messaging,
-        "get_property_values",
-        lambda device, name: (
-            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
-            if name == "FILTER_NAME"
-            else _default_get_property_values(device, name)
-        ),
-    )
-
-    result = await script_engine.execute_script("select_filter", "test-rig", {})
-
-    # The step still completed and used the rig's own configured slot despite the failed push.
-    send_property.assert_has_awaits(
-        [
-            call(
-                "Filter Wheel Simulator",
-                "FILTER_NAME",
-                {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"},
-            ),
-            call("Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "2"}),
-        ]
-    )
-    assert len(result["warnings"]) == 1
-    warning = result["warnings"][0]
-    assert warning["severity"] == script_engine.Severity.WARNING
-    assert warning["code"] == "filterConfigMismatch"
 
 
 async def test_execute_script_select_filter_skips_the_check_when_driver_lacks_filter_name(
@@ -3475,13 +3366,59 @@ async def test_execute_script_select_filter_skips_the_check_when_driver_lacks_fi
     assert result["warnings"] == []
 
 
-async def test_execute_script_select_filter_skips_the_check_when_rig_has_no_slots_configured(
+async def test_execute_script_select_filter_copies_driver_slots_onto_rig_when_rig_has_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rig component with no `slots` map at all (addressed purely by numeric `step.slot`)
-    isn't a misconfiguration to warn about, even if the driver's own `FILTER_NAME` is
-    non-empty — an empty rig config trivially never equals a non-empty live one, so without
-    this guard every such rig would spuriously "mismatch" on every `select_filter` call."""
+    """A rig component with no `slots` map at all has no rig-authored intent to contradict —
+    so when the driver's own `FILTER_NAME` is non-empty, INDIMCP-64 adopts the driver's slot
+    names onto the rig (persisted via `rig_store.update_component_slots`, and into
+    `ctx.role_to_slots` so a `filterName` lookup later in the *same* run already sees them)
+    rather than treating this as a config mismatch, and reports an `INFO` issue."""
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+    update_component_slots = MagicMock()
+    monkeypatch.setattr(rig_store, "update_component_slots", update_component_slots)
+
+    result = await script_engine.execute_script("select_filter", "test-rig", {})
+
+    update_component_slots.assert_called_once_with(
+        "test-rig", "filterWheel", {1: "Luminance", 2: "Red"}
+    )
+    # filterName="Red" resolved against the freshly-copied slots, in the same run.
+    send_property.assert_awaited_once_with(
+        "Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "2"}
+    )
+    assert len(result["warnings"]) == 1
+    issue = result["warnings"][0]
+    assert issue["kind"] == "issue"
+    assert issue["severity"] == script_engine.Severity.INFO
+    assert issue["code"] == "filterSlotsCopiedFromDriver"
+    assert issue["role"] == "filterWheel"
+    assert issue["device"] == "Filter Wheel Simulator"
+
+
+async def test_execute_script_select_filter_skips_the_check_when_neither_side_has_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither the rig nor the driver declares any filter slots (the driver's `FILTER_NAME` is
+    defined but has no recognized `FILTER_SLOT_NAME_<n>` members at all) — nothing to
+    reconcile either way, so a plain numeric `step.slot` selection proceeds with no issue and
+    no copy."""
     _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
     _script(
         "select_filter",
@@ -3493,72 +3430,60 @@ async def test_execute_script_select_filter_skips_the_check_when_rig_has_no_slot
         indi_messaging,
         "get_property_values",
         lambda device, name: (
-            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
-            if name == "FILTER_NAME"
-            else _default_get_property_values(device, name)
+            {} if name == "FILTER_NAME" else _default_get_property_values(device, name)
         ),
     )
+    update_component_slots = MagicMock()
+    monkeypatch.setattr(rig_store, "update_component_slots", update_component_slots)
 
     result = await script_engine.execute_script("select_filter", "test-rig", {})
 
     assert result["warnings"] == []
+    update_component_slots.assert_not_called()
 
 
-async def test_execute_script_repeat_accumulates_one_warning_per_iteration(
+def test_report_issue_collects_one_entry_per_call_not_deduplicated() -> None:
+    """Issues are collected as a list, not deduplicated/overwritten — the same code reported
+    multiple times (e.g. once per iteration of a `repeat` block) accumulates one entry per
+    call (INDIMCP-73). Exercises `_report_issue` directly rather than through a real step,
+    since no current non-fatal step condition is repeatable across iterations without
+    resolving itself after the first (e.g. `select_filter`'s own drift check either fixes
+    itself — INDIMCP-64's copy-from-driver case — or aborts the run outright on a genuine
+    mismatch)."""
+    ctx = script_engine._ExecutionContext(
+        rig_id="test-rig",
+        role_to_device={},
+        cancel_event=None,
+        pause_event=None,
+        on_progress=None,
+        total_steps=None,
+        scripts={},
+        run_id=None,
+    )
+
+    for _ in range(3):
+        script_engine._report_issue(
+            ctx,
+            script_engine.Severity.WARNING,
+            "filterConfigMismatch",
+            "role 'filterWheel's rig config doesn't match the driver",
+            role="filterWheel",
+        )
+
+    assert len(ctx.warnings) == 3
+    assert all(w["code"] == "filterConfigMismatch" for w in ctx.warnings)
+
+
+async def test_execute_script_run_script_forwards_a_nested_issue_to_the_caller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Warnings are collected as a list, not deduplicated/overwritten — a condition hit on
-    every iteration of a `repeat` block reports one entry per iteration (INDIMCP-73)."""
-    _rig(
-        rig_store.Component(
-            role="filterWheel",
-            id="fw-1",
-            device="Filter Wheel Simulator",
-            slots={1: "Luminance", 2: "Red"},
-        )
-    )
-    _script(
-        "select_filter-repeat",
-        steps=[
-            {
-                "step": "repeat",
-                "count": 3,
-                "steps": [{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
-            }
-        ],
-    )
-    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
-    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
-    monkeypatch.setattr(
-        indi_messaging,
-        "get_property_values",
-        lambda device, name: (
-            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
-            if name == "FILTER_NAME"
-            else _default_get_property_values(device, name)
-        ),
-    )
-
-    result = await script_engine.execute_script("select_filter-repeat", "test-rig", {})
-
-    assert len(result["warnings"]) == 3
-    assert all(w["code"] == "filterConfigSynced" for w in result["warnings"])
-
-
-async def test_execute_script_run_script_forwards_a_nested_warning_to_the_caller(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A warning reported inside a `run_script` callee appears in the top-level caller's own
-    `ScriptResult.warnings` — free forwarding via the shared `_ExecutionContext` (INDIMCP-73),
-    no separate propagation code needed."""
-    _rig(
-        rig_store.Component(
-            role="filterWheel",
-            id="fw-1",
-            device="Filter Wheel Simulator",
-            slots={1: "Luminance", 2: "Red"},
-        )
-    )
+    """A non-fatal issue reported inside a `run_script` callee appears in the top-level
+    caller's own `ScriptResult.warnings` — free forwarding via the shared `_ExecutionContext`
+    (INDIMCP-73), no separate propagation code needed. Uses INDIMCP-64's copy-from-driver case
+    as the non-fatal issue: the callee's rig component has no filter slots configured, so
+    `select_filter` adopts the driver's own live `FILTER_NAME` and reports an `INFO` issue
+    rather than failing."""
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
     _script(
         "callee",
         steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
@@ -3573,32 +3498,28 @@ async def test_execute_script_run_script_forwards_a_nested_warning_to_the_caller
         indi_messaging,
         "get_property_values",
         lambda device, name: (
-            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
             if name == "FILTER_NAME"
             else _default_get_property_values(device, name)
         ),
     )
+    monkeypatch.setattr(rig_store, "update_component_slots", MagicMock())
 
     result = await script_engine.execute_script("caller", "test-rig", {})
 
     assert len(result["warnings"]) == 1
-    assert result["warnings"][0]["code"] == "filterConfigSynced"
+    assert result["warnings"][0]["code"] == "filterSlotsCopiedFromDriver"
 
 
-async def test_execute_script_fatal_failure_still_carries_warnings_collected_earlier(
+async def test_execute_script_fatal_failure_still_carries_issues_collected_earlier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A `FATAL`-severity issue (or any other exception `execute_script` raises) still carries
     whatever non-fatal issues were collected earlier in the same run — nothing is lost just
-    because the run ultimately aborts (INDIMCP-73)."""
-    _rig(
-        rig_store.Component(
-            role="filterWheel",
-            id="fw-1",
-            device="Filter Wheel Simulator",
-            slots={1: "Luminance", 2: "Red"},
-        )
-    )
+    because the run ultimately aborts (INDIMCP-73). Step 1's rig component has no filter slots
+    configured, so it adopts the driver's `FILTER_NAME` (an `INFO` issue, INDIMCP-64) before
+    step 2 fails outright resolving an unknown filter name."""
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
     _script(
         "select_filter-then-fail",
         steps=[
@@ -3612,11 +3533,12 @@ async def test_execute_script_fatal_failure_still_carries_warnings_collected_ear
         indi_messaging,
         "get_property_values",
         lambda device, name: (
-            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
             if name == "FILTER_NAME"
             else _default_get_property_values(device, name)
         ),
     )
+    monkeypatch.setattr(rig_store, "update_component_slots", MagicMock())
 
     with pytest.raises(
         script_engine.ScriptExecutionError, match="no slot named 'Nonexistent'"
@@ -3624,16 +3546,18 @@ async def test_execute_script_fatal_failure_still_carries_warnings_collected_ear
         await script_engine.execute_script("select_filter-then-fail", "test-rig", {})
 
     assert len(exc_info.value.warnings) == 1
-    assert exc_info.value.warnings[0]["code"] == "filterConfigSynced"
+    assert exc_info.value.warnings[0]["code"] == "filterSlotsCopiedFromDriver"
 
 
 async def test_report_issue_fatal_raises_and_includes_itself_in_the_exceptions_warnings() -> None:
     """`_report_issue`'s `FATAL` branch must raise, and the fatal issue itself must survive
     onto the raised exception's `warnings` — not just its plain string `message` — since
     `execute_script`'s except handler copies `ctx.warnings` onto the exception wholesale
-    (INDIMCP-73). Exercises `_report_issue` directly rather than through a real step, since no
-    current step wires a `FATAL` severity through yet."""
+    (INDIMCP-73). Exercises `_report_issue` directly rather than through a real step — see
+    `test_execute_script_select_filter_fails_fatally_when_driver_disagrees_with_rig` for the
+    same mechanism exercised through `select_filter`'s own `FATAL` case (INDIMCP-64)."""
     ctx = script_engine._ExecutionContext(
+        rig_id="test-rig",
         role_to_device={},
         cancel_event=None,
         pause_event=None,
@@ -3703,6 +3627,210 @@ async def test_execute_script_select_filter_fails_fast_on_filter_slot_alert(
         await asyncio.wait_for(
             script_engine.execute_script("select_filter", "test-rig", {}), timeout=1.0
         )
+
+
+async def test_sync_filter_names_returns_matched_and_pushes_nothing_when_already_equal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"},
+    )
+
+    outcome = await script_engine.sync_filter_names(
+        "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"}
+    )
+
+    assert outcome == {
+        "status": "matched",
+        "rigSlots": {1: "Luminance", 2: "Red"},
+        "liveSlots": {1: "Luminance", 2: "Red"},
+    }
+    send_property.assert_not_awaited()
+
+
+async def test_sync_filter_names_pushes_and_returns_synced_when_they_disagree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"},
+    )
+
+    outcome = await script_engine.sync_filter_names(
+        "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"}
+    )
+
+    send_property.assert_awaited_once_with(
+        "Filter Wheel Simulator",
+        "FILTER_NAME",
+        {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"},
+    )
+    assert outcome["status"] == "synced"
+
+
+async def test_sync_filter_names_raises_when_rig_has_no_slots() -> None:
+    with pytest.raises(ValueError, match="no filter slots"):
+        await script_engine.sync_filter_names("filterWheel", "Filter Wheel Simulator", {})
+
+
+async def test_sync_filter_names_raises_when_driver_lacks_filter_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(indi_messaging, "get_property_values", lambda device, name: None)
+
+    with pytest.raises(ValueError, match="does not expose FILTER_NAME"):
+        await script_engine.sync_filter_names(
+            "filterWheel", "Filter Wheel Simulator", {1: "Luminance"}
+        )
+
+
+async def test_sync_filter_names_raises_when_slot_counts_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"FILTER_SLOT_NAME_1": "Luminance"},
+    )
+
+    with pytest.raises(ValueError, match="differently-sized wheel"):
+        await script_engine.sync_filter_names(
+            "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"}
+        )
+
+
+async def test_sync_filter_names_raises_when_the_push_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"},
+    )
+    monkeypatch.setattr(
+        indi_messaging, "send_property", AsyncMock(side_effect=RuntimeError("driver rejected it"))
+    )
+
+    with pytest.raises(ValueError, match="pushing filter names to driver .* failed"):
+        await script_engine.sync_filter_names(
+            "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"}
+        )
+
+
+async def test_execute_script_sync_filter_names_reports_info_issue_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        )
+    )
+    _script(
+        "sync_filter_names",
+        steps=[{"step": "sync_filter_names", "role": "filterWheel"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+
+    result = await script_engine.execute_script("sync_filter_names", "test-rig", {})
+
+    send_property.assert_awaited_once_with(
+        "Filter Wheel Simulator",
+        "FILTER_NAME",
+        {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"},
+    )
+    assert len(result["warnings"]) == 1
+    issue = result["warnings"][0]
+    assert issue["kind"] == "issue"
+    assert issue["severity"] == script_engine.Severity.INFO
+    assert issue["code"] == "filterConfigSynced"
+    assert issue["role"] == "filterWheel"
+    assert issue["device"] == "Filter Wheel Simulator"
+
+
+async def test_execute_script_sync_filter_names_reports_no_issue_when_already_matched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        )
+    )
+    _script(
+        "sync_filter_names",
+        steps=[{"step": "sync_filter_names", "role": "filterWheel"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+
+    result = await script_engine.execute_script("sync_filter_names", "test-rig", {})
+
+    send_property.assert_not_awaited()
+    assert result["warnings"] == []
+
+
+async def test_execute_script_sync_filter_names_fails_when_slot_counts_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        )
+    )
+    _script(
+        "sync_filter_names",
+        steps=[{"step": "sync_filter_names", "role": "filterWheel"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="differently-sized wheel"):
+        await script_engine.execute_script("sync_filter_names", "test-rig", {})
+
+    send_property.assert_not_awaited()
 
 
 async def test_execute_script_set_focus_position_sets_position_and_waits_for_ok(
@@ -4191,6 +4319,7 @@ def test_step_handlers_covers_every_closed_step_type() -> None:
         script_store.SlewStep,
         script_store.CoolCameraStep,
         script_store.SelectFilterStep,
+        script_store.SyncFilterNamesStep,
         script_store.SetFocusPositionStep,
         script_store.RunScriptStep,
         script_store.RepeatStep,
@@ -4204,6 +4333,7 @@ async def test_run_one_step_rejects_a_step_type_with_no_registered_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = script_engine._ExecutionContext(
+        rig_id="test-rig",
         role_to_device={},
         cancel_event=None,
         pause_event=None,

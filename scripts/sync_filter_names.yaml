@@ -1,0 +1,12 @@
+id: sync_filter_names
+name: Push the rig's filter names to the filter wheel driver
+description: >
+  Explicitly pushes the rig's configured filterWheel slots map to the EFW driver's live
+  FILTER_NAME, if they disagree. A thin, reusable wrapper around the sync_filter_names step
+  primitive so composed sequences can `run_script: sync_filter_names` instead of repeating a
+  raw sync_filter_names step — see docs/Design.md's "Composing scripts" section. Never run
+  implicitly by select_filter; this is a deliberate action to opt into (INDIMCP-64).
+pausable: false
+steps:
+  - step: sync_filter_names
+    role: filterWheel

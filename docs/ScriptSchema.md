@@ -19,8 +19,8 @@ across the whole library, since `run_script` steps resolve by `id` within that s
 see "Script composition" below.
 
 This is deliberately a **closed, fixed vocabulary of step primitives** (`set_property`,
-`wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`, `set_focus_position`,
-`run_script`, `repeat`, `if`) — unlike a rig component's
+`wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`, `sync_filter_names`,
+`set_focus_position`, `run_script`, `repeat`, `if`) — unlike a rig component's
 `role`, which accepts any string for extensibility, a step's `step` field must be one of these
 exact values. There is no embedded expression language: conditionals are a fixed, closed set of
 comparison operators over known INDI property state, not arbitrary code — see "Design notes"
@@ -127,7 +127,7 @@ can express in YAML alone — not just a stylistic choice:
   `if` are pure control flow with no INDI interaction of their own. Nothing about these needs
   device- or operation-specific code — the same handler serves every script.
 * **Engine-implemented primitives** — `capture_frame`, `slew`, `cool_camera`, `select_filter`,
-  `set_focus_position` —
+  `sync_filter_names`, `set_focus_position` —
   each bundle a *sequence* of INDI commands (and sometimes non-INDI work) that isn't reducible to
   a single `set_property`/`wait_for` pair. `capture_frame`, for example, is really "set frame
   type, set exposure, wait through the `Busy`→`Ok` transition, drain the BLOB, write it to frame
@@ -140,7 +140,13 @@ can express in YAML alone — not just a stylistic choice:
   `select_filter` similarly needs rig configuration a plain `set_property` step has no access to:
   it accepts either a numeric `slot` or a `filterName`, resolving a name to its numeric
   `FILTER_SLOT_VALUE` via the rig's own filter-wheel `slots` map (`docs/RigSchema.md`) before
-  setting `FILTER_SLOT` and waiting for `Ok` (INDIMCP-61). `set_focus_position` similarly needs
+  setting `FILTER_SLOT` and waiting for `Ok` (INDIMCP-61); it also reconciles the rig's `slots`
+  against the driver's own live `FILTER_NAME` first — adopting the driver's names onto the rig
+  if the rig has none configured yet, otherwise failing fatally on any disagreement, rather than
+  risking the wrong physical filter moving into the light path (INDIMCP-64, see below).
+  `sync_filter_names` explicitly pushes the rig's `slots` onto the driver's `FILTER_NAME` when
+  they disagree — a deliberate, standalone action (INDIMCP-64), never an automatic side effect
+  of `select_filter`. `set_focus_position` similarly needs
   rig configuration a plain `set_property` step has no access to: it checks its target `position`
   against the rig's own focuser `minPosition`/`maxPosition` (`docs/RigSchema.md`) before setting
   `ABS_FOCUS_POSITION` and waiting for `Ok` — not every focuser driver rejects an out-of-range
@@ -233,8 +239,40 @@ reach `Ok` — see "Execution model" above.
 | `filterName` | string | one of `slot`/`filterName` | A filter name (e.g. `"Luminance"`) resolved to its numeric slot via the rig component's own `slots` map (`docs/RigSchema.md`) — resolved when this step runs, raising a `scriptFailed` result if the name isn't in that map (not caught upfront at `run_script` time). |
 | `timeoutSeconds` | number | no (default `30`) | Maximum time to wait for `FILTER_SLOT` to reach `Ok` before failing this step. |
 
-Sets `FILTER_SLOT`'s `FILTER_SLOT_VALUE` element to the resolved slot number and waits for the
-vector to reach `Ok` — see "Execution model" above.
+Before resolving `slot`/`filterName`, reconciles the rig component's `slots` map against the
+driver's own live `FILTER_NAME` (INDIMCP-64):
+
+* If the rig has no `slots` configured at all, and the driver's `FILTER_NAME` does, the driver's
+  slot names are adopted onto the rig — persisted to the rig's YAML file (so every future run has
+  them too) and used for the rest of *this* run's `filterName` resolution. Reported as a
+  non-fatal `filterSlotsCopiedFromDriver` issue.
+* Otherwise, if the rig's `slots` and the driver's `FILTER_NAME` disagree at all (slot count or
+  names), the step fails with a `filterConfigMismatch` issue and the run aborts — selecting a
+  filter under a config mismatch risks moving the wrong physical filter into the light path, so
+  this never guesses which side is right or silently proceeds. Fix the disagreement (hand-edit
+  the rig, reconfigure the driver, or run `sync_filter_names`) before selecting a filter again.
+* Skipped entirely if the driver doesn't expose `FILTER_NAME` at all, or if neither side has any
+  slots configured.
+
+Then sets `FILTER_SLOT`'s `FILTER_SLOT_VALUE` element to the resolved slot number and waits for
+the vector to reach `Ok` — see "Execution model" above.
+
+#### `sync_filter_names`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `role` | string | yes | Typically `"filterWheel"`. |
+
+Explicitly pushes the rig component's own `slots` map to the driver's live `FILTER_NAME`, if they
+disagree — the same reconciliation `select_filter` performs automatically, except this always
+pushes the rig's config onto the driver rather than adopting the driver's names or failing. A
+deliberate, standalone action (INDIMCP-64): never invoked automatically by `select_filter`,
+which only ever adopts-if-empty or fails fatally on a real mismatch (see above); include this
+step (or call the equivalent `sync_filter_names` MCP tool) wherever the rig's config should
+overwrite the driver's own `FILTER_NAME`. Fails (`scriptFailed`) if the driver doesn't expose
+`FILTER_NAME` at all, if the rig has no `slots` configured, or if the rig and the driver declare
+a *different number* of filter slots (refusing to push a configuration for what's likely a
+differently-sized wheel or the wrong device).
 
 #### `set_focus_position`
 
@@ -399,7 +437,7 @@ than being written and silently dropped at the next load.
 
 * **Fixed step vocabulary, no embedded expression language.** `step` is a closed enum
   (`set_property`, `wait_for`, `capture_frame`, `slew`, `cool_camera`, `select_filter`,
-  `set_focus_position`, `run_script`, `repeat`, `if`); condition
+  `sync_filter_names`, `set_focus_position`, `run_script`, `repeat`, `if`); condition
   `operator`s are a closed enum; parameter substitution (`"{{ name }}"`) is plain value lookup,
   never code to evaluate. A script is declarative data, safe to author on the Client Computer and
   upload, consistent with [Design.md](Design.md#architecture-overview)'s scripting-layer intro.

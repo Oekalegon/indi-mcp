@@ -30,6 +30,9 @@ storage/
 # Client-uploaded scripts (save_script, INDIMCP-9) — runtime data, not versioned
 /user_scripts/
 
+# Operator rig definitions (save_rig/update_component_slots) — runtime data, not versioned
+/rigs/
+
 # Editors / OS
 .vscode/
 .idea/

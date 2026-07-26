@@ -698,3 +698,51 @@ def test_save_rig_rejects_an_id_whose_file_path_is_already_a_directory(tmp_path:
 
     with pytest.raises(ValueError, match="is a directory"):
         rig_store.save_rig(_minimal_rig(), directory=tmp_path)
+
+
+def test_update_component_slots_writes_slots_and_reloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(rig_store.RIGS_DIR_ENV, str(tmp_path))
+    rig = rig_store.Rig(
+        id="newtonian-8in",
+        name="8in Newtonian",
+        components=[
+            rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"),
+            rig_store.Component(role="telescope", id="main-scope", apertureMm=203.0),
+        ],
+    )
+    rig_store.save_rig(rig, directory=tmp_path)
+
+    updated = rig_store.update_component_slots(
+        "newtonian-8in", "filterWheel", {1: "Luminance", 2: "Red"}
+    )
+
+    filter_wheel = next(c for c in updated.components if c.role == "filterWheel")
+    assert filter_wheel.slots == {1: "Luminance", 2: "Red"}
+    # The other component is untouched, and the change is reflected by get_rig too (reloaded).
+    telescope = next(c for c in updated.components if c.role == "telescope")
+    assert telescope.apertureMm == 203.0
+    assert rig_store.get_rig("newtonian-8in") == updated
+
+
+def test_update_component_slots_persists_to_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(rig_store.RIGS_DIR_ENV, str(tmp_path))
+    rig_store.save_rig(
+        rig_store.Rig(
+            id="minimal",
+            name="Minimal rig",
+            components=[
+                rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator")
+            ],
+        ),
+        directory=tmp_path,
+    )
+
+    rig_store.update_component_slots("minimal", "filterWheel", {1: "Ha", 2: "OIII"})
+
+    reloaded = rig_store.Rig.model_validate(yaml.safe_load((tmp_path / "minimal.yaml").read_text()))
+    filter_wheel = next(c for c in reloaded.components if c.role == "filterWheel")
+    assert filter_wheel.slots == {1: "Ha", 2: "OIII"}

@@ -48,6 +48,7 @@ __all__ = [
     "load_rigs",
     "save_rig",
     "suggest_rig",
+    "update_component_slots",
 ]
 
 RIGS_DIR_ENV = "INDI_MCP_RIGS_DIR"
@@ -317,6 +318,26 @@ def save_rig(rig: Rig, *, overwrite: bool = False, directory: Path | None = None
     return get_rig(rig.id)
 
 
+def update_component_slots(rig_id: str, role: str, slots: dict[int, str]) -> Rig:
+    """Persist `slots` onto rig `rig_id`'s `role` component and reload it (INDIMCP-64).
+
+    Used when a filter wheel's rig component has no `slots` map configured at all yet — the
+    execution engine (`script_engine._reconcile_filter_config_with_driver`) copies the
+    driver's own live `FILTER_NAME` onto the rig so it's captured for every future run, not
+    just the current one, since the rig's YAML file (not just the in-memory `Rig`) is the
+    durable source of truth (`docs/RigSchema.md`). `overwrite=True` here is an update to an
+    existing, already-owned rig file (adding data to one of its own components), not the
+    "reusing an id could silently destroy someone else's rig" case `save_rig`'s `overwrite`
+    guard exists to prevent.
+    """
+    rig = get_rig(rig_id)
+    updated_components = [
+        component.model_copy(update={"slots": slots}) if component.role == role else component
+        for component in rig.components
+    ]
+    return save_rig(rig.model_copy(update={"components": updated_components}), overwrite=True)
+
+
 def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
     """Propose which loaded rig is likely mounted, by matching connected INDI device names.
 
@@ -471,9 +492,10 @@ def _ccd_info_fields(
 def filter_slots(filter_names: dict[str, str] | None) -> dict[int, str]:
     """Parse a `FILTER_NAME` property's `FILTER_SLOT_NAME_<n>` members into `{slot: name}`.
 
-    Public (INDIMCP-64): `script_engine._sync_filter_config_with_driver` calls this too,
-    to parse a filter wheel driver's own live `FILTER_NAME` into the exact same shape as a rig
-    component's configured `slots` map, so the two can be compared directly.
+    Public (INDIMCP-64): `script_engine._reconcile_filter_config_with_driver` and
+    `script_engine.sync_filter_names` both call this too, to parse a filter wheel driver's own
+    live `FILTER_NAME` into the exact same shape as a rig component's configured `slots` map,
+    so the two can be compared directly.
     """
     if not filter_names:
         return {}
