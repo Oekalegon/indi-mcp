@@ -35,6 +35,7 @@ from indi_mcp import (
     rig_store,
     script_store,
 )
+from indi_mcp.issues import Issue, Severity
 from indi_mcp.observatory_store import Observatory
 from indi_mcp.script_store import (
     CaptureFrameStep,
@@ -57,12 +58,14 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ScriptCancelled",
+    "ScriptEngineError",
     "ScriptExecutionError",
     "ScriptPreconditionError",
     "ScriptProgress",
     "ScriptResult",
     "ScriptStatusMessage",
     "ScriptValidationError",
+    "Severity",
     "execute_script",
 ]
 
@@ -115,7 +118,24 @@ would be misleading, implying a dependency that doesn't exist.
 """
 
 
-class ScriptValidationError(Exception):
+class ScriptEngineError(Exception):
+    """Common base for every exception this module raises (INDIMCP-73).
+
+    Carries `warnings`: every `Issue` (`INFO`/`WARNING`/`ERROR` severity — see
+    `indi_mcp.issues`) collected earlier in the same run, up to the point this exception was
+    raised, so a caller that aborts on a `FATAL` issue (or any other failure) still sees
+    whatever non-fatal issues preceded it rather than losing them. Populated by
+    `execute_script` itself (see its own try/except around `_execute_steps`), not by each
+    individual raise site — a subclass's constructor call only ever needs to pass `message`,
+    matching every existing `raise ScriptXError("...")` call site unchanged.
+    """
+
+    def __init__(self, message: str, *, warnings: list[Issue] | None = None) -> None:
+        super().__init__(message)
+        self.warnings: list[Issue] = warnings or []
+
+
+class ScriptValidationError(ScriptEngineError):
     """Raised before execution starts: the script/rig/parameters themselves are invalid.
 
     A role with no matching component, an unknown script/rig id, a
@@ -126,7 +146,7 @@ class ScriptValidationError(Exception):
     """
 
 
-class ScriptPreconditionError(Exception):
+class ScriptPreconditionError(ScriptEngineError):
     """Raised before (or at the very start of) a step: the script is valid, but the physical
     rig isn't currently in a state this run requires — a device isn't connected, a mount is
     parked, etc.
@@ -139,14 +159,18 @@ class ScriptPreconditionError(Exception):
     """
 
 
-class ScriptExecutionError(Exception):
+class ScriptExecutionError(ScriptEngineError):
     """Raised when a step actively fails while running (`wait_for` timeout, `maxIterations`
     exceeded, ...) — the script and the rig were both fine to start; something about carrying
     out a specific step's own work didn't succeed.
+
+    Also raised by `_report_issue` for a `FATAL`-severity issue (INDIMCP-73) — a fatal issue
+    is discovered *during* a step's own work, the same category of problem this exception
+    already covers, not a fifth kind of failure.
     """
 
 
-class ScriptCancelled(Exception):
+class ScriptCancelled(ScriptEngineError):
     """Raised when `cancel_event` is set while a script run is in progress."""
 
 
@@ -208,11 +232,18 @@ class ScriptResult(TypedDict):
     that can already query `frame_store.list_frames(run_id=...)` once
     `run_id` is threaded through (see `execute_script`), without this
     result needing to duplicate that same data.
+
+    `warnings` (INDIMCP-73) is every non-fatal `Issue` reported anywhere over the whole run —
+    including inside nested `run_script` calls and `repeat` iterations, the same whole-run
+    scope as `stepsExecuted`/`framesCaptured` — in the order they were reported, with no
+    deduplication: a condition hit on every iteration of a `repeat` block reports one entry
+    per iteration, not one merged entry. See `_ExecutionContext.warnings`/`_report_issue`.
     """
 
     scriptId: str
     stepsExecuted: int
     framesCaptured: int
+    warnings: list[Issue]
 
 
 @dataclass
@@ -264,6 +295,12 @@ class _ExecutionContext:
     — for step handlers to report activity mid-step without it being a numbered progress
     event. `None` has the same meaning as `on_progress` being `None`: no caller wants this
     channel, so `_report_status` is a no-op.
+
+    `warnings` (INDIMCP-73) collects every non-fatal `Issue` reported via `_report_issue`
+    over the whole run — shared, like every other field here, into nested `run_script` calls,
+    which is exactly what makes forwarding a nested call's warnings up to the top-level
+    caller free: a nested call appends to the same list the top-level `execute_script` return
+    value (`ScriptResult.warnings`) is built from, with no separate propagation step needed.
     """
 
     role_to_device: dict[str, str]
@@ -280,6 +317,7 @@ class _ExecutionContext:
     role_to_component: dict[str, rig_store.Component] = field(default_factory=dict)
     observatory: Observatory | None = None
     optional_role_components: dict[str, rig_store.Component] = field(default_factory=dict)
+    warnings: list[Issue] = field(default_factory=list)
     on_status: Callable[[ScriptStatusMessage], None] | None = None
 
 
@@ -395,12 +433,50 @@ async def execute_script(
         optional_role_components=optional_role_components,
         on_status=on_status,
     )
-    await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
+    try:
+        await _execute_steps(script.steps, ctx, resolved_params, script.id, script.pausable)
+    except ScriptEngineError as exc:
+        # Attach everything collected before the failure (INDIMCP-73) — the raise site itself
+        # (an existing `raise ScriptXError("...")` call, or `_report_issue`'s own `FATAL`
+        # branch) has no access to `ctx`, so this is the one place per run that can.
+        exc.warnings = list(ctx.warnings)
+        raise
     return {
         "scriptId": script.id,
         "stepsExecuted": ctx.steps_executed,
         "framesCaptured": ctx.frames_captured,
+        "warnings": ctx.warnings,
     }
+
+
+def _report_issue(
+    ctx: _ExecutionContext,
+    severity: Severity,
+    code: str,
+    message: str,
+    *,
+    role: str | None = None,
+    device: str | None = None,
+) -> None:
+    """Report `Issue`, the single place `Severity` is interpreted (INDIMCP-73).
+
+    `INFO`/`WARNING`/`ERROR` are appended to `ctx.warnings` and execution continues — this is
+    the "collect, don't abort" half of the mechanism. `FATAL` instead raises
+    `ScriptExecutionError`, folding this issue in alongside everything already collected: a
+    fatal issue is discovered during a step's own work, the same category `ScriptExecutionError`
+    already covers, not a fifth exception type.
+    """
+    issue: Issue = {
+        "kind": "issue",
+        "severity": severity,
+        "code": code,
+        "message": message,
+        "role": role,
+        "device": device,
+    }
+    if severity is Severity.FATAL:
+        raise ScriptExecutionError(message, warnings=[*ctx.warnings, issue])
+    ctx.warnings.append(issue)
 
 
 def _get_script(script_id: str) -> Script:
@@ -1891,11 +1967,45 @@ async def _execute_select_filter(
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
     slot = _resolve_filter_slot(step, ctx, role, params)
+    _check_filter_config_matches_driver(ctx, role, device)
     timeout = float(_substitute(step.timeoutSeconds, params))
     await indi_messaging.send_property(device, "FILTER_SLOT", {"FILTER_SLOT_VALUE": str(slot)})
     await _wait_for_property_state(
         ctx, device, "FILTER_SLOT", indi_messaging.PropertyState.OK, timeout
     )
+
+
+def _check_filter_config_matches_driver(ctx: _ExecutionContext, role: str, device: str) -> None:
+    """Warn (INDIMCP-73) if `device`'s live `FILTER_NAME` disagrees with `role`'s rig-configured
+    `slots` map, rather than silently picking one side or failing the step.
+
+    The two are independent sources of truth for the same thing — the rig config is set by
+    whoever authored the rig, `FILTER_NAME` by whoever last configured the EFW driver (e.g.
+    via a different client, or the driver's own config file) — so a real-world mismatch is a
+    configuration drift bug, not a script bug: the step still proceeds using the rig's
+    configured slot (`_resolve_filter_slot` already resolved it), the same "ask the operator,
+    don't guess" spirit as `rig_store.check_rig`'s own missing-device reporting.
+
+    A `WARNING`, not `FATAL` — the todo's own wording is "issue a warning instead of failing
+    or guessing." Skipped entirely (no warning) if the driver doesn't expose `FILTER_NAME` at
+    all, matching every other optional-property check in this module (`_check_not_parked`,
+    `_ensure_track_on_slew`, `_ensure_cooler_on`): plenty of EFW drivers may not.
+    """
+    live_values = indi_messaging.get_property_values(device, "FILTER_NAME")
+    if live_values is None:
+        return
+    live_slots = rig_store._filter_slots(live_values)
+    rig_slots = ctx.role_to_slots.get(role, {})
+    if live_slots != rig_slots:
+        _report_issue(
+            ctx,
+            Severity.WARNING,
+            "filterConfigMismatch",
+            f"role {role!r}'s rig config slots {rig_slots} don't match "
+            f"driver {device!r}'s live FILTER_NAME slots {live_slots}",
+            role=role,
+            device=device,
+        )
 
 
 def _resolve_filter_slot(

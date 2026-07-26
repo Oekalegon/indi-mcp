@@ -159,7 +159,12 @@ async def test_run_completes_and_get_script_status_reports_scriptCompleted(
     completed = cast(script_runs.ScriptRunCompleted, status)
     assert completed["runId"] == started["runId"]
     assert completed["rigId"] == "test-rig"
-    assert completed["result"] == {"scriptId": "cool", "stepsExecuted": 1, "framesCaptured": 0}
+    assert completed["result"] == {
+        "scriptId": "cool",
+        "stepsExecuted": 1,
+        "framesCaptured": 0,
+        "warnings": [],
+    }
     assert "finishedAt" in completed
 
 
@@ -273,6 +278,51 @@ async def test_run_with_an_undocumented_exception_still_reports_scriptFailed(
     assert status["kind"] == "scriptFailed"
     failed = cast(script_runs.ScriptRunFailed, status)
     assert "something unexpected broke" in failed["error"]["message"]
+
+
+async def test_run_that_warns_then_fails_reports_the_warning_on_scriptFailed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that collects a non-fatal warning (INDIMCP-73) before later failing fatally still
+    reports that warning on `ScriptRunFailed.error.warnings` — nothing collected earlier is
+    lost just because the run ultimately aborts."""
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        )
+    )
+    _script(
+        "select_filter-then-fail",
+        steps=[
+            {"step": "select_filter", "role": "filterWheel", "filterName": "Red"},
+            {"step": "select_filter", "role": "filterWheel", "filterName": "Nonexistent"},
+        ],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+
+    started = await script_runs.start_script("select_filter-then-fail", "test-rig", {})
+    await _await_run(started["runId"])
+
+    status = script_runs.get_script_status(started["runId"])
+
+    assert status["kind"] == "scriptFailed"
+    failed = cast(script_runs.ScriptRunFailed, status)
+    assert "no slot named 'Nonexistent'" in failed["error"]["message"]
+    assert len(failed["error"]["warnings"]) == 1
+    assert failed["error"]["warnings"][0]["code"] == "filterConfigMismatch"
 
 
 async def test_get_script_status_raises_for_unknown_run_id() -> None:
