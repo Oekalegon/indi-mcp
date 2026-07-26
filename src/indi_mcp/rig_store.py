@@ -471,7 +471,7 @@ def _ccd_info_fields(
 def filter_slots(filter_names: dict[str, str] | None) -> dict[int, str]:
     """Parse a `FILTER_NAME` property's `FILTER_SLOT_NAME_<n>` members into `{slot: name}`.
 
-    Public (INDIMCP-73, INDIMCP-64): `script_engine._sync_filter_config_with_driver` calls this too,
+    Public (INDIMCP-64): `script_engine._sync_filter_config_with_driver` calls this too,
     to parse a filter wheel driver's own live `FILTER_NAME` into the exact same shape as a rig
     component's configured `slots` map, so the two can be compared directly.
     """

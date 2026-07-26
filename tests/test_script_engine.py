@@ -3273,7 +3273,8 @@ async def test_execute_script_select_filter_reports_no_warning_when_driver_match
         "select_filter",
         steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
     )
-    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
     monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
     monkeypatch.setattr(
         indi_messaging,
@@ -3288,6 +3289,10 @@ async def test_execute_script_select_filter_reports_no_warning_when_driver_match
     result = await script_engine.execute_script("select_filter", "test-rig", {})
 
     assert result["warnings"] == []
+    # Config already matched, so only the FILTER_SLOT command was sent — no FILTER_NAME push.
+    send_property.assert_awaited_once_with(
+        "Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "2"}
+    )
 
 
 async def test_execute_script_select_filter_syncs_driver_when_it_disagrees_with_rig(
@@ -3345,6 +3350,105 @@ async def test_execute_script_select_filter_syncs_driver_when_it_disagrees_with_
     assert warning["code"] == "filterConfigSynced"
     assert warning["role"] == "filterWheel"
     assert warning["device"] == "Filter Wheel Simulator"
+
+
+async def test_execute_script_select_filter_warns_when_no_rig_slots_exist_on_driver_vector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If none of the rig's configured slots exist as `FILTER_SLOT_NAME_<n>` members on the
+    live `FILTER_NAME` vector (e.g. the rig was authored for a differently-sized wheel), there's
+    nothing safe to push — INDIMCP-64 falls back to a `WARNING`/`filterConfigMismatch` issue
+    instead of sending an unfiltered element dict that `indipyclient` could reject."""
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={3: "Red"},
+        )
+    )
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+
+    result = await script_engine.execute_script("select_filter", "test-rig", {})
+
+    # Nothing pushable existed, so only the FILTER_SLOT command was sent.
+    send_property.assert_awaited_once_with(
+        "Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "3"}
+    )
+    assert len(result["warnings"]) == 1
+    warning = result["warnings"][0]
+    assert warning["severity"] == script_engine.Severity.WARNING
+    assert warning["code"] == "filterConfigMismatch"
+
+
+async def test_execute_script_select_filter_warns_when_pushing_config_to_driver_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed `FILTER_NAME` push (network hiccup, driver rejects it, ...) falls back to a
+    `WARNING`/`filterConfigMismatch` issue rather than letting the exception abort the whole
+    step — this non-fatal check must never turn a config drift into a hard script failure."""
+    _rig(
+        rig_store.Component(
+            role="filterWheel",
+            id="fw-1",
+            device="Filter Wheel Simulator",
+            slots={1: "Luminance", 2: "Red"},
+        )
+    )
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "filterName": "Red"}],
+    )
+
+    def _raise_for_filter_name(device: str, name: str, elements: dict[str, str]) -> None:
+        if name == "FILTER_NAME":
+            raise RuntimeError("driver rejected FILTER_NAME")
+
+    send_property = AsyncMock(side_effect=_raise_for_filter_name)
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Green"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+
+    result = await script_engine.execute_script("select_filter", "test-rig", {})
+
+    # The step still completed and used the rig's own configured slot despite the failed push.
+    send_property.assert_has_awaits(
+        [
+            call(
+                "Filter Wheel Simulator",
+                "FILTER_NAME",
+                {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"},
+            ),
+            call("Filter Wheel Simulator", "FILTER_SLOT", {"FILTER_SLOT_VALUE": "2"}),
+        ]
+    )
+    assert len(result["warnings"]) == 1
+    warning = result["warnings"][0]
+    assert warning["severity"] == script_engine.Severity.WARNING
+    assert warning["code"] == "filterConfigMismatch"
 
 
 async def test_execute_script_select_filter_skips_the_check_when_driver_lacks_filter_name(
