@@ -460,11 +460,17 @@ def _report_issue(
 ) -> None:
     """Report `Issue`, the single place `Severity` is interpreted (INDIMCP-73).
 
-    `INFO`/`WARNING`/`ERROR` are appended to `ctx.warnings` and execution continues — this is
-    the "collect, don't abort" half of the mechanism. `FATAL` instead raises
-    `ScriptExecutionError`, folding this issue in alongside everything already collected: a
-    fatal issue is discovered during a step's own work, the same category `ScriptExecutionError`
-    already covers, not a fifth exception type.
+    Always appended to `ctx.warnings` first, `FATAL` included, so the fatal issue itself is
+    never lost — not just its plain string `message`. `INFO`/`WARNING`/`ERROR` then just
+    continue execution — that's the "collect, don't abort" half of the mechanism. `FATAL`
+    instead raises `ScriptExecutionError`, passing `ctx.warnings` (fatal issue included) onto
+    it directly, so this function's own contract holds regardless of what catches the
+    exception — `execute_script`'s own try/except also re-copies `ctx.warnings` onto whatever
+    it catches (see its docstring), which is a harmless no-op here since nothing can append to
+    `ctx.warnings` between this `raise` and that `except` catching it.
+
+    A fatal issue is discovered during a step's own work, the same category
+    `ScriptExecutionError` already covers, not a fifth exception type.
     """
     issue: Issue = {
         "kind": "issue",
@@ -474,9 +480,9 @@ def _report_issue(
         "role": role,
         "device": device,
     }
-    if severity is Severity.FATAL:
-        raise ScriptExecutionError(message, warnings=[*ctx.warnings, issue])
     ctx.warnings.append(issue)
+    if severity is Severity.FATAL:
+        raise ScriptExecutionError(message, warnings=list(ctx.warnings))
 
 
 def _get_script(script_id: str) -> Script:
@@ -1989,13 +1995,20 @@ def _check_filter_config_matches_driver(ctx: _ExecutionContext, role: str, devic
     A `WARNING`, not `FATAL` — the todo's own wording is "issue a warning instead of failing
     or guessing." Skipped entirely (no warning) if the driver doesn't expose `FILTER_NAME` at
     all, matching every other optional-property check in this module (`_check_not_parked`,
-    `_ensure_track_on_slew`, `_ensure_cooler_on`): plenty of EFW drivers may not.
+    `_ensure_track_on_slew`, `_ensure_cooler_on`): plenty of EFW drivers may not. Also skipped
+    if `role`'s rig component has no `slots` map configured at all — a script addressing
+    filters purely by numeric `step.slot` never needs one, and that's not a misconfiguration
+    to warn about; without this, any such rig would spuriously "mismatch" the driver's own
+    `FILTER_NAME` on every single `select_filter` call, since an empty rig config trivially
+    never equals a non-empty live one.
     """
+    rig_slots = ctx.role_to_slots.get(role, {})
+    if not rig_slots:
+        return
     live_values = indi_messaging.get_property_values(device, "FILTER_NAME")
     if live_values is None:
         return
     live_slots = rig_store._filter_slots(live_values)
-    rig_slots = ctx.role_to_slots.get(role, {})
     if live_slots != rig_slots:
         _report_issue(
             ctx,

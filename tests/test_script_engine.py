@@ -3359,6 +3359,35 @@ async def test_execute_script_select_filter_skips_the_check_when_driver_lacks_fi
     assert result["warnings"] == []
 
 
+async def test_execute_script_select_filter_skips_the_check_when_rig_has_no_slots_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rig component with no `slots` map at all (addressed purely by numeric `step.slot`)
+    isn't a misconfiguration to warn about, even if the driver's own `FILTER_NAME` is
+    non-empty — an empty rig config trivially never equals a non-empty live one, so without
+    this guard every such rig would spuriously "mismatch" on every `select_filter` call."""
+    _rig(rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"))
+    _script(
+        "select_filter",
+        steps=[{"step": "select_filter", "role": "filterWheel", "slot": 1}],
+    )
+    monkeypatch.setattr(indi_messaging, "send_property", AsyncMock())
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: (
+            {"FILTER_SLOT_NAME_1": "Luminance", "FILTER_SLOT_NAME_2": "Red"}
+            if name == "FILTER_NAME"
+            else _default_get_property_values(device, name)
+        ),
+    )
+
+    result = await script_engine.execute_script("select_filter", "test-rig", {})
+
+    assert result["warnings"] == []
+
+
 async def test_execute_script_repeat_accumulates_one_warning_per_iteration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3480,6 +3509,40 @@ async def test_execute_script_fatal_failure_still_carries_warnings_collected_ear
 
     assert len(exc_info.value.warnings) == 1
     assert exc_info.value.warnings[0]["code"] == "filterConfigMismatch"
+
+
+async def test_report_issue_fatal_raises_and_includes_itself_in_the_exceptions_warnings() -> None:
+    """`_report_issue`'s `FATAL` branch must raise, and the fatal issue itself must survive
+    onto the raised exception's `warnings` — not just its plain string `message` — since
+    `execute_script`'s except handler copies `ctx.warnings` onto the exception wholesale
+    (INDIMCP-73). Exercises `_report_issue` directly rather than through a real step, since no
+    current step wires a `FATAL` severity through yet."""
+    ctx = script_engine._ExecutionContext(
+        role_to_device={},
+        cancel_event=None,
+        pause_event=None,
+        on_progress=None,
+        total_steps=None,
+        scripts={},
+        run_id=None,
+    )
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="mount is on fire") as exc_info:
+        script_engine._report_issue(
+            ctx, script_engine.Severity.FATAL, "mountOnFire", "mount is on fire", role="mount"
+        )
+
+    assert ctx.warnings == [
+        {
+            "kind": "issue",
+            "severity": script_engine.Severity.FATAL,
+            "code": "mountOnFire",
+            "message": "mount is on fire",
+            "role": "mount",
+            "device": None,
+        }
+    ]
+    assert exc_info.value.warnings == ctx.warnings
 
 
 async def test_execute_script_select_filter_times_out_waiting_for_ok(
