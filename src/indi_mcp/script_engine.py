@@ -2193,6 +2193,12 @@ async def adopt_filter_names_from_driver(
     `_reconcile_filter_config_with_driver`, only ever adopts the driver's names when the rig
     has *no* slots configured at all; it never overwrites a rig that already has an opinion).
 
+    Unlike `sync_filter_names`, there's no slot-*count* guard here: the driver is always
+    authoritative about its own hardware when adopting *from* it, so a `rig_slots`/`live_slots`
+    count mismatch is never a "wrong-sized wheel" risk the way it is when pushing a possibly-
+    wrong rig config onto real hardware — `rig_slots` is simply replaced with whatever the
+    driver reports, however many slots that is.
+
     Raises `ValueError` rather than guessing or partially applying a change:
     - `device` doesn't expose `FILTER_NAME` at all.
     - The driver's live `FILTER_NAME` declares no filter slots at all — nothing to adopt.

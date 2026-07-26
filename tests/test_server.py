@@ -182,7 +182,24 @@ async def test_sync_filter_names_raises_when_role_has_no_connected_device(
     rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
     monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
 
-    with pytest.raises(ValueError, match="no connected device"):
+    with pytest.raises(ValueError, match="expected exactly one"):
+        await server.sync_filter_names("test-rig", "filterWheel")
+
+
+async def test_sync_filter_names_raises_when_role_matches_more_than_one_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(
+        id="test-rig",
+        name="Test rig",
+        components=[
+            rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"),
+            rig_store.Component(role="filterWheel", id="fw-2", device="Filter Wheel Simulator 2"),
+        ],
+    )
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+
+    with pytest.raises(ValueError, match="expected exactly one"):
         await server.sync_filter_names("test-rig", "filterWheel")
 
 
@@ -233,7 +250,24 @@ async def test_adopt_filter_names_from_driver_raises_when_role_has_no_connected_
     rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
     monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
 
-    with pytest.raises(ValueError, match="no connected device"):
+    with pytest.raises(ValueError, match="expected exactly one"):
+        await server.adopt_filter_names_from_driver("test-rig", "filterWheel")
+
+
+async def test_adopt_filter_names_from_driver_raises_when_role_matches_more_than_one_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(
+        id="test-rig",
+        name="Test rig",
+        components=[
+            rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel Simulator"),
+            rig_store.Component(role="filterWheel", id="fw-2", device="Filter Wheel Simulator 2"),
+        ],
+    )
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+
+    with pytest.raises(ValueError, match="expected exactly one"):
         await server.adopt_filter_names_from_driver("test-rig", "filterWheel")
 
 

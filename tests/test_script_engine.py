@@ -3918,6 +3918,34 @@ async def test_adopt_filter_names_from_driver_persists_and_returns_adopted_when_
     }
 
 
+async def test_adopt_filter_names_from_driver_adopts_even_when_slot_counts_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike `sync_filter_names` (which refuses to push a rig's config for what might be a
+    differently-sized wheel), `adopt_filter_names_from_driver` has no slot-count guard: the
+    driver is always authoritative about its own hardware when adopting *from* it, so there's
+    no "wrong-sized wheel" risk the way there is when pushing a possibly-wrong rig config onto
+    real hardware."""
+    monkeypatch.setattr(
+        indi_messaging,
+        "get_property_values",
+        lambda device, name: {"FILTER_SLOT_NAME_1": "Luminance"},
+    )
+    update_component_slots = MagicMock()
+    monkeypatch.setattr(rig_store, "update_component_slots", update_component_slots)
+
+    outcome = await script_engine.adopt_filter_names_from_driver(
+        "test-rig", "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"}
+    )
+
+    update_component_slots.assert_called_once_with("test-rig", "filterWheel", {1: "Luminance"})
+    assert outcome == {
+        "status": "adopted",
+        "rigSlots": {1: "Luminance"},
+        "liveSlots": {1: "Luminance"},
+    }
+
+
 async def test_adopt_filter_names_from_driver_raises_when_driver_lacks_filter_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

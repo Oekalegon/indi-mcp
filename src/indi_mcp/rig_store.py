@@ -321,16 +321,29 @@ def save_rig(rig: Rig, *, overwrite: bool = False, directory: Path | None = None
 def update_component_slots(rig_id: str, role: str, slots: dict[int, str]) -> Rig:
     """Persist `slots` onto rig `rig_id`'s `role` component and reload it (INDIMCP-64).
 
-    Used when a filter wheel's rig component has no `slots` map configured at all yet — the
-    execution engine (`script_engine._reconcile_filter_config_with_driver`) copies the
-    driver's own live `FILTER_NAME` onto the rig so it's captured for every future run, not
-    just the current one, since the rig's YAML file (not just the in-memory `Rig`) is the
-    durable source of truth (`docs/RigSchema.md`). `overwrite=True` here is an update to an
-    existing, already-owned rig file (adding data to one of its own components), not the
-    "reusing an id could silently destroy someone else's rig" case `save_rig`'s `overwrite`
-    guard exists to prevent.
+    Used both when `select_filter` auto-adopts the driver's `FILTER_NAME` onto a filter wheel
+    component that has no `slots` configured at all yet
+    (`script_engine._reconcile_filter_config_with_driver`), and when
+    `script_engine.adopt_filter_names_from_driver` deliberately overwrites an *existing*
+    `slots` map instead — in both cases so the rig's YAML file (not just the in-memory `Rig`)
+    is updated, since it's the durable source of truth (`docs/RigSchema.md`). `overwrite=True`
+    here is an update to an existing, already-owned rig file (adding/replacing data on one of
+    its own components), not the "reusing an id could silently destroy someone else's rig"
+    case `save_rig`'s `overwrite` guard exists to prevent.
+
+    Raises `ValueError` if `role` doesn't resolve to exactly one component — a rig's `role` is
+    explicitly allowed to be shared by more than one component (`Component.role`'s own
+    docstring), so silently updating every matching component (or an arbitrary one) could
+    apply one physical device's filter names to a rig entry that actually describes a
+    different device.
     """
     rig = get_rig(rig_id)
+    matches = [component for component in rig.components if component.role == role]
+    if len(matches) != 1:
+        raise ValueError(
+            f"rig {rig_id!r} has {len(matches)} component(s) for role {role!r}; "
+            "expected exactly one"
+        )
     updated_components = [
         component.model_copy(update={"slots": slots}) if component.role == role else component
         for component in rig.components

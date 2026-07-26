@@ -310,6 +310,28 @@ def check_rig(rig_id: str) -> RigCheck:
     return rig_store.check_rig(rig_id, indi_messaging.list_devices())
 
 
+def _resolve_unique_connected_component(rig_id: str, role: str) -> rig_store.Component:
+    """The single, device-connected component of `rig_id` matching `role` (INDIMCP-64).
+
+    A rig's `role` is explicitly allowed to be shared by more than one component
+    (`rig_store.Component.role`'s own docstring), so `sync_filter_names`/
+    `adopt_filter_names_from_driver` can't just take the first match the way a careless
+    `next(...)` would — that risks silently reading one physical filter wheel's `device`/
+    `slots` while `rig_store.update_component_slots` (called by both tools) writes to *every*
+    component sharing the role. Raising here if `role` doesn't resolve to exactly one
+    connected component mirrors `script_engine._resolve_role_to_component`'s own strict
+    behavior for a script run resolving roles to devices.
+    """
+    rig = rig_store.get_rig(rig_id)
+    matches = [c for c in rig.components if c.role == role and c.device is not None]
+    if len(matches) != 1:
+        raise ValueError(
+            f"rig {rig_id!r} has {len(matches)} connected component(s) for role {role!r}; "
+            "expected exactly one"
+        )
+    return matches[0]
+
+
 @mcp.tool()
 async def sync_filter_names(rig_id: str, role: str) -> FilterSyncOutcome:
     """Push `rig_id`'s configured filter names for `role` to the EFW driver's live
@@ -326,10 +348,8 @@ async def sync_filter_names(rig_id: str, role: str) -> FilterSyncOutcome:
     doesn't expose `FILTER_NAME`, or if the rig and driver declare a different *number* of
     filter slots (refuses to push a configuration for what's likely a differently-sized wheel).
     """
-    rig = rig_store.get_rig(rig_id)
-    component = next((c for c in rig.components if c.role == role), None)
-    if component is None or component.device is None:
-        raise ValueError(f"rig {rig_id!r} has no connected device for role {role!r}")
+    component = _resolve_unique_connected_component(rig_id, role)
+    assert component.device is not None  # guaranteed by _resolve_unique_connected_component
     return await script_engine.sync_filter_names(role, component.device, component.slots or {})
 
 
@@ -348,10 +368,8 @@ async def adopt_filter_names_from_driver(rig_id: str, role: str) -> FilterAdoptO
     doesn't expose `FILTER_NAME`, if the driver declares no filter slots at all, or if
     persisting the change to the rig's YAML file fails.
     """
-    rig = rig_store.get_rig(rig_id)
-    component = next((c for c in rig.components if c.role == role), None)
-    if component is None or component.device is None:
-        raise ValueError(f"rig {rig_id!r} has no connected device for role {role!r}")
+    component = _resolve_unique_connected_component(rig_id, role)
+    assert component.device is not None  # guaranteed by _resolve_unique_connected_component
     return await script_engine.adopt_filter_names_from_driver(
         rig_id, role, component.device, component.slots or {}
     )

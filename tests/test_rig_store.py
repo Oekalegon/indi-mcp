@@ -746,3 +746,33 @@ def test_update_component_slots_persists_to_disk(
     reloaded = rig_store.Rig.model_validate(yaml.safe_load((tmp_path / "minimal.yaml").read_text()))
     filter_wheel = next(c for c in reloaded.components if c.role == "filterWheel")
     assert filter_wheel.slots == {1: "Ha", 2: "OIII"}
+
+
+def test_update_component_slots_rejects_a_role_with_no_matching_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(rig_store.RIGS_DIR_ENV, str(tmp_path))
+    rig_store.save_rig(_minimal_rig(), directory=tmp_path)
+
+    with pytest.raises(ValueError, match="expected exactly one"):
+        rig_store.update_component_slots("minimal", "filterWheel", {1: "Ha"})
+
+
+def test_update_component_slots_rejects_a_role_matching_more_than_one_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(rig_store.RIGS_DIR_ENV, str(tmp_path))
+    rig_store.save_rig(
+        rig_store.Rig(
+            id="two-wheels",
+            name="Two filter wheels",
+            components=[
+                rig_store.Component(role="filterWheel", id="fw-1", device="Filter Wheel 1"),
+                rig_store.Component(role="filterWheel", id="fw-2", device="Filter Wheel 2"),
+            ],
+        ),
+        directory=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="expected exactly one"):
+        rig_store.update_component_slots("two-wheels", "filterWheel", {1: "Ha"})
