@@ -141,7 +141,7 @@ doesn't have yet rather than just missing plumbing:
 - **WCS keywords** (`CRVAL1`/`CRVAL2`/`CTYPE1`/`CTYPE2`/`CRPIX1`/`CRPIX2`/`CDELT1`/`CDELT2`/
   `CROTA1`/`CROTA2`/`SECPIX1`/`SECPIX2`) — need a real plate-solve result, not just metadata
   already available at capture time. Tracked as INDIMCP-69, blocked on the astrometry.net
-  integration (INDIMCP-27).
+  integration (INDIMCP-27; see [PlateSolve.md](PlateSolve.md) for the design).
 - **Star-detection quality keywords** (`NSTARS`/`SATSTARS`/`MEDFWHM`/`MEDECC`/`BACKNOIS`) —
   need real star-detection/image-analysis, not just header metadata. Tracked as INDIMCP-70.
 - **Simbad object cross-ID** (catalog identifier, coordinates, magnitude for the current

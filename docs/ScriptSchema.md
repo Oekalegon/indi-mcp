@@ -177,7 +177,9 @@ its handler in the execution engine — never something a script author can buil
 of `set_property`/`wait_for`.** A corollary: `Condition` (below) can only check *live INDI
 property state*, not a computed value like a plate-solve separation — a script that needs to
 loop on a computed result needs that computation exposed as its own engine-implemented step
-first (out of scope for this schema revision; noted here so it isn't lost).
+first (out of scope for this schema revision; noted here so it isn't lost). See
+[PlateSolve.md](PlateSolve.md) for how INDIMCP-27 resolves this: the retry-until-tolerance loop
+lives inside the `plate_solve` step's own handler, not as a schema-level `repeat`/`until`.
 
 #### `set_property`
 
