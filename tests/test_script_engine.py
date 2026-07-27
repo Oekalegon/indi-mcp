@@ -1,5 +1,6 @@
 import asyncio
 import re
+import sqlite3
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call
@@ -4623,6 +4624,7 @@ def test_step_handlers_covers_every_closed_step_type() -> None:
         script_store.SyncFilterNamesStep,
         script_store.AdoptFilterNamesFromDriverStep,
         script_store.SetFocusPositionStep,
+        script_store.PlateSolveStep,
         script_store.RunScriptStep,
         script_store.RepeatStep,
         script_store.IfStep,
@@ -4693,3 +4695,271 @@ async def test_execute_script_run_script_resolves_from_the_runs_own_snapshot(
 
     # wait_for + run_script + the callee's own set_property step
     assert result["stepsExecuted"] == 3
+
+
+def _plate_solve_rig(*extra_components: rig_store.Component, **camera_fields: Any) -> None:
+    _rig(
+        rig_store.Component(role="camera", id="cam-1", device="CCD Simulator", **camera_fields),
+        rig_store.Component(role="mount", id="mount-1", device="Mount Simulator"),
+        *extra_components,
+    )
+
+
+_PLATE_SOLVE_RESULT_UNSET = object()
+
+
+def _plate_solve_step(**fields: Any) -> dict:
+    return {"step": "plate_solve", "role": "camera", "mountRole": "mount", **fields}
+
+
+def _mock_plate_solve(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    frames: list[dict[str, Any]] | None = None,
+    frame_path: Any = None,
+    result: Any = _PLATE_SOLVE_RESULT_UNSET,
+) -> tuple[AsyncMock, MagicMock, MagicMock, MagicMock, AsyncMock]:
+    """Wire up the mocks a `plate_solve` step needs, without an internal fresh capture.
+
+    Returns `(send_property, list_frames, get_frame_path, update_frame_data, solve)`.
+    """
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    list_frames = MagicMock(
+        return_value=frames
+        if frames is not None
+        else [
+            {
+                "frameId": "frame-1",
+                "runId": None,
+                "device": "CCD Simulator",
+                "sizeBytes": 10,
+                "capturedAt": "2026-07-20T00:00:00.000000+00:00",
+                "transferredAt": None,
+            }
+        ]
+    )
+    monkeypatch.setattr(frame_store, "list_frames", list_frames)
+    get_frame_path = MagicMock(return_value=frame_path or MagicMock())
+    monkeypatch.setattr(frame_store, "get_frame_path", get_frame_path)
+    update_frame_data = MagicMock()
+    monkeypatch.setattr(frame_store, "update_frame_data", update_frame_data)
+    solve = AsyncMock(
+        return_value=result
+        if result is not _PLATE_SOLVE_RESULT_UNSET
+        else script_engine.plate_solver.PlateSolveResult(
+            raDegJ2000=150.0, decDegJ2000=20.0, wcsFields={"CRVAL1": (150.0, "solved RA")}
+        )
+    )
+    monkeypatch.setattr(script_engine.plate_solver, "solve", solve)
+    return send_property, list_frames, get_frame_path, update_frame_data, solve
+
+
+async def test_execute_script_plate_solve_solves_the_most_recently_captured_frame(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    send_property, list_frames, get_frame_path, update_frame_data, solve = _mock_plate_solve(
+        monkeypatch, frame_path=frame_path
+    )
+    write_headers = MagicMock(return_value=b"updated-fits-bytes")
+    monkeypatch.setattr(fits_headers, "write_fits_headers", write_headers)
+
+    result = await script_engine.execute_script("solve", "test-rig", {})
+
+    list_frames.assert_called_once_with(run_id=None, device="CCD Simulator")
+    get_frame_path.assert_called_once_with("frame-1")
+    solve.assert_awaited_once()
+    call_kwargs = solve.call_args.kwargs
+    assert call_kwargs["timeout_seconds"] == 60.0
+    write_headers.assert_called_once_with(b"fits-bytes", {"CRVAL1": (150.0, "solved RA")})
+    update_frame_data.assert_called_once_with("frame-1", b"updated-fits-bytes")
+    assert result["stepsExecuted"] == 1
+
+
+async def test_execute_script_plate_solve_survives_a_db_error_writing_wcs_headers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A solve that succeeds but hits a sqlite3 error persisting the WCS header (e.g. a
+    locked/corrupt db file — not an OSError subclass) must not fail the whole step: this is
+    documented best-effort enrichment, same as every other FITS header write in this module."""
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _, _, _, update_frame_data, _ = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    update_frame_data.side_effect = sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(
+        fits_headers, "write_fits_headers", MagicMock(return_value=b"updated-fits-bytes")
+    )
+
+    result = await script_engine.execute_script("solve", "test-rig", {})
+
+    assert result["stepsExecuted"] == 1
+
+
+async def test_execute_script_plate_solve_syncs_the_mount_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    send_property, *_ = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    await script_engine.execute_script("solve", "test-rig", {})
+
+    send_property.assert_any_await("Mount Simulator", "ON_COORD_SET", {"SYNC": "On"})
+    send_property.assert_any_await(
+        "Mount Simulator", "EQUATORIAL_EOD_COORD", {"RA": str(150.0 / 15.0), "DEC": str(20.0)}
+    )
+
+
+async def test_execute_script_plate_solve_restores_on_coord_set_to_track_after_sync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Leaving ON_COORD_SET at SYNC would silently turn a later EQUATORIAL_EOD_COORD command
+    (e.g. a bare set_property step) into another no-motion sync instead of an actual move —
+    the same hazard _ensure_track_on_slew exists to prevent for slew."""
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    send_property, *_ = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    await script_engine.execute_script("solve", "test-rig", {})
+
+    on_coord_set_calls = [
+        call for call in send_property.await_args_list if call.args[1] == "ON_COORD_SET"
+    ]
+    assert [call.args[2] for call in on_coord_set_calls] == [{"SYNC": "On"}, {"TRACK": "On"}]
+
+
+async def test_execute_script_plate_solve_skips_mount_sync_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step(syncMount=False)])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    send_property, *_ = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    await script_engine.execute_script("solve", "test-rig", {})
+
+    send_property.assert_not_awaited()
+
+
+async def test_execute_script_plate_solve_uses_position_and_scale_hints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig(
+        rig_store.Component(role="telescope", id="scope-1", focalLengthMm=550),
+        pixelSizeMicron=3.76,
+    )
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name == "CONNECTION":
+            return {"CONNECT": "On", "DISCONNECT": "Off"}
+        if device == "Mount Simulator" and name == "EQUATORIAL_EOD_COORD":
+            return {"RA": "10.0", "DEC": "20.0"}
+        return None
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    await script_engine.execute_script("solve", "test-rig", {})
+
+    call_kwargs = solve.call_args.kwargs
+    assert call_kwargs["ra_hint_hours"] == 10.0
+    assert call_kwargs["dec_hint_deg"] == 20.0
+    plate_scale = 206.265 * 3.76 / 550
+    assert call_kwargs["scale_low_arcsec"] == pytest.approx(plate_scale * 0.9)
+    assert call_kwargs["scale_high_arcsec"] == pytest.approx(plate_scale * 1.1)
+
+
+async def test_execute_script_plate_solve_omits_hints_when_unresolvable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    await script_engine.execute_script("solve", "test-rig", {})
+
+    call_kwargs = solve.call_args.kwargs
+    assert call_kwargs["ra_hint_hours"] is None
+    assert call_kwargs["dec_hint_deg"] is None
+    assert call_kwargs["scale_low_arcsec"] is None
+    assert call_kwargs["scale_high_arcsec"] is None
+
+
+async def test_execute_script_plate_solve_captures_a_fresh_frame_when_exposure_given(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step(exposureSeconds=5)])
+    _mock_capture_frame_success(monkeypatch)
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    result = await script_engine.execute_script("solve", "test-rig", {})
+
+    assert result["framesCaptured"] == 1
+
+
+async def test_execute_script_plate_solve_fails_when_no_frame_has_been_captured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    _mock_plate_solve(monkeypatch, frames=[])
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="no captured frame"):
+        await script_engine.execute_script("solve", "test-rig", {})
+
+
+async def test_execute_script_plate_solve_fails_when_solve_field_does_not_solve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _mock_plate_solve(monkeypatch, frame_path=frame_path, result=None)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="did not solve"):
+        await script_engine.execute_script("solve", "test-rig", {})
+
+
+async def test_execute_script_plate_solve_translates_a_cancelled_solve_into_script_cancelled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """`plate_solver.solve` races its own cancel_event and raises asyncio.CancelledError if
+    it fires first (see plate_solver.py) — this step must translate that into ScriptCancelled
+    rather than letting a bare CancelledError (a BaseException) escape execute_script, so a
+    cancel mid-solve is honored the same way cancellation is everywhere else in this engine."""
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    solve.side_effect = asyncio.CancelledError()
+
+    with pytest.raises(script_engine.ScriptCancelled):
+        await script_engine.execute_script("solve", "test-rig", {})

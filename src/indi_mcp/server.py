@@ -623,6 +623,32 @@ async def capture_frame(
 
 
 @mcp.tool()
+async def plate_solve(
+    rig_id: str,
+    exposureSeconds: float | None = None,
+    syncMount: bool = True,
+    timeoutSeconds: float = 60,
+) -> ScriptRunStarted:
+    """Plate-solve a frame via astrometry.net's local solve-field — see
+    `scripts/plate_solve.yaml` (INDIMCP-27/45).
+
+    `exposureSeconds` captures a fresh frame first; omit it to solve whichever frame was
+    most recently captured in this run. `syncMount` (default `True`) syncs the mount's
+    coordinates to the solved position. Does not retry toward a target tolerance — see
+    `plate_solve_until_precision` (INDIMCP-47) for that.
+    """
+    return await script_runs.start_script(
+        "plate_solve",
+        rig_id,
+        {
+            "exposureSeconds": exposureSeconds,
+            "syncMount": syncMount,
+            "timeoutSeconds": timeoutSeconds,
+        },
+    )
+
+
+@mcp.tool()
 async def track_off(rig_id: str) -> ScriptRunStarted:
     """Turn off the rig's mount tracking — see `scripts/track_off.yaml` (INDIMCP-49)."""
     return await script_runs.start_script("track_off", rig_id, {})

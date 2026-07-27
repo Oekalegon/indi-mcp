@@ -47,6 +47,7 @@ __all__ = [
     "IfStep",
     "PARAMETER_REFERENCE",
     "Parameter",
+    "PlateSolveStep",
     "RaDecTarget",
     "RepeatStep",
     "RunScriptStep",
@@ -109,6 +110,7 @@ def _check_reference_string(value: Any) -> Any:
 
 NumberOrReference = Annotated[float | str, BeforeValidator(_check_reference_string)]
 IntOrReference = Annotated[int | str, BeforeValidator(_check_reference_string)]
+BoolOrReference = Annotated[bool | str, BeforeValidator(_check_reference_string)]
 
 FrameType = Literal["Light", "Dark", "Flat", "Bias"]
 
@@ -332,6 +334,39 @@ class SetFocusPositionStep(_StepBase):
     timeoutSeconds: NumberOrReference = 60
 
 
+class PlateSolveStep(_StepBase):
+    """Plate-solve a frame via astrometry.net's local `solve-field` (INDIMCP-27/45).
+
+    An engine-implemented primitive, for the same reason `capture_frame`/`cool_camera` are:
+    it bundles a sequence — optionally capture a frame, shell out to a solver, optionally
+    sync the mount, best-effort write the solved WCS onto the frame — that isn't reducible
+    to `set_property`/`wait_for` (see `docs/PlateSolve.md`).
+
+    `exposureSeconds` set captures a fresh frame first (the same capture a `capture_frame`
+    step with default settings would take); omitted, this reuses whichever frame was most
+    recently captured for `role` in the current run (there must be one).
+
+    `mountRole` is the mount to read a position hint from and, if `syncMount`, to sync —
+    always required rather than defaulted to "the rig's only mount": unlike `role`'s
+    single, unambiguous meaning across every step type, guessing a mount from rig
+    configuration would need rig data this schema-level model has no access to (the same
+    reasoning `SelectFilterStep.filterName` resolution is pushed into the execution engine,
+    not this class) — simpler to just always ask for it explicitly, the same as `role`.
+
+    Retrying toward a target tolerance is deliberately not part of this step yet — this is
+    the single capture-and-solve-attempt primitive `plate_solve_until_precision`
+    (INDIMCP-47) is expected to build its own retry loop on top of, since a `Condition` here
+    can't check a computed angular separation (`docs/ScriptSchema.md`'s own note on this).
+    """
+
+    step: Literal["plate_solve"]
+    role: str
+    mountRole: str
+    exposureSeconds: NumberOrReference | None = None
+    syncMount: BoolOrReference = True
+    timeoutSeconds: NumberOrReference = 60
+
+
 class RunScriptStep(_StepBase):
     step: Literal["run_script"]
     script: str
@@ -373,6 +408,7 @@ Step = Annotated[
     | SyncFilterNamesStep
     | AdoptFilterNamesFromDriverStep
     | SetFocusPositionStep
+    | PlateSolveStep
     | RunScriptStep
     | RepeatStep
     | IfStep,
@@ -504,6 +540,9 @@ def referenced_roles(script: Script) -> set[str]:
             | SetFocusPositionStep,
         ):
             roles.add(step.role)
+        elif isinstance(step, PlateSolveStep):
+            roles.add(step.role)
+            roles.add(step.mountRole)
         elif isinstance(step, WaitForStep | IfStep):
             roles.add(step.condition.role)
         elif isinstance(step, RepeatStep) and step.until is not None:

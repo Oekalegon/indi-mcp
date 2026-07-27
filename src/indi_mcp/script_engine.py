@@ -22,9 +22,11 @@ them — see `execute_script`'s `run_id` parameter.
 import asyncio
 import contextlib
 import logging
+import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from indi_mcp import (
@@ -32,6 +34,7 @@ from indi_mcp import (
     frame_store,
     indi_messaging,
     observatory_store,
+    plate_solver,
     rig_store,
     script_store,
 )
@@ -44,6 +47,7 @@ from indi_mcp.script_store import (
     ConditionOperator,
     CoolCameraStep,
     IfStep,
+    PlateSolveStep,
     RepeatStep,
     RunScriptStep,
     Script,
@@ -83,6 +87,21 @@ Not a schema field (`docs/ScriptSchema.md`'s `slew` step has no
 depends on the mount and how far it's moving, not something a script
 author tunes per call, so this is a generous fixed engine default rather
 than something exposed in the YAML.
+"""
+
+_PLATE_SOLVE_SYNC_TIMEOUT_SECONDS = 10.0
+"""How long a `plate_solve` step waits for `EQUATORIAL_EOD_COORD` to reach `Ok` after a sync.
+
+A sync (`ON_COORD_SET=SYNC`) recalibrates the mount's internal pointing model rather than
+physically moving it, so it settles far faster than a real `slew` — a short, fixed engine
+default rather than a schema field, same reasoning as `_SLEW_TIMEOUT_SECONDS`.
+"""
+
+_PLATE_SOLVE_SCALE_HINT_TOLERANCE = 0.10
+"""Band, as a fraction of the computed plate scale, given to `solve-field --scale-low/-high`.
+
+Wide enough to tolerate binning and imprecise optics-configuration numbers while still
+meaningfully narrowing the solve (see `docs/PlateSolve.md` on why a hint matters at all).
 """
 
 _CAPTURE_READOUT_BUFFER_SECONDS = 30.0
@@ -634,7 +653,8 @@ def _step_role(step: Step, params: dict[str, Any]) -> str | None:
         | SelectFilterStep
         | SyncFilterNamesStep
         | AdoptFilterNamesFromDriverStep
-        | SetFocusPositionStep,
+        | SetFocusPositionStep
+        | PlateSolveStep,
     ):
         return _substituted_role(step.role, params)
     if isinstance(step, WaitForStep | IfStep):
@@ -807,6 +827,14 @@ def _walk_role_usage(
             )
             if first_use and (sets_connection or waits_on_connection):
                 usage.connection_managed_roles.add(role)
+
+        if isinstance(step, PlateSolveStep):
+            # `_step_role` only ever returns one role per step (the "primary" one shown in
+            # progress/status reporting) — `plate_solve` is unique in needing a second,
+            # `mountRole`, resolved to a device too (to sync/read a position hint from), so
+            # it's added here directly rather than by teaching `_step_role` about a step type
+            # with two roles.
+            usage.roles.add(_substituted_role(step.mountRole, params))
 
         if isinstance(step, RepeatStep):
             _walk_role_usage(step.steps, params, scripts, usage, _visited, call_args_cache)
@@ -2358,6 +2386,216 @@ def _check_focus_position_in_range(ctx: _ExecutionContext, role: str, position: 
         )
 
 
+async def _execute_plate_solve(
+    step: PlateSolveStep,
+    ctx: _ExecutionContext,
+    params: dict[str, Any],
+    script_id: str,
+    pausable: bool,
+) -> None:
+    """Capture (or reuse) a frame, plate-solve it via astrometry.net's local `solve-field`,
+    and best-effort sync the mount and write the solved WCS onto the frame's FITS header.
+
+    See `docs/PlateSolve.md` for the design. `step.exposureSeconds` set captures a fresh
+    frame first — by delegating straight to `_execute_capture_frame`, so it gets the exact
+    same enrichment/save/status-report treatment any other capture does, rather than
+    duplicating that sequence here. Omitted, this reuses whichever frame was most recently
+    captured for `role` in the current run (`frame_store.list_frames` already returns most
+    recent first) — `ScriptExecutionError` if there is none, since a `plate_solve` step with
+    nothing to solve and no way to get something is a script-authoring mistake, not a
+    transient condition worth waiting out.
+
+    A failed/timed-out solve (no stars matched, wrong hint, clouds, bad focus — an ordinary
+    outcome, not a driver fault) also raises `ScriptExecutionError`: this step exists
+    specifically to solve, so silently continuing would leave its caller with no way to tell
+    success from failure — including a future retry-until-tolerance step built on top of this
+    one (INDIMCP-47), which needs a clean failure signal per attempt.
+
+    Retrying toward a target tolerance is deliberately **not** implemented here — this step
+    is the single capture-and-solve-attempt primitive `plate_solve_until_precision`
+    (INDIMCP-47) builds its own retry loop on top of (a `Condition` can't check a computed
+    angular separation — see `docs/ScriptSchema.md`'s own note on this).
+
+    Passes `ctx.cancel_event` through to `plate_solver.solve`, so a cancel issued while
+    `solve-field` is running kills the subprocess and is honored promptly — the same
+    "`cancel_script` always wins" contract every other long-running wait in this module
+    upholds by polling `_check_cancelled` in a loop, which isn't possible for a single
+    `await` on a subprocess; `plate_solver.solve` races the cancel instead. Its
+    `asyncio.CancelledError` is translated into this module's own `ScriptCancelled` here,
+    keeping `plate_solver` decoupled from `script_engine`'s exception vocabulary.
+
+    The internal `exposureSeconds` capture (below) is dispatched straight to
+    `_execute_capture_frame`, not through `_run_one_step` — so it doesn't get its own
+    `stepsExecuted`/`scriptProgress` boundary the way a separate `capture_frame` step would.
+    A client watching progress still sees it happen: `_execute_capture_frame` reports its own
+    "Captured frame ..." `ScriptStatusMessage` regardless of how it's invoked, same channel
+    this step's own "Plate-solved frame ..." message below uses. Only the numbered
+    step-boundary/progress-fraction accounting is coarser (one `plate_solve` step "worth" of
+    progress covers both the capture and the solve) — acceptable here since `plate_solve` is
+    already the single unit of work a script author reasons about; not worth the complexity
+    of threading a synthetic extra step through `_count_total_steps`/`_report_progress` for.
+    """
+    role = _substituted_role(step.role, params)
+    device = _resolve_device(role, ctx)
+    mount_role = _substituted_role(step.mountRole, params)
+    mount_device = _resolve_device(mount_role, ctx)
+    timeout = float(_substitute(step.timeoutSeconds, params))
+
+    if step.exposureSeconds is not None:
+        capture_step = CaptureFrameStep(
+            step="capture_frame", role=step.role, exposureSeconds=step.exposureSeconds
+        )
+        await _execute_capture_frame(capture_step, ctx, params, script_id, pausable)
+
+    frames = await asyncio.to_thread(frame_store.list_frames, run_id=ctx.run_id, device=device)
+    if not frames:
+        raise ScriptExecutionError(
+            f"plate_solve found no captured frame for device {device!r} in this run; "
+            "set exposureSeconds to capture one, or run a capture_frame step first"
+        )
+    frame_id = frames[0]["frameId"]
+    frame_path = await asyncio.to_thread(frame_store.get_frame_path, frame_id)
+
+    ra_hint_hours, dec_hint_deg = _plate_solve_position_hint(mount_device)
+    scale_low, scale_high = _plate_solve_scale_hint(ctx, role)
+
+    try:
+        result = await plate_solver.solve(
+            frame_path,
+            ra_hint_hours=ra_hint_hours,
+            dec_hint_deg=dec_hint_deg,
+            scale_low_arcsec=scale_low,
+            scale_high_arcsec=scale_high,
+            timeout_seconds=timeout,
+            cancel_event=ctx.cancel_event,
+        )
+    except asyncio.CancelledError as exc:
+        raise ScriptCancelled("script run was cancelled") from exc
+    if result is None:
+        raise ScriptExecutionError(
+            f"plate_solve did not solve frame {frame_id} (no match found, or timed out "
+            f"after {timeout}s)"
+        )
+
+    if bool(_substitute(step.syncMount, params)):
+        await _sync_mount_to_solved_position(ctx, mount_device, result)
+
+    await _write_plate_solve_wcs(frame_id, frame_path, result)
+
+    _report_status(
+        ctx,
+        script_id,
+        role,
+        f"Plate-solved frame {frame_id}: RA={result.raDegJ2000:.4f} deg, "
+        f"Dec={result.decDegJ2000:.4f} deg",
+    )
+
+
+def _plate_solve_position_hint(mount_device: str) -> tuple[float | None, float | None]:
+    """The mount's own live `EQUATORIAL_EOD_COORD`, as an (RA hours, Dec deg) position hint.
+
+    `None, None` if the mount reports no parseable coordinate — `solve-field` still runs, just
+    without narrowing its search, the same "hint unavailable, fall back to unhinted" handling
+    every other best-effort lookup in this module gets.
+    """
+    coords = indi_messaging.get_property_values(mount_device, "EQUATORIAL_EOD_COORD")
+    if coords is None:
+        return None, None
+    try:
+        return float(coords["RA"]), float(coords["DEC"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+
+
+def _plate_solve_scale_hint(
+    ctx: _ExecutionContext, camera_role: str
+) -> tuple[float | None, float | None]:
+    """A `(low, high)` arcsec/pixel band around the rig's own configured plate scale, or
+    `None, None` if the rig has no `"telescope"` component with `focalLengthMm` and the
+    camera role's own component with `pixelSizeMicron` — the same optics configuration (and
+    the same plate-scale formula) `_add_telescope_optics_fields` already uses for the `SCALE`
+    FITS header, reused here as a `solve-field --scale-low/--scale-high` hint instead.
+    """
+    telescope = ctx.optional_role_components.get("telescope")
+    camera = ctx.role_to_component.get(camera_role)
+    if telescope is None or telescope.focalLengthMm is None:
+        return None, None
+    if camera is None or camera.pixelSizeMicron is None:
+        return None, None
+    plate_scale = 206.265 * camera.pixelSizeMicron / telescope.focalLengthMm
+    return (
+        plate_scale * (1 - _PLATE_SOLVE_SCALE_HINT_TOLERANCE),
+        plate_scale * (1 + _PLATE_SOLVE_SCALE_HINT_TOLERANCE),
+    )
+
+
+async def _sync_mount_to_solved_position(
+    ctx: _ExecutionContext, mount_device: str, result: plate_solver.PlateSolveResult
+) -> None:
+    """Sync the mount to the solved position: `ON_COORD_SET=SYNC` (recalibrate the mount's
+    own pointing model — no physical motion), then `EQUATORIAL_EOD_COORD`, the same
+    coordinate vector `slew` sets, waiting through its `Busy`->`Ok` transition exactly like
+    `slew` does (`_wait_for_property_state`), just with a much shorter timeout since nothing
+    physically moves. Restores `ON_COORD_SET` to `TRACK` afterward — the same reasoning as
+    `_ensure_track_on_slew`: `ON_COORD_SET` is persistent device state, not a one-shot
+    modifier, so leaving it at `SYNC` would silently turn any *later* `EQUATORIAL_EOD_COORD`
+    command (e.g. a bare `set_property` step) into another no-motion sync instead of an
+    actual move, rather than the "go here" a script author would expect.
+
+    The solved field center is J2000 (ICRS, from `solve-field`); `EQUATORIAL_EOD_COORD` is
+    epoch-of-date — used directly here without `fits_headers`' J2000<->EOD conversion
+    machinery, since a sync corrects coarse (arcmin-level) pointing-model error, and the
+    J2000/EOD difference at the current epoch is well below that.
+
+    Unlike `slew`, there's no `_check_not_parked` guard here — a sync recalibrates the
+    mount's software pointing model only, with no physical motion, so whether the mount
+    happens to be parked doesn't matter the way it does for a command that actually needs to
+    move the mount.
+    """
+    ra_hours = result.raDegJ2000 / 15.0
+    await indi_messaging.send_property(mount_device, "ON_COORD_SET", {"SYNC": "On"})
+    await indi_messaging.send_property(
+        mount_device,
+        "EQUATORIAL_EOD_COORD",
+        {"RA": str(ra_hours), "DEC": str(result.decDegJ2000)},
+    )
+    await _wait_for_property_state(
+        ctx,
+        mount_device,
+        "EQUATORIAL_EOD_COORD",
+        indi_messaging.PropertyState.OK,
+        _PLATE_SOLVE_SYNC_TIMEOUT_SECONDS,
+    )
+    await indi_messaging.send_property(mount_device, "ON_COORD_SET", {"TRACK": "On"})
+
+
+async def _write_plate_solve_wcs(
+    frame_id: str, frame_path: Path, result: plate_solver.PlateSolveResult
+) -> None:
+    """Best-effort: merge the solved WCS keywords into the frame's own FITS header in place
+    (INDIMCP-69), via `frame_store.update_frame_data` (keeps `size_bytes` in sync with the
+    header rewrite).
+
+    Not fatal if this fails — matches every other FITS enrichment in this module
+    (`_add_fits_header_fields`): a solve that succeeded but couldn't be written back still
+    counts as this step's own success (the caller learns the solved position either way, via
+    the status message in `_execute_plate_solve`), it's only the persisted header that's
+    missing. Catches `OSError` (a missing/unreadable frame file, a full disk on rewrite),
+    `sqlite3.Error` (`update_frame_data`'s own `UPDATE`, e.g. a locked/corrupt db file — not
+    an `OSError` subclass, so it needs its own arm here), and `frame_store.FrameNotFoundError`
+    (the frame row vanishing between capture and this write, e.g. a concurrent
+    `delete_frame`) — every realistic failure mode of this best-effort write, without masking
+    an actual bug behind a bare `except Exception`.
+    """
+    try:
+        data = await asyncio.to_thread(frame_path.read_bytes)
+        updated = fits_headers.write_fits_headers(data, result.wcsFields)
+        if updated is not None:
+            await asyncio.to_thread(frame_store.update_frame_data, frame_id, updated)
+    except (OSError, sqlite3.Error, frame_store.FrameNotFoundError) as exc:
+        logger.warning("plate_solve: failed to write WCS headers onto frame %s: %s", frame_id, exc)
+
+
 STEP_HANDLERS: dict[type, StepHandler] = {
     SetPropertyStep: _execute_set_property,
     WaitForStep: _execute_wait_for,
@@ -2368,6 +2606,7 @@ STEP_HANDLERS: dict[type, StepHandler] = {
     SyncFilterNamesStep: _execute_sync_filter_names,
     AdoptFilterNamesFromDriverStep: _execute_adopt_filter_names_from_driver,
     SetFocusPositionStep: _execute_set_focus_position,
+    PlateSolveStep: _execute_plate_solve,
     RunScriptStep: _execute_run_script,
     RepeatStep: _execute_repeat,
     IfStep: _execute_if,

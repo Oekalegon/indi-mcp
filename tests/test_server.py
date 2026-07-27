@@ -497,6 +497,21 @@ async def test_set_custom_tracking_rate_delegates_to_start_script(
     ]
 
 
+async def test_plate_solve_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.plate_solve("test-rig", exposureSeconds=5.0, syncMount=False, timeoutSeconds=30)
+
+    assert calls == [
+        (
+            "plate_solve",
+            "test-rig",
+            {"exposureSeconds": 5.0, "syncMount": False, "timeoutSeconds": 30},
+            None,
+        )
+    ]
+
+
 _WRAPPER_TOOLS_BY_SCRIPT_ID = {
     "park": server.park,
     "unpark": server.unpark,
@@ -510,6 +525,7 @@ _WRAPPER_TOOLS_BY_SCRIPT_ID = {
     "track_off": server.track_off,
     "set_track_mode": server.set_track_mode,
     "set_custom_tracking_rate": server.set_custom_tracking_rate,
+    "plate_solve": server.plate_solve,
 }
 
 
