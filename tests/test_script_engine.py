@@ -4798,6 +4798,27 @@ async def test_execute_script_plate_solve_syncs_the_mount_by_default(
     )
 
 
+async def test_execute_script_plate_solve_restores_on_coord_set_to_track_after_sync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Leaving ON_COORD_SET at SYNC would silently turn a later EQUATORIAL_EOD_COORD command
+    (e.g. a bare set_property step) into another no-motion sync instead of an actual move —
+    the same hazard _ensure_track_on_slew exists to prevent for slew."""
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    send_property, *_ = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    await script_engine.execute_script("solve", "test-rig", {})
+
+    on_coord_set_calls = [
+        call for call in send_property.await_args_list if call.args[1] == "ON_COORD_SET"
+    ]
+    assert [call.args[2] for call in on_coord_set_calls] == [{"SYNC": "On"}, {"TRACK": "On"}]
+
+
 async def test_execute_script_plate_solve_skips_mount_sync_when_disabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:

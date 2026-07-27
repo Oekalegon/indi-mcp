@@ -2512,7 +2512,11 @@ async def _sync_mount_to_solved_position(
     own pointing model — no physical motion), then `EQUATORIAL_EOD_COORD`, the same
     coordinate vector `slew` sets, waiting through its `Busy`->`Ok` transition exactly like
     `slew` does (`_wait_for_property_state`), just with a much shorter timeout since nothing
-    physically moves.
+    physically moves. Restores `ON_COORD_SET` to `TRACK` afterward — the same reasoning as
+    `_ensure_track_on_slew`: `ON_COORD_SET` is persistent device state, not a one-shot
+    modifier, so leaving it at `SYNC` would silently turn any *later* `EQUATORIAL_EOD_COORD`
+    command (e.g. a bare `set_property` step) into another no-motion sync instead of an
+    actual move, rather than the "go here" a script author would expect.
 
     The solved field center is J2000 (ICRS, from `solve-field`); `EQUATORIAL_EOD_COORD` is
     epoch-of-date — used directly here without `fits_headers`' J2000<->EOD conversion
@@ -2533,6 +2537,7 @@ async def _sync_mount_to_solved_position(
         indi_messaging.PropertyState.OK,
         _PLATE_SOLVE_SYNC_TIMEOUT_SECONDS,
     )
+    await indi_messaging.send_property(mount_device, "ON_COORD_SET", {"TRACK": "On"})
 
 
 async def _write_plate_solve_wcs(
