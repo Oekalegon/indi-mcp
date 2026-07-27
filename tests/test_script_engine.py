@@ -1,5 +1,6 @@
 import asyncio
 import re
+import sqlite3
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call
@@ -4777,6 +4778,27 @@ async def test_execute_script_plate_solve_solves_the_most_recently_captured_fram
     assert call_kwargs["timeout_seconds"] == 60.0
     write_headers.assert_called_once_with(b"fits-bytes", {"CRVAL1": (150.0, "solved RA")})
     update_frame_data.assert_called_once_with("frame-1", b"updated-fits-bytes")
+    assert result["stepsExecuted"] == 1
+
+
+async def test_execute_script_plate_solve_survives_a_db_error_writing_wcs_headers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A solve that succeeds but hits a sqlite3 error persisting the WCS header (e.g. a
+    locked/corrupt db file — not an OSError subclass) must not fail the whole step: this is
+    documented best-effort enrichment, same as every other FITS header write in this module."""
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _, _, _, update_frame_data, _ = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    update_frame_data.side_effect = sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(
+        fits_headers, "write_fits_headers", MagicMock(return_value=b"updated-fits-bytes")
+    )
+
+    result = await script_engine.execute_script("solve", "test-rig", {})
+
     assert result["stepsExecuted"] == 1
 
 

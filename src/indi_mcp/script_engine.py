@@ -22,6 +22,7 @@ them — see `execute_script`'s `run_id` parameter.
 import asyncio
 import contextlib
 import logging
+import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -2563,14 +2564,19 @@ async def _write_plate_solve_wcs(
     (`_add_fits_header_fields`): a solve that succeeded but couldn't be written back still
     counts as this step's own success (the caller learns the solved position either way, via
     the status message in `_execute_plate_solve`), it's only the persisted header that's
-    missing.
+    missing. Catches `OSError` (a missing/unreadable frame file, a full disk on rewrite),
+    `sqlite3.Error` (`update_frame_data`'s own `UPDATE`, e.g. a locked/corrupt db file — not
+    an `OSError` subclass, so it needs its own arm here), and `frame_store.FrameNotFoundError`
+    (the frame row vanishing between capture and this write, e.g. a concurrent
+    `delete_frame`) — every realistic failure mode of this best-effort write, without masking
+    an actual bug behind a bare `except Exception`.
     """
     try:
         data = await asyncio.to_thread(frame_path.read_bytes)
         updated = fits_headers.write_fits_headers(data, result.wcsFields)
         if updated is not None:
             await asyncio.to_thread(frame_store.update_frame_data, frame_id, updated)
-    except OSError as exc:
+    except (OSError, sqlite3.Error, frame_store.FrameNotFoundError) as exc:
         logger.warning("plate_solve: failed to write WCS headers onto frame %s: %s", frame_id, exc)
 
 
