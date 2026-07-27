@@ -321,6 +321,30 @@ waits for the vector to reach `Ok` — see "Execution model" above. Distinct fro
 autofocus routine (INDIMCP-43), which would be a higher-level composed script built on top of
 this primitive, not a replacement for it.
 
+#### `plate_solve`
+
+Plate-solves a frame via astrometry.net's local `solve-field` (INDIMCP-27/45) — see
+[PlateSolve.md](PlateSolve.md) for the full design.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `role` | string | yes | Typically `"camera"`. The frame to solve — either just captured (`exposureSeconds`) or the most recently captured one for this role in the current run. |
+| `mountRole` | string | yes | Typically `"mount"`. Read for a position hint before solving, and synced afterward if `syncMount`. Always explicit — never defaulted to "the rig's only mount" (see `PlateSolveStep`'s docstring for why). |
+| `exposureSeconds` | number | no | Captures a fresh frame first (the same capture a `capture_frame` step with default settings would take) if set; omitted, reuses the most recently captured frame for `role` in this run (fails if there is none). |
+| `syncMount` | boolean | no (default `true`) | Sync `mountRole`'s coordinates to the solved position once solved (`ON_COORD_SET=SYNC`, then `EQUATORIAL_EOD_COORD`). |
+| `timeoutSeconds` | number | no (default `60`) | Maximum time to let `solve-field` attempt a solve before failing this step. |
+
+Fails (`scriptFailed`) if there's no frame to solve, or if `solve-field` doesn't solve within
+`timeoutSeconds` — a `plate_solve` step exists specifically to solve, so either is treated as a
+real failure, not a silently-skipped best-effort. Best-effort, and non-fatal if it fails: writing
+the solved WCS keywords onto the frame's own FITS header (INDIMCP-69), matching every other FITS
+enrichment in this project.
+
+Deliberately does **not** retry toward a target tolerance — this is the single
+capture-and-solve-attempt primitive `plate_solve_until_precision` (INDIMCP-47) builds its own
+retry loop on top of, since a `Condition` (below) can't check a computed angular separation (see
+"Execution model" above).
+
 #### `run_script`
 
 Calls another script from the same library by `id` — see "Script composition" below for the

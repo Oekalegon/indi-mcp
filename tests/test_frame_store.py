@@ -141,6 +141,30 @@ def test_get_frame_path_raises_for_an_unknown_frame_id(store_paths: tuple[Path, 
         frame_store.get_frame_path("does-not-exist", db_path=db_path)
 
 
+def test_update_frame_data_overwrites_the_file_and_updates_size(
+    store_paths: tuple[Path, Path],
+) -> None:
+    frames_dir, db_path = store_paths
+    saved = frame_store.save_frame(
+        b"original", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+
+    updated = frame_store.update_frame_data(
+        saved["frameId"], b"updated-longer-data", db_path=db_path
+    )
+
+    assert updated["sizeBytes"] == len(b"updated-longer-data")
+    path = frame_store.get_frame_path(saved["frameId"], db_path=db_path)
+    assert path.read_bytes() == b"updated-longer-data"
+
+
+def test_update_frame_data_raises_for_an_unknown_frame_id(store_paths: tuple[Path, Path]) -> None:
+    _, db_path = store_paths
+
+    with pytest.raises(frame_store.FrameNotFoundError):
+        frame_store.update_frame_data("does-not-exist", b"data", db_path=db_path)
+
+
 def test_list_frames_orders_most_recently_captured_first(store_paths: tuple[Path, Path]) -> None:
     frames_dir, db_path = store_paths
     first = frame_store.save_frame(

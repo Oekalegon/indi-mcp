@@ -1,0 +1,33 @@
+id: plate_solve
+name: Plate-solve a frame
+description: >
+  Plate-solves a frame via astrometry.net's local solve-field and, by default, syncs the
+  mount to the solved position. A thin, reusable wrapper around the plate_solve step
+  primitive so composed sequences can `run_script: plate_solve` instead of repeating a raw
+  plate_solve step — see docs/PlateSolve.md (INDIMCP-27/45). Set exposureSeconds to capture a
+  fresh frame first; omit it to solve whichever frame was most recently captured in this run.
+  Does not retry toward a target tolerance — see plate_solve_until_precision (INDIMCP-47) for
+  that.
+pausable: false
+parameters:
+  exposureSeconds:
+    type: number
+    required: false
+    description: Exposure length, in seconds, for a fresh capture. Omit to solve the most recently captured frame instead.
+  syncMount:
+    type: boolean
+    required: false
+    default: true
+    description: Sync the mount's coordinates to the solved position once solved.
+  timeoutSeconds:
+    type: number
+    required: false
+    default: 60
+    description: Maximum time to wait for solve-field to solve the frame.
+steps:
+  - step: plate_solve
+    role: camera
+    mountRole: mount
+    exposureSeconds: "{{ exposureSeconds }}"
+    syncMount: "{{ syncMount }}"
+    timeoutSeconds: "{{ timeoutSeconds }}"

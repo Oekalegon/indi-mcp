@@ -69,6 +69,7 @@ __all__ = [
     "list_frames",
     "purge_transferred_frames",
     "save_frame",
+    "update_frame_data",
 ]
 
 FRAMES_DIR_ENV = "INDI_MCP_FRAMES_DIR"
@@ -204,6 +205,25 @@ def save_frame(
         "capturedAt": captured_at,
         "transferredAt": None,
     }
+
+
+def update_frame_data(frame_id: str, data: bytes, *, db_path: Path | None = None) -> FrameMetadata:
+    """Overwrite `frame_id`'s file in place with `data`, and update its recorded `size_bytes`.
+
+    For a step that enriches an already-saved frame's own file after the fact (plate-solve's
+    best-effort WCS header write, INDIMCP-45/69) — unlike `save_frame`, this doesn't create a
+    new `frameId`/row, since the frame is still the same capture, just with more metadata in
+    its header; `size_bytes` still needs updating, since a FITS header rewrite changes the
+    file's length (new cards added). Raises `FrameNotFoundError` if `frame_id` is unknown.
+    """
+    row = _get_row(frame_id, db_path)
+    path = Path(row["path"])
+    path.write_bytes(data)
+    with db.connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute("UPDATE frames SET size_bytes = ? WHERE frame_id = ?", (len(data), frame_id))
+        conn.commit()
+    return get_frame_metadata(frame_id, db_path=db_path)
 
 
 def _get_row(frame_id: str, db_path: Path | None) -> sqlite3.Row:

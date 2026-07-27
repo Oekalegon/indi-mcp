@@ -132,6 +132,29 @@ def test_builtin_capture_frame_script_is_a_thin_wrapper_around_the_capture_frame
     assert step.frameHeight == "{{ frameHeight }}"
 
 
+def test_builtin_plate_solve_script_is_a_thin_wrapper_around_the_plate_solve_step() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    plate_solve = script_store.get_script("plate_solve")
+
+    assert plate_solve.pausable is False
+    assert set(plate_solve.parameters) == {"exposureSeconds", "syncMount", "timeoutSeconds"}
+    assert plate_solve.parameters["exposureSeconds"].required is False
+    assert plate_solve.parameters["exposureSeconds"].default is None
+    assert plate_solve.parameters["syncMount"].required is False
+    assert plate_solve.parameters["syncMount"].default is True
+    assert plate_solve.parameters["timeoutSeconds"].required is False
+    assert plate_solve.parameters["timeoutSeconds"].default == 60
+    assert len(plate_solve.steps) == 1
+    step = plate_solve.steps[0]
+    assert isinstance(step, script_store.PlateSolveStep)
+    assert step.role == "camera"
+    assert step.mountRole == "mount"
+    assert step.exposureSeconds == "{{ exposureSeconds }}"
+    assert step.syncMount == "{{ syncMount }}"
+    assert step.timeoutSeconds == "{{ timeoutSeconds }}"
+
+
 def test_builtin_park_script_sets_park_and_waits() -> None:
     script_store.load_scripts(SCRIPTS_DIR)
 
