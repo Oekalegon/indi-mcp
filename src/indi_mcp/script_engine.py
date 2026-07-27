@@ -2572,9 +2572,11 @@ async def _sync_mount_to_solved_position(
 async def _write_plate_solve_wcs(
     frame_id: str, frame_path: Path, result: plate_solver.PlateSolveResult
 ) -> None:
-    """Best-effort: merge the solved WCS keywords into the frame's own FITS header in place
-    (INDIMCP-69), via `frame_store.update_frame_data` (keeps `size_bytes` in sync with the
-    header rewrite).
+    """Best-effort: convert the solved CD-matrix WCS into this project's own `CRVAL`/`CTYPE`/
+    `CRPIX`/`CDELT`/`CROTA`/`SECPIX`/`RADECSYS`/`EQUINOX` convention
+    (`fits_headers.wcs_fields_from_cd_matrix`, INDIMCP-69) and merge it into the frame's own
+    FITS header in place, via `frame_store.update_frame_data` (keeps `size_bytes` in sync
+    with the header rewrite).
 
     Not fatal if this fails — matches every other FITS enrichment in this module
     (`_add_fits_header_fields`): a solve that succeeded but couldn't be written back still
@@ -2588,8 +2590,20 @@ async def _write_plate_solve_wcs(
     an actual bug behind a bare `except Exception`.
     """
     try:
+        fields = fits_headers.wcs_fields_from_cd_matrix(
+            ra_deg_j2000=result.raDegJ2000,
+            dec_deg_j2000=result.decDegJ2000,
+            crpix1=result.crpix1,
+            crpix2=result.crpix2,
+            ctype1=result.ctype1,
+            ctype2=result.ctype2,
+            cd1_1=result.cd1_1,
+            cd1_2=result.cd1_2,
+            cd2_1=result.cd2_1,
+            cd2_2=result.cd2_2,
+        )
         data = await asyncio.to_thread(frame_path.read_bytes)
-        updated = fits_headers.write_fits_headers(data, result.wcsFields)
+        updated = fits_headers.write_fits_headers(data, fields)
         if updated is not None:
             await asyncio.to_thread(frame_store.update_frame_data, frame_id, updated)
     except (OSError, sqlite3.Error, frame_store.FrameNotFoundError) as exc:

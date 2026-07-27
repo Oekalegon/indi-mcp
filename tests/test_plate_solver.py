@@ -74,8 +74,14 @@ async def test_solve_parses_the_wcs_file_on_success(fake_solve_field: Path, tmp_
     assert result is not None
     assert result.raDegJ2000 == 150.25
     assert result.decDegJ2000 == 20.5
-    assert result.wcsFields["CRVAL1"][0] == 150.25
-    assert result.wcsFields["CTYPE1"][0] == "RA---TAN"
+    assert result.crpix1 == 512.0
+    assert result.crpix2 == 512.0
+    assert result.ctype1 == "RA---TAN"
+    assert result.ctype2 == "DEC--TAN"
+    assert result.cd1_1 == -0.0002
+    assert result.cd1_2 == 0.0
+    assert result.cd2_1 == 0.0
+    assert result.cd2_2 == 0.0002
 
 
 async def test_solve_returns_none_on_a_nonzero_exit(

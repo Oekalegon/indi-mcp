@@ -11,8 +11,14 @@ index files are already installed.
 `solve()` is the only entry point script_engine's `plate_solve` step handler needs; it shells
 out to `solve-field` with `asyncio.create_subprocess_exec` (not `asyncio.to_thread` +
 `subprocess.run`, unlike this codebase's other blocking-work convention — see the module's
-own reasoning below) and parses the resulting `.wcs` file, itself a small valid FITS header,
-directly — no hand-rolled WCS math.
+own reasoning below) and parses the resulting `.wcs` file, itself a small valid FITS header.
+
+This module only *parses* that raw WCS (`CRVAL`/`CRPIX`/`CTYPE`/CD-matrix — `solve-field`'s
+own output shape) into `PlateSolveResult` — it deliberately doesn't reshape it into the
+`CDELT`/`CROTA`/`SECPIX`/`RADECSYS` keywords this project's own FITS convention (and its
+downstream readers, e.g. AstroKit) expect (INDIMCP-69); that CD-matrix-to-legacy-WCS
+conversion is `fits_headers.wcs_fields_from_cd_matrix`, kept there rather than here since it's
+about *shaping a FITS header*, not about talking to `solve-field`.
 """
 
 from __future__ import annotations
@@ -50,36 +56,30 @@ not currently configurable per call (`script_engine._execute_plate_solve` has no
 for it either); worth revisiting once real-world use shows this too wide or too narrow.
 """
 
-# Keywords copied verbatim from solve-field's own `.wcs` output onto the captured frame's FITS
-# header (INDIMCP-69) — the CD-matrix form solve-field itself produces, not a CDELT/CROTA
-# conversion: it's already a complete, standard WCS with no astrometric math of our own
-# needed (and thus no chance of introducing an error solve-field itself didn't have).
-_WCS_KEYWORDS = (
-    "CRVAL1",
-    "CRVAL2",
-    "CRPIX1",
-    "CRPIX2",
-    "CD1_1",
-    "CD1_2",
-    "CD2_1",
-    "CD2_2",
-    "CTYPE1",
-    "CTYPE2",
-    "CUNIT1",
-    "CUNIT2",
-    "EQUINOX",
-    "RADESYS",
-)
-
 
 @dataclass
 class PlateSolveResult:
-    """The outcome of a successful solve: the solved field center (J2000, degrees) and the
-    full set of WCS keyword/comment pairs, ready for `fits_headers.write_fits_headers`."""
+    """The raw WCS solve-field produced: the solved field center (J2000, degrees) plus the
+    CD-matrix form solve-field itself writes — `crpix1`/`crpix2` (the reference pixel),
+    `ctype1`/`ctype2` (the projection, e.g. `RA---TAN`/`DEC--TAN`), and the 2x2 `cd1_1`/
+    `cd1_2`/`cd2_1`/`cd2_2` matrix (pixel-to-sky transform, degrees/pixel).
+
+    This is `solve-field`'s own output shape, unconverted — see
+    `fits_headers.wcs_fields_from_cd_matrix` for turning this into the `CDELT`/`CROTA`/
+    `SECPIX`/`RADECSYS` keywords this project's own FITS convention actually writes
+    (INDIMCP-69).
+    """
 
     raDegJ2000: float
     decDegJ2000: float
-    wcsFields: dict[str, tuple[float | int | str, str]]
+    crpix1: float
+    crpix2: float
+    ctype1: str
+    ctype2: str
+    cd1_1: float
+    cd1_2: float
+    cd2_1: float
+    cd2_2: float
 
 
 def _solve_field_bin() -> str:
@@ -224,18 +224,30 @@ async def solve(
 
 
 def _parse_wcs(wcs_path: Path) -> PlateSolveResult | None:
-    """Read `solve-field`'s own `.wcs` output (already a minimal, valid FITS header) and
-    extract `_WCS_KEYWORDS`, verbatim, into `write_fits_headers`' generic field shape."""
+    """Read `solve-field`'s own `.wcs` output (already a minimal, valid FITS header) into a
+    `PlateSolveResult`. `None` if any of the core WCS keywords `solve-field` is expected to
+    always write on a successful solve (`CRVAL1/2`, `CRPIX1/2`, `CTYPE1/2`, the CD matrix)
+    is missing or unparseable — a malformed `.wcs` file at that point would mean something
+    is wrong with the `solve-field` install/version, not an ordinary "didn't solve" outcome,
+    but there's nothing safe to build a result out of either way.
+    """
     with fits.open(wcs_path) as hdul:
         header = hdul[0].header
         try:
-            ra_deg, dec_deg = float(header["CRVAL1"]), float(header["CRVAL2"])
-        except (KeyError, ValueError, TypeError):
-            logger.warning("solve-field's .wcs at %s has no usable CRVAL1/CRVAL2", wcs_path)
+            return PlateSolveResult(
+                raDegJ2000=float(header["CRVAL1"]),
+                decDegJ2000=float(header["CRVAL2"]),
+                crpix1=float(header["CRPIX1"]),
+                crpix2=float(header["CRPIX2"]),
+                ctype1=str(header["CTYPE1"]),
+                ctype2=str(header["CTYPE2"]),
+                cd1_1=float(header["CD1_1"]),
+                cd1_2=float(header["CD1_2"]),
+                cd2_1=float(header["CD2_1"]),
+                cd2_2=float(header["CD2_2"]),
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            logger.warning(
+                "solve-field's .wcs at %s is missing an expected keyword: %s", wcs_path, exc
+            )
             return None
-        fields: dict[str, tuple[float | int | str, str]] = {}
-        for keyword in _WCS_KEYWORDS:
-            if keyword in header:
-                comment = header.comments[keyword] or f"{keyword} (astrometry.net solve)"
-                fields[keyword] = (header[keyword], comment)
-    return PlateSolveResult(raDegJ2000=ra_deg, decDegJ2000=dec_deg, wcsFields=fields)
