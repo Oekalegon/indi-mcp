@@ -219,6 +219,17 @@ async def test_solve_uploaded_frame_raises_for_invalid_fits_data(
         await plate_solver.solve_uploaded_frame(b"this is not a fits file", timeout_seconds=5)
 
 
+async def test_solve_uploaded_frame_rejects_an_oversized_upload(
+    fake_solve_field: Path, frame_store_dirs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(plate_solver.MAX_UPLOADED_FRAME_BYTES_ENV, "10")
+
+    with pytest.raises(ValueError, match="exceeding the 10-byte limit"):
+        await plate_solver.solve_uploaded_frame(_real_fits_bytes(), timeout_seconds=5)
+
+    assert frame_store.list_frames(device="uploaded") == []
+
+
 async def test_solve_uploaded_frame_keeps_the_frame_when_solve_fails(
     fake_solve_field: Path, frame_store_dirs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

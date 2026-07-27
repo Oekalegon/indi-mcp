@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ASTROMETRY_BIN_ENV",
     "ASTROMETRY_TIMEOUT_SECONDS_ENV",
+    "MAX_UPLOADED_FRAME_BYTES_ENV",
     "PlateSolveResult",
     "UploadedFrameSolveResult",
     "solve",
@@ -61,6 +62,19 @@ _DEFAULT_ASTROMETRY_BIN = "solve-field"
 
 ASTROMETRY_TIMEOUT_SECONDS_ENV = "INDI_MCP_ASTROMETRY_TIMEOUT_SECONDS"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
+
+MAX_UPLOADED_FRAME_BYTES_ENV = "INDI_MCP_MAX_UPLOADED_FRAME_BYTES"
+_DEFAULT_MAX_UPLOADED_FRAME_BYTES = 200 * 1024 * 1024
+"""Upper bound on a client-uploaded frame's decoded size (INDIMCP-76).
+
+Unlike a `capture_frame`-sourced frame — bounded by a real camera sensor's actual resolution
+— an uploaded frame is bounded by nothing but whatever the Client Computer decides to send,
+so this needs an explicit, server-enforced ceiling: a resource-constrained Pi (this project's
+deployment target) has no business decoding/parsing/storing an arbitrarily large payload just
+because some client asked it to. 200 MiB is generous headroom over any real single-frame FITS
+file (even a large, high-bit-depth, uncompressed sensor) while still bounding worst-case
+memory/disk use; configurable via env var for a deployment that genuinely needs more.
+"""
 
 _DEFAULT_SEARCH_RADIUS_DEG = 5.0
 """How far from the position hint `solve-field` searches, in degrees.
@@ -102,6 +116,10 @@ def _solve_field_bin() -> str:
 
 def _default_timeout_seconds() -> float:
     return float(os.environ.get(ASTROMETRY_TIMEOUT_SECONDS_ENV, _DEFAULT_TIMEOUT_SECONDS))
+
+
+def _max_uploaded_frame_bytes() -> int:
+    return int(os.environ.get(MAX_UPLOADED_FRAME_BYTES_ENV, _DEFAULT_MAX_UPLOADED_FRAME_BYTES))
 
 
 async def solve(
@@ -349,12 +367,23 @@ async def solve_uploaded_frame(
     other frame. Kept even if the solve fails, so the caller can still retrieve/inspect
     what they uploaded.
 
-    Raises `ValueError` if `data` isn't a file `astropy.io.fits` can open, or if `solve-field`
-    doesn't solve it within `timeout_seconds` — a plain `ValueError` rather than plumbing this
-    through the script-engine's own `ScriptExecutionError`/`ScriptFailed` vocabulary, since
-    this never runs as a script (no rig, no run, nothing script-shaped about it at all); a
-    `FastMCP` tool raising is the ordinary way to surface a tool-call failure.
+    Raises `ValueError` if `data` exceeds `MAX_UPLOADED_FRAME_BYTES_ENV` (checked first,
+    before any decode/validation work — unlike a `capture_frame`-sourced frame, bounded by a
+    real camera sensor's actual resolution, an uploaded frame is bounded by nothing but
+    whatever the Client Computer decides to send, so this needs an explicit, server-enforced
+    ceiling on a resource-constrained Pi), isn't a file `astropy.io.fits` can open, or if
+    `solve-field` doesn't solve it within `timeout_seconds` — a plain `ValueError` rather than
+    plumbing this through the script-engine's own `ScriptExecutionError`/`ScriptFailed`
+    vocabulary, since this never runs as a script (no rig, no run, nothing script-shaped about
+    it at all); a `FastMCP` tool raising is the ordinary way to surface a tool-call failure.
     """
+    max_bytes = _max_uploaded_frame_bytes()
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"uploaded frame is {len(data)} bytes, exceeding the {max_bytes}-byte limit "
+            f"({MAX_UPLOADED_FRAME_BYTES_ENV})"
+        )
+
     try:
         await asyncio.to_thread(_validate_fits, data)
     except OSError as exc:
