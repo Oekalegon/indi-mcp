@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import inspect
 import threading
 import time
@@ -21,6 +22,7 @@ from indi_mcp import (
     indi_driver,
     indi_messaging,
     observatory_store,
+    plate_solver,
     rig_store,
     script_engine,
     script_runs,
@@ -510,6 +512,39 @@ async def test_plate_solve_delegates_to_start_script(monkeypatch: pytest.MonkeyP
             None,
         )
     ]
+
+
+async def test_plate_solve_uploaded_frame_decodes_base64_and_delegates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[bytes, dict[str, float | None]]] = []
+
+    async def fake_solve_uploaded_frame(data: bytes, **kwargs: float | None) -> dict:
+        calls.append((data, kwargs))
+        return {"frameId": "frame-1", "raDegJ2000": 150.0, "decDegJ2000": 20.0}
+
+    monkeypatch.setattr(plate_solver, "solve_uploaded_frame", fake_solve_uploaded_frame)
+
+    result = await server.plate_solve_uploaded_frame(
+        base64.b64encode(b"fits-bytes").decode(),
+        raHintHours=10.0,
+        decHintDeg=20.0,
+        scaleLowArcsecPerPixel=1.0,
+        scaleHighArcsecPerPixel=2.0,
+        timeoutSeconds=30,
+    )
+
+    assert result == {"frameId": "frame-1", "raDegJ2000": 150.0, "decDegJ2000": 20.0}
+    assert len(calls) == 1
+    data, kwargs = calls[0]
+    assert data == b"fits-bytes"
+    assert kwargs == {
+        "ra_hint_hours": 10.0,
+        "dec_hint_deg": 20.0,
+        "scale_low_arcsec": 1.0,
+        "scale_high_arcsec": 2.0,
+        "timeout_seconds": 30,
+    }
 
 
 _WRAPPER_TOOLS_BY_SCRIPT_ID = {

@@ -22,11 +22,9 @@ them — see `execute_script`'s `run_id` parameter.
 import asyncio
 import contextlib
 import logging
-import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from indi_mcp import (
@@ -2480,7 +2478,7 @@ async def _execute_plate_solve(
     if bool(_substitute(step.syncMount, params)):
         await _sync_mount_to_solved_position(ctx, mount_device, result)
 
-    await _write_plate_solve_wcs(frame_id, frame_path, result)
+    await plate_solver.write_wcs_headers(frame_id, frame_path, result)
 
     _report_status(
         ctx,
@@ -2567,47 +2565,6 @@ async def _sync_mount_to_solved_position(
         _PLATE_SOLVE_SYNC_TIMEOUT_SECONDS,
     )
     await indi_messaging.send_property(mount_device, "ON_COORD_SET", {"TRACK": "On"})
-
-
-async def _write_plate_solve_wcs(
-    frame_id: str, frame_path: Path, result: plate_solver.PlateSolveResult
-) -> None:
-    """Best-effort: convert the solved CD-matrix WCS into this project's own `CRVAL`/`CTYPE`/
-    `CRPIX`/`CDELT`/`CROTA`/`SECPIX`/`RADECSYS`/`EQUINOX` convention
-    (`fits_headers.wcs_fields_from_cd_matrix`, INDIMCP-69) and merge it into the frame's own
-    FITS header in place, via `frame_store.update_frame_data` (keeps `size_bytes` in sync
-    with the header rewrite).
-
-    Not fatal if this fails — matches every other FITS enrichment in this module
-    (`_add_fits_header_fields`): a solve that succeeded but couldn't be written back still
-    counts as this step's own success (the caller learns the solved position either way, via
-    the status message in `_execute_plate_solve`), it's only the persisted header that's
-    missing. Catches `OSError` (a missing/unreadable frame file, a full disk on rewrite),
-    `sqlite3.Error` (`update_frame_data`'s own `UPDATE`, e.g. a locked/corrupt db file — not
-    an `OSError` subclass, so it needs its own arm here), and `frame_store.FrameNotFoundError`
-    (the frame row vanishing between capture and this write, e.g. a concurrent
-    `delete_frame`) — every realistic failure mode of this best-effort write, without masking
-    an actual bug behind a bare `except Exception`.
-    """
-    try:
-        fields = fits_headers.wcs_fields_from_cd_matrix(
-            ra_deg_j2000=result.raDegJ2000,
-            dec_deg_j2000=result.decDegJ2000,
-            crpix1=result.crpix1,
-            crpix2=result.crpix2,
-            ctype1=result.ctype1,
-            ctype2=result.ctype2,
-            cd1_1=result.cd1_1,
-            cd1_2=result.cd1_2,
-            cd2_1=result.cd2_1,
-            cd2_2=result.cd2_2,
-        )
-        data = await asyncio.to_thread(frame_path.read_bytes)
-        updated = fits_headers.write_fits_headers(data, fields)
-        if updated is not None:
-            await asyncio.to_thread(frame_store.update_frame_data, frame_id, updated)
-    except (OSError, sqlite3.Error, frame_store.FrameNotFoundError) as exc:
-        logger.warning("plate_solve: failed to write WCS headers onto frame %s: %s", frame_id, exc)
 
 
 STEP_HANDLERS: dict[type, StepHandler] = {

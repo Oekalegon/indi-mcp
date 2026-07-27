@@ -8,13 +8,16 @@ out of its own inherited environment (subprocesses inherit the parent's env by d
 """
 
 import asyncio
+import io
 import json
 import stat
 from pathlib import Path
 
+import numpy as np
 import pytest
+from astropy.io import fits
 
-from indi_mcp import plate_solver
+from indi_mcp import db, frame_store, plate_solver
 
 _FAKE_SOLVE_FIELD = """#!/usr/bin/env python3
 import json
@@ -63,6 +66,23 @@ def fake_solve_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv(plate_solver.ASTROMETRY_BIN_ENV, str(script))
     return script
+
+
+@pytest.fixture()
+def frame_store_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point `frame_store`'s env-configured frames dir/db path at `tmp_path`, so
+    `solve_uploaded_frame`'s own (unparameterized) `frame_store.save_frame`/`get_frame_path`/
+    `update_frame_data` calls land somewhere real and isolated per test."""
+    monkeypatch.setenv(frame_store.FRAMES_DIR_ENV, str(tmp_path / "frames"))
+    monkeypatch.setenv(db.DB_PATH_ENV, str(tmp_path / "indi_mcp.sqlite3"))
+    return tmp_path
+
+
+def _real_fits_bytes() -> bytes:
+    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16))
+    buffer = io.BytesIO()
+    hdu.writeto(buffer)
+    return buffer.getvalue()
 
 
 async def test_solve_parses_the_wcs_file_on_success(fake_solve_field: Path, tmp_path: Path) -> None:
@@ -171,3 +191,62 @@ async def test_solve_omits_hint_args_when_not_given(
     args = json.loads(args_file.read_text())
     assert "--ra" not in args
     assert "--scale-low" not in args
+
+
+async def test_solve_uploaded_frame_saves_solves_and_writes_wcs_headers(
+    fake_solve_field: Path, frame_store_dirs: Path
+) -> None:
+    result = await plate_solver.solve_uploaded_frame(_real_fits_bytes(), timeout_seconds=5)
+
+    assert result["raDegJ2000"] == 150.25
+    assert result["decDegJ2000"] == 20.5
+    metadata = frame_store.get_frame_metadata(result["frameId"])
+    assert metadata["device"] == "uploaded"
+    assert metadata["runId"] is None
+    frame_path = frame_store.get_frame_path(result["frameId"])
+    with fits.open(frame_path) as hdul:
+        header = hdul[0].header
+        assert header["CRVAL1"] == pytest.approx(150.25, abs=1e-6)
+        assert "CDELT1" in header
+        assert "CROTA2" in header
+        assert header["RADECSYS"] == "FK5"
+
+
+async def test_solve_uploaded_frame_raises_for_invalid_fits_data(
+    fake_solve_field: Path, frame_store_dirs: Path
+) -> None:
+    with pytest.raises(ValueError, match="not a valid FITS file"):
+        await plate_solver.solve_uploaded_frame(b"this is not a fits file", timeout_seconds=5)
+
+
+async def test_solve_uploaded_frame_keeps_the_frame_when_solve_fails(
+    fake_solve_field: Path, frame_store_dirs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_SOLVE_FIELD_MODE", "fail")
+
+    with pytest.raises(ValueError, match="did not solve"):
+        await plate_solver.solve_uploaded_frame(_real_fits_bytes(), timeout_seconds=5)
+
+    frames = frame_store.list_frames(device="uploaded")
+    assert len(frames) == 1
+    assert frames[0]["runId"] is None
+
+
+async def test_solve_uploaded_frame_passes_hints_through_to_solve(
+    fake_solve_field: Path, frame_store_dirs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args_file = frame_store_dirs / "args.json"
+    monkeypatch.setenv("FAKE_SOLVE_FIELD_ARGS_FILE", str(args_file))
+
+    await plate_solver.solve_uploaded_frame(
+        _real_fits_bytes(),
+        ra_hint_hours=10.0,
+        dec_hint_deg=20.0,
+        scale_low_arcsec=1.0,
+        scale_high_arcsec=2.0,
+        timeout_seconds=5,
+    )
+
+    args = json.loads(args_file.read_text())
+    assert args[args.index("--ra") + 1] == str(10.0 * 15.0)
+    assert args[args.index("--scale-low") + 1] == "1.0"

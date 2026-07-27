@@ -201,6 +201,42 @@ Consequences:
    `indi://scripts`, or off the frame's own FITS headers/`frame://{frameId}` resource once
    written.
 
+## Plate-solving a client-uploaded frame (INDIMCP-76)
+
+Not every frame worth solving was captured by this server — a client may already have a FITS
+file from elsewhere (a previous session, another tool, a frame downloaded then re-uploaded for
+re-solving) and just wants it solved. This has no rig, no run, and no mount behind it at all,
+so it doesn't fit the `plate_solve` step (which is fundamentally about a step in a script
+running against a resolved rig) — it's a plain, standalone MCP tool instead:
+`plate_solve_uploaded_frame(fitsDataBase64, ...)` in `server.py`.
+
+The save/solve/write-back sequence is identical to what `_execute_plate_solve` does once it
+has a frame in hand, so that sequence is factored into `plate_solver.py` itself
+(`write_wcs_headers`, `solve_uploaded_frame`) rather than duplicated — both the script step
+and the upload tool call the same shared functions. `plate_solver.py` doing this (rather than,
+say, `frame_store.py`) keeps the "given a frame and a solve result, write the WCS back" logic
+next to the `PlateSolveResult` shape it operates on.
+
+Differences from the `plate_solve` step, driven entirely by there being no rig/mount:
+
+- **No automatic position/scale hint.** `plate_solve` reads both from the rig's configured
+  optics and the mount's live coordinates; an uploaded frame has neither, so
+  `plate_solve_uploaded_frame` accepts `raHintHours`/`decHintDeg`/`scaleLowArcsecPerPixel`/
+  `scaleHighArcsecPerPixel` directly as tool parameters instead — the caller supplies
+  whatever it happens to know, or omits them for an unhinted (slower) solve.
+- **No mount sync** — there's nothing to sync.
+- **No script-engine error vocabulary.** This never runs as a script, so a failure is a plain
+  `ValueError` (the ordinary way a `FastMCP` tool call signals failure), not
+  `ScriptExecutionError`/`scriptFailed`.
+- **The frame is kept even if the solve fails.** Saved (`device="uploaded"`, `run_id=None`)
+  before solving, not after, so a failed solve doesn't lose what was uploaded — the caller
+  can still retrieve it (without WCS headers) via `list_frames`/`frame://{frameId}`, matching
+  `frame_store`'s existing "ad hoc frame, no run" convention for a capture outside any script
+  run.
+- **Base64 in, not a resource.** MCP tool-call arguments are JSON; there's no binary parameter
+  type, so the FITS bytes travel as a base64 string — the mirror image of `frame://{frameId}`
+  already returning frame bytes as a base64 blob resource content in the download direction.
+
 ## Open items for INDIMCP-45/47/69 to resolve during implementation
 
 - Exact `frame_store` query for "most recent frame for run_id + device" (new, small).

@@ -352,7 +352,7 @@ def wcs_fields_from_cd_matrix(
     so a corrupted `.wcs` file or a future `solve-field` version with a different output
     convention could still produce one; skipping here (rather than dividing by a zero
     `cdelt1`/`cdelt2` computing `CROTA2`) keeps this function's own best-effort contract —
-    the same one its caller, `script_engine._write_plate_solve_wcs`, is documented to uphold —
+    the same one its caller, `plate_solver.write_wcs_headers`, is documented to uphold —
     without relying on that caller to keep widening its `except` clause for this module's
     internal failure modes.
     """
