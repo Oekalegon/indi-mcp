@@ -1,4 +1,5 @@
 import io
+import math
 from datetime import UTC, datetime
 
 import numpy as np
@@ -251,3 +252,137 @@ def test_write_fits_headers_returns_none_for_non_fits_data(data: bytes) -> None:
 
 def test_write_fits_headers_returns_none_for_empty_fields() -> None:
     assert fits_headers.write_fits_headers(_minimal_fits_bytes(), {}) is None
+
+
+def _cd_matrix_from_cdelt_crota(
+    cdelt1: float, cdelt2: float, crota2_deg: float
+) -> tuple[float, float, float, float]:
+    """The standard AIPS-convention construction, used here only to build a CD matrix with a
+    known cdelt/crota for round-trip testing `wcs_fields_from_cd_matrix`'s own inverse of it."""
+    rho = math.radians(crota2_deg)
+    return (
+        cdelt1 * math.cos(rho),
+        -cdelt2 * math.sin(rho),
+        cdelt1 * math.sin(rho),
+        cdelt2 * math.cos(rho),
+    )
+
+
+@pytest.mark.parametrize(
+    "cdelt1,cdelt2,crota2",
+    [
+        (-0.0002, 0.0002, 15.0),
+        (-0.0002, 0.0002, 0.0),
+        (-0.0002, 0.0002, 90.0),
+        (-0.0002, 0.0002, -30.0),
+        (-0.00015, 0.00021, 160.0),
+    ],
+)
+def test_wcs_fields_from_cd_matrix_round_trips_cdelt_and_crota(
+    cdelt1: float, cdelt2: float, crota2: float
+) -> None:
+    """A CD matrix built from a known (cdelt1, cdelt2, crota2) via the standard AIPS
+    construction must recover the same values (crota2 modulo 360, since it's an angle) —
+    this is the actual astrometric correctness of the CD-matrix -> CDELT/CROTA conversion
+    INDIMCP-69 exists to get right."""
+    cd1_1, cd1_2, cd2_1, cd2_2 = _cd_matrix_from_cdelt_crota(cdelt1, cdelt2, crota2)
+
+    fields = fits_headers.wcs_fields_from_cd_matrix(
+        ra_deg_j2000=150.25,
+        dec_deg_j2000=20.5,
+        crpix1=512.0,
+        crpix2=512.0,
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        cd1_1=cd1_1,
+        cd1_2=cd1_2,
+        cd2_1=cd2_1,
+        cd2_2=cd2_2,
+    )
+
+    assert float(fields["CDELT1"][0]) == pytest.approx(cdelt1)
+    assert float(fields["CDELT2"][0]) == pytest.approx(cdelt2)
+    recovered_crota2 = float(fields["CROTA2"][0])
+    angle_difference = (recovered_crota2 - crota2 + 180) % 360 - 180
+    assert angle_difference == pytest.approx(0.0, abs=1e-6)
+
+
+def test_wcs_fields_from_cd_matrix_maps_every_expected_keyword() -> None:
+    fields = fits_headers.wcs_fields_from_cd_matrix(
+        ra_deg_j2000=150.25,
+        dec_deg_j2000=20.5,
+        crpix1=512.0,
+        crpix2=512.0,
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        cd1_1=-0.0002,
+        cd1_2=0.0,
+        cd2_1=0.0,
+        cd2_2=0.0002,
+    )
+
+    assert set(fields) == {
+        "CRVAL1",
+        "CRVAL2",
+        "CTYPE1",
+        "CTYPE2",
+        "CRPIX1",
+        "CRPIX2",
+        "CDELT1",
+        "CDELT2",
+        "CROTA1",
+        "CROTA2",
+        "SECPIX1",
+        "SECPIX2",
+        "RADECSYS",
+        "EQUINOX",
+    }
+    assert fields["CRVAL1"][0] == 150.25
+    assert fields["CRVAL2"][0] == 20.5
+    assert fields["CTYPE1"][0] == "RA---TAN"
+    assert fields["CTYPE2"][0] == "DEC--TAN"
+    assert fields["CRPIX1"][0] == 512.0
+    assert fields["CRPIX2"][0] == 512.0
+    assert fields["CROTA1"][0] == fields["CROTA2"][0]
+    assert fields["RADECSYS"][0] == "FK5"
+    assert fields["EQUINOX"][0] == 2000.0
+
+
+def test_wcs_fields_from_cd_matrix_computes_secpix_from_cdelt() -> None:
+    fields = fits_headers.wcs_fields_from_cd_matrix(
+        ra_deg_j2000=150.25,
+        dec_deg_j2000=20.5,
+        crpix1=512.0,
+        crpix2=512.0,
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        cd1_1=-0.0002,
+        cd1_2=0.0,
+        cd2_1=0.0,
+        cd2_2=0.0002,
+    )
+
+    assert fields["SECPIX1"][0] == pytest.approx(0.0002 * 3600)
+    assert fields["SECPIX2"][0] == pytest.approx(0.0002 * 3600)
+
+
+def test_wcs_fields_from_cd_matrix_preserves_parity_of_a_mirrored_solve() -> None:
+    """A positive-determinant CD matrix (an odd number of reflections somewhere in the optical
+    path) must still round-trip to a positive CDELT1 rather than silently flipping parity."""
+    cdelt1, cdelt2, crota2 = 0.0002, 0.0002, 15.0  # positive cdelt1: mirrored orientation
+    cd1_1, cd1_2, cd2_1, cd2_2 = _cd_matrix_from_cdelt_crota(cdelt1, cdelt2, crota2)
+
+    fields = fits_headers.wcs_fields_from_cd_matrix(
+        ra_deg_j2000=150.25,
+        dec_deg_j2000=20.5,
+        crpix1=512.0,
+        crpix2=512.0,
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        cd1_1=cd1_1,
+        cd1_2=cd1_2,
+        cd2_1=cd2_1,
+        cd2_2=cd2_2,
+    )
+
+    assert float(fields["CDELT1"][0]) > 0

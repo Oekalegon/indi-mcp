@@ -59,6 +59,7 @@ __all__ = [
     "compute_celestial_context",
     "compute_target_position",
     "target_position_fields",
+    "wcs_fields_from_cd_matrix",
     "write_fits_headers",
 ]
 
@@ -296,6 +297,75 @@ def celestial_context_fields(context: CelestialContext) -> FitsHeaderFields:
             _FITS_KEYWORDS["moonIlluminationFraction"][1],
         ),
         "ELONGAT": (context["elongationDeg"], _FITS_KEYWORDS["elongationDeg"][1]),
+    }
+
+
+def wcs_fields_from_cd_matrix(
+    *,
+    ra_deg_j2000: float,
+    dec_deg_j2000: float,
+    crpix1: float,
+    crpix2: float,
+    ctype1: str,
+    ctype2: str,
+    cd1_1: float,
+    cd1_2: float,
+    cd2_1: float,
+    cd2_2: float,
+) -> FitsHeaderFields:
+    """Convert a plate-solve's CD-matrix WCS (`plate_solver.PlateSolveResult`'s own shape,
+    `solve-field`'s native output) into this project's `CRVAL`/`CTYPE`/`CRPIX`/`CDELT`/
+    `CROTA`/`SECPIX`/`RADECSYS`/`EQUINOX` convention (INDIMCP-69).
+
+    Not just a verbatim copy of `solve-field`'s own keywords: this project's own FITS
+    convention — and its downstream readers (AstroKit's `FITSKeywordCatalog` has no `CD1_1`-
+    style entries at all, only `CDELT`/`CROTA`/`SECPIX`) — expects the older "AIPS
+    convention" `CDELT`+`CROTA` shape, not a CD matrix. The two are equivalent for a pure
+    rotation+uniform-per-axis-scale WCS (no skew) — true of a real optical system to the
+    precision this matters at — via the standard construction
+    `CD = [[CDELT1*cos(CROTA2), -CDELT2*sin(CROTA2)], [CDELT1*sin(CROTA2), CDELT2*cos(CROTA2)]]`,
+    inverted here. `CDELT1`'s sign carries the image's parity (negative for a normal,
+    non-mirrored orientation — RA increasing right-to-left across the image); recovered from
+    the CD matrix's determinant sign rather than assumed, so a solve that happens to be
+    mirrored (e.g. an OTA with an odd number of reflections) still round-trips correctly.
+    `CROTA1`/`CROTA2` are written identically — the classic AIPS definition has both, equal
+    for an unskewed WCS, and `AstroKit`'s catalog reads both as separate keywords.
+
+    `RADECSYS`/`EQUINOX` aren't in `solve-field`'s own `.wcs` output at all (verified against
+    an installed `solve-field` — its minimal WCS header carries no coordinate-frame tag), so
+    they're supplied directly here rather than copied from anywhere: `solve-field`'s solve is
+    ICRS, close enough to FK5 J2000 for this project's precision that no distinction is drawn
+    elsewhere either (`compute_target_position` already writes `EQUINOX: 2000.0`
+    unconditionally the same way).
+
+    Every value is rounded before being written, for the same reason `compute_celestial_context`
+    rounds its own outputs: an un-rounded Python `float`'s full `repr` can push a FITS card
+    past its 80-character limit. The precision chosen here is deliberately much finer than
+    `compute_celestial_context`'s (arcmin-level mount telemetry) — this *is* the actual WCS
+    solution a script explicitly solved for, so throwing away its precision with the same
+    coarse rounding would defeat the point of plate-solving at all.
+    """
+    cdelt1_mag = math.hypot(cd1_1, cd2_1)
+    cdelt2_mag = math.hypot(cd1_2, cd2_2)
+    determinant = cd1_1 * cd2_2 - cd1_2 * cd2_1
+    cdelt1 = -cdelt1_mag if determinant < 0 else cdelt1_mag
+    cdelt2 = cdelt2_mag
+    crota2 = math.degrees(math.atan2(cd2_1 / cdelt1, cd1_1 / cdelt1))
+    return {
+        "CRVAL1": (round(ra_deg_j2000, 8), "[deg] WCS reference point RA (J2000)"),
+        "CRVAL2": (round(dec_deg_j2000, 8), "[deg] WCS reference point Dec (J2000)"),
+        "CTYPE1": (ctype1, "WCS projection type, axis 1"),
+        "CTYPE2": (ctype2, "WCS projection type, axis 2"),
+        "CRPIX1": (round(crpix1, 4), "[pixel] WCS reference pixel, axis 1"),
+        "CRPIX2": (round(crpix2, 4), "[pixel] WCS reference pixel, axis 2"),
+        "CDELT1": (round(cdelt1, 10), "[deg/pixel] WCS pixel scale, axis 1"),
+        "CDELT2": (round(cdelt2, 10), "[deg/pixel] WCS pixel scale, axis 2"),
+        "CROTA1": (round(crota2, 6), "[deg] WCS rotation"),
+        "CROTA2": (round(crota2, 6), "[deg] WCS rotation"),
+        "SECPIX1": (round(abs(cdelt1) * 3600, 4), "[arcsec/pixel] Plate scale, axis 1"),
+        "SECPIX2": (round(abs(cdelt2) * 3600, 4), "[arcsec/pixel] Plate scale, axis 2"),
+        "RADECSYS": ("FK5", "WCS coordinate reference frame"),
+        "EQUINOX": (2000.0, "Equinox"),
     }
 
 

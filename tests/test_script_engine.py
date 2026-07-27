@@ -4749,7 +4749,16 @@ def _mock_plate_solve(
         return_value=result
         if result is not _PLATE_SOLVE_RESULT_UNSET
         else script_engine.plate_solver.PlateSolveResult(
-            raDegJ2000=150.0, decDegJ2000=20.0, wcsFields={"CRVAL1": (150.0, "solved RA")}
+            raDegJ2000=150.0,
+            decDegJ2000=20.0,
+            crpix1=512.0,
+            crpix2=512.0,
+            ctype1="RA---TAN",
+            ctype2="DEC--TAN",
+            cd1_1=-0.0002,
+            cd1_2=0.0,
+            cd2_1=0.0,
+            cd2_2=0.0002,
         )
     )
     monkeypatch.setattr(script_engine.plate_solver, "solve", solve)
@@ -4776,7 +4785,11 @@ async def test_execute_script_plate_solve_solves_the_most_recently_captured_fram
     solve.assert_awaited_once()
     call_kwargs = solve.call_args.kwargs
     assert call_kwargs["timeout_seconds"] == 60.0
-    write_headers.assert_called_once_with(b"fits-bytes", {"CRVAL1": (150.0, "solved RA")})
+    write_headers.assert_called_once()
+    written_data, written_fields = write_headers.call_args.args
+    assert written_data == b"fits-bytes"
+    assert written_fields["CRVAL1"] == (150.0, "[deg] WCS reference point RA (J2000)")
+    assert written_fields["CDELT1"][0] == pytest.approx(-0.0002)
     update_frame_data.assert_called_once_with("frame-1", b"updated-fits-bytes")
     assert result["stepsExecuted"] == 1
 

@@ -132,16 +132,25 @@ own optics configuration), indi-mcp's value reflects exactly what was commanded/
 the rig side, which is the more directly authoritative source for this specific exposure —
 and it's written last, so it's the value that survives if both are present.
 
+## WCS keywords (from a plate solve)
+
+`CRVAL1`/`CRVAL2`/`CTYPE1`/`CTYPE2`/`CRPIX1`/`CRPIX2`/`CDELT1`/`CDELT2`/`CROTA1`/`CROTA2`/
+`SECPIX1`/`SECPIX2`/`RADECSYS`/`EQUINOX` are written by the `plate_solve` step
+(INDIMCP-27/45/69), once a solve succeeds — see [PlateSolve.md](PlateSolve.md) for the
+design. Unlike everything else in this document, these aren't computed at capture time:
+`solve-field` (astrometry.net) produces a CD-matrix WCS, converted into this project's own
+`CDELT`/`CROTA`/`SECPIX` convention by `fits_headers.wcs_fields_from_cd_matrix` — matching
+what a real Ekos-captured, plate-solved frame carries, and what downstream readers in this
+project's ecosystem (AstroKit's `FITSKeywordCatalog`) expect, rather than the CD-matrix form
+astrometry.net itself writes. Best-effort, same as every other header here: a solve that
+succeeds but can't be written back for some reason doesn't fail the step.
+
 ## Out of scope (for now)
 
 The following properties from a real Ekos-captured frame were considered as part of this
 feature but are explicitly **not** implemented, since they need capabilities this project
 doesn't have yet rather than just missing plumbing:
 
-- **WCS keywords** (`CRVAL1`/`CRVAL2`/`CTYPE1`/`CTYPE2`/`CRPIX1`/`CRPIX2`/`CDELT1`/`CDELT2`/
-  `CROTA1`/`CROTA2`/`SECPIX1`/`SECPIX2`) — need a real plate-solve result, not just metadata
-  already available at capture time. Tracked as INDIMCP-69, blocked on the astrometry.net
-  integration (INDIMCP-27; see [PlateSolve.md](PlateSolve.md) for the design).
 - **Star-detection quality keywords** (`NSTARS`/`SATSTARS`/`MEDFWHM`/`MEDECC`/`BACKNOIS`) —
   need real star-detection/image-analysis, not just header metadata. Tracked as INDIMCP-70.
 - **Simbad object cross-ID** (catalog identifier, coordinates, magnitude for the current
