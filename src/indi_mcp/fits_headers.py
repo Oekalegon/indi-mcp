@@ -344,9 +344,23 @@ def wcs_fields_from_cd_matrix(
     `compute_celestial_context`'s (arcmin-level mount telemetry) — this *is* the actual WCS
     solution a script explicitly solved for, so throwing away its precision with the same
     coarse rounding would defeat the point of plate-solving at all.
+
+    Returns `{}` — same as "nothing to write", per `write_fits_headers`' own contract — for a
+    degenerate CD matrix (zero scale on either axis: `cd1_1 == cd2_1 == 0` or
+    `cd1_2 == cd2_2 == 0`). This shouldn't happen for a real optical system, but `_parse_wcs`'s
+    own validation only checks these keywords are *present and parseable*, not non-degenerate,
+    so a corrupted `.wcs` file or a future `solve-field` version with a different output
+    convention could still produce one; skipping here (rather than dividing by a zero
+    `cdelt1`/`cdelt2` computing `CROTA2`) keeps this function's own best-effort contract —
+    the same one its caller, `script_engine._write_plate_solve_wcs`, is documented to uphold —
+    without relying on that caller to keep widening its `except` clause for this module's
+    internal failure modes.
     """
     cdelt1_mag = math.hypot(cd1_1, cd2_1)
     cdelt2_mag = math.hypot(cd1_2, cd2_2)
+    if cdelt1_mag == 0.0 or cdelt2_mag == 0.0:
+        logger.warning("Degenerate CD matrix (zero scale on an axis); skipping WCS headers")
+        return {}
     determinant = cd1_1 * cd2_2 - cd1_2 * cd2_1
     cdelt1 = -cdelt1_mag if determinant < 0 else cdelt1_mag
     cdelt2 = cdelt2_mag

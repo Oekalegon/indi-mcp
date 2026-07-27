@@ -386,3 +386,32 @@ def test_wcs_fields_from_cd_matrix_preserves_parity_of_a_mirrored_solve() -> Non
     )
 
     assert float(fields["CDELT1"][0]) > 0
+
+
+@pytest.mark.parametrize(
+    "cd1_1,cd1_2,cd2_1,cd2_2",
+    [
+        (0.0, 0.0, 0.0, 0.0002),  # zero scale on axis 1
+        (-0.0002, 0.0, 0.0, 0.0),  # zero scale on axis 2
+    ],
+)
+def test_wcs_fields_from_cd_matrix_returns_empty_for_a_degenerate_matrix(
+    cd1_1: float, cd1_2: float, cd2_1: float, cd2_2: float
+) -> None:
+    """A CD matrix with zero scale on either axis can't be inverted to CDELT/CROTA (would
+    divide by zero) — shouldn't happen for a real optical system, but a corrupted .wcs file
+    shouldn't crash this best-effort conversion either."""
+    fields = fits_headers.wcs_fields_from_cd_matrix(
+        ra_deg_j2000=150.25,
+        dec_deg_j2000=20.5,
+        crpix1=512.0,
+        crpix2=512.0,
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        cd1_1=cd1_1,
+        cd1_2=cd1_2,
+        cd2_1=cd2_1,
+        cd2_2=cd2_2,
+    )
+
+    assert fields == {}
