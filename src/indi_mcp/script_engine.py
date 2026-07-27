@@ -2420,17 +2420,23 @@ async def _execute_plate_solve(
 
     1. Re-slews to the mount's own `TARGET_EOD_COORD` (the last commanded slew target,
        read *once* up front and reused — not re-read each attempt, since nothing in this
-       loop other than a `slew` step changes it, and a `slew` step never runs mid-loop).
-       The *previous* attempt's sync corrected the mount's internal pointing model, so
-       re-slewing to the *same* target now (`_check_not_parked`/`_ensure_track_on_slew`,
-       exactly like `slew` itself) lands closer than the first, uncorrected attempt did —
-       this is the actual mechanism that makes repeated attempts converge at all; without a
-       real slew between them, solving the same static pointing over and over would just
-       keep reporting the same separation forever.
+       loop other than a `slew` step changes it, and a `slew` step never runs mid-loop) —
+       **but only if the previous attempt actually synced.** A sync is what corrects the
+       mount's internal pointing model; re-slewing to the *same* target afterward
+       (`_check_not_parked`/`_ensure_track_on_slew`, exactly like `slew` itself) lands
+       closer than the first, uncorrected attempt did — this is the actual mechanism that
+       makes repeated attempts converge at all. If the *previous* attempt's solve failed
+       (no sync happened, since there was no result to sync to), the model is exactly as
+       uncorrected as it was for that attempt — re-slewing to the identical target with the
+       identical model would just move the mount away and back to the same position, for no
+       benefit and a real, non-zero chunk of wall-clock time (and possibly added mechanical
+       backlash), so it's skipped: a retry immediately following a failed solve is a plain
+       "try imaging the same pointing again," not a corrected-model re-approach.
     2. Captures a fresh frame and solves it, same as single-attempt mode.
     3. A failed solve doesn't abort immediately (unlike single-attempt mode) — it consumes
-       an attempt and retries, since the *next* attempt's re-slew might still put a star
-       field back in frame. `ScriptExecutionError` only once `maxAttempts` is exhausted.
+       an attempt and retries (without the re-slew above), since the field/conditions may
+       simply have been transiently bad (clouds, a vibration-blurred frame). `ScriptExecutionError`
+       only once `maxAttempts` is exhausted.
     4. A successful solve is always synced and WCS-written (each attempt's frame is a
        distinct, real, persisted capture — it deserves a correct header regardless of
        whether *this* attempt happens to meet tolerance), then compared against the target
@@ -2496,18 +2502,23 @@ async def _execute_plate_solve(
         target_ra_hours, target_dec_deg = target
 
     max_attempts = int(_substitute(step.maxAttempts, params)) if tolerance_arcsec is not None else 1
-    last_separation_arcsec: float | None = None
+    synced_since_last_attempt = False
 
     for attempt in range(1, max_attempts + 1):
         await _check_cancelled(ctx)
 
-        if attempt > 1:
-            # attempt > 1 only happens when tolerance_arcsec was set, which is exactly when
-            # target_ra_hours/target_dec_deg were resolved above (never left None) — asserted
-            # here purely so the type checker can see it too.
+        if attempt > 1 and synced_since_last_attempt:
+            # Only worth re-slewing if the *previous* attempt actually synced — that's what
+            # corrects the pointing model a re-slew benefits from. A previous attempt whose
+            # solve failed never synced, so the model is exactly as it was for that attempt;
+            # re-slewing to the same target with the same uncorrected model would just move
+            # the mount away and back to the identical position, for no benefit and a real
+            # `_SLEW_TIMEOUT_SECONDS`-sized chunk of wall-clock time (and, depending on the
+            # mount's own mechanics, possibly some added backlash) — worth skipping entirely.
             assert target_ra_hours is not None
             assert target_dec_deg is not None
             await _plate_solve_reslew_to_target(ctx, mount_device, target_ra_hours, target_dec_deg)
+        synced_since_last_attempt = False
 
         if step.exposureSeconds is not None:
             capture_step = CaptureFrameStep(
@@ -2550,6 +2561,7 @@ async def _execute_plate_solve(
 
         if sync_mount:
             await _sync_mount_to_solved_position(ctx, mount_device, result)
+            synced_since_last_attempt = True
 
         await plate_solver.write_wcs_headers(frame_id, frame_path, result)
 

@@ -357,10 +357,13 @@ class PlateSolveStep(_StepBase):
     tolerance itself, rather than exposing that loop to YAML via `repeat`/`until` — a
     `Condition` can't check a computed angular separation (`docs/ScriptSchema.md`'s own note
     on this), so the retry lives in the engine handler instead (`docs/PlateSolve.md`). Each
-    retry re-slews to the mount's own `TARGET_EOD_COORD` (the last commanded slew target) —
-    the sync from the previous attempt corrected the mount's pointing model, so re-slewing to
-    the *same* target now lands closer than the first, uncorrected attempt did — then
-    captures and solves again. Requires `exposureSeconds` (each attempt needs a fresh
+    retry re-slews to the mount's own `TARGET_EOD_COORD` (the last commanded slew target),
+    *if* the previous attempt actually synced — the sync is what corrects the mount's
+    pointing model, so re-slewing to the *same* target afterward lands closer than the
+    first, uncorrected attempt did. A retry immediately following a *failed* solve skips the
+    re-slew entirely (no sync happened, so the model is unchanged — moving away and back to
+    the identical position would cost real time for no benefit) and just captures/solves
+    again at the same pointing. Requires `exposureSeconds` (each attempt needs a fresh
     capture; re-solving the same static frame after moving the mount would just re-report the
     same, now-stale position) and `syncMount=True` (without syncing, the model never
     improves, so retrying could never converge) — both enforced below for a literal

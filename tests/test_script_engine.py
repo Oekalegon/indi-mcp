@@ -5096,7 +5096,7 @@ async def test_execute_script_plate_solve_retries_after_a_failed_solve(
     frame_path = tmp_path / "frame-1.fits"
     frame_path.write_bytes(b"fits-bytes")
     _mock_plate_solve_target(monkeypatch)
-    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    send_property, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
     solve.side_effect = [None, _plate_solve_result_at(150.0, 20.0)]
     monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
 
@@ -5104,6 +5104,10 @@ async def test_execute_script_plate_solve_retries_after_a_failed_solve(
 
     assert solve.await_count == 2
     assert result["framesCaptured"] == 2
+    # no sync happened after the failed first attempt, so attempt 2 must not re-slew -- only
+    # the second attempt's own sync sends EQUATORIAL_EOD_COORD
+    eq_calls = [c for c in send_property.await_args_list if c.args[1] == "EQUATORIAL_EOD_COORD"]
+    assert len(eq_calls) == 1
 
 
 async def test_execute_script_plate_solve_fails_after_exhausting_max_attempts(
