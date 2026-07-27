@@ -323,27 +323,35 @@ this primitive, not a replacement for it.
 
 #### `plate_solve`
 
-Plate-solves a frame via astrometry.net's local `solve-field` (INDIMCP-27/45) — see
+Plate-solves a frame via astrometry.net's local `solve-field` (INDIMCP-27/45/47) — see
 [PlateSolve.md](PlateSolve.md) for the full design.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `role` | string | yes | Typically `"camera"`. The frame to solve — either just captured (`exposureSeconds`) or the most recently captured one for this role in the current run. |
-| `mountRole` | string | yes | Typically `"mount"`. Read for a position hint before solving, and synced afterward if `syncMount`. Always explicit — never defaulted to "the rig's only mount" (see `PlateSolveStep`'s docstring for why). |
-| `exposureSeconds` | number | no | Captures a fresh frame first (the same capture a `capture_frame` step with default settings would take) if set; omitted, reuses the most recently captured frame for `role` in this run (fails if there is none). |
-| `syncMount` | boolean | no (default `true`) | Sync `mountRole`'s coordinates to the solved position once solved (`ON_COORD_SET=SYNC`, then `EQUATORIAL_EOD_COORD`). |
-| `timeoutSeconds` | number | no (default `60`) | Maximum time to let `solve-field` attempt a solve before failing this step. |
+| `mountRole` | string | yes | Typically `"mount"`. Read for a position hint before solving, synced afterward if `syncMount`, and (if `toleranceArcsec` is set) re-slewed between retry attempts. Always explicit — never defaulted to "the rig's only mount" (see `PlateSolveStep`'s docstring for why). |
+| `exposureSeconds` | number | no (required if `toleranceArcsec` is set) | Captures a fresh frame first (the same capture a `capture_frame` step with default settings would take) if set; omitted, reuses the most recently captured frame for `role` in this run (fails if there is none). Required when retrying toward a tolerance, since each attempt needs a fresh capture. |
+| `syncMount` | boolean | no (default `true`) | Sync `mountRole`'s coordinates to the solved position once solved (`ON_COORD_SET=SYNC`, then `EQUATORIAL_EOD_COORD`). Must be `true` if `toleranceArcsec` is set — retrying can't converge without it. |
+| `toleranceArcsec` | number | no | If set, retry (re-solve after syncing and re-slewing) until the solved position is within this many arcseconds of `mountRole`'s own `TARGET_EOD_COORD` (the last commanded slew target), or `maxAttempts` is exhausted (INDIMCP-47). |
+| `maxAttempts` | integer | no (default `3`) | Only meaningful with `toleranceArcsec` set — give up after this many attempts without reaching tolerance. |
+| `timeoutSeconds` | number | no (default `60`) | Maximum time to let `solve-field` attempt a solve before failing this step (per attempt). |
 
-Fails (`scriptFailed`) if there's no frame to solve, or if `solve-field` doesn't solve within
-`timeoutSeconds` — a `plate_solve` step exists specifically to solve, so either is treated as a
-real failure, not a silently-skipped best-effort. Best-effort, and non-fatal if it fails: writing
-the solved WCS keywords onto the frame's own FITS header (INDIMCP-69), matching every other FITS
-enrichment in this project.
+Fails (`scriptFailed`) if there's no frame to solve, if `solve-field` doesn't solve within
+`timeoutSeconds` (after exhausting every retry, when `toleranceArcsec` is set), or if
+`toleranceArcsec` is never reached within `maxAttempts` — a `plate_solve` step exists
+specifically to solve (to a tolerance, if asked), so any of these is treated as a real failure,
+not a silently-skipped best-effort. Best-effort, and non-fatal if it fails: writing the solved
+WCS keywords onto the frame's own FITS header (INDIMCP-69), matching every other FITS enrichment
+in this project — written for every attempt that solves, regardless of whether that attempt
+meets tolerance, since each attempt's frame is a distinct, real capture.
 
-Deliberately does **not** retry toward a target tolerance — this is the single
-capture-and-solve-attempt primitive `plate_solve_until_precision` (INDIMCP-47) builds its own
-retry loop on top of, since a `Condition` (below) can't check a computed angular separation (see
-"Execution model" above).
+The retry loop lives in this step's own engine handler, not exposed to YAML via `repeat`/`until`
+— a `Condition` (below) can't check a computed angular separation (see "Execution model" above),
+so a script author declares *what* (`toleranceArcsec: 5`), never *how* (re-slewing between
+attempts, when to give up). See [PlateSolve.md](PlateSolve.md) for exactly how convergence works
+(re-slewing to the mount's own commanded target after each sync, so a subsequent attempt lands
+closer using the corrected pointing model) and `plate_solve_until_precision`, a thin wrapper
+script for this mode (INDIMCP-47).
 
 #### `run_script`
 

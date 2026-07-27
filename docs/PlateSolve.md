@@ -237,14 +237,62 @@ Differences from the `plate_solve` step, driven entirely by there being no rig/m
   type, so the FITS bytes travel as a base64 string — the mirror image of `frame://{frameId}`
   already returning frame bytes as a base64 blob resource content in the download direction.
 
-## Open items for INDIMCP-45/47/69 to resolve during implementation
+## Retrying toward a tolerance (INDIMCP-47)
 
-- Exact `frame_store` query for "most recent frame for run_id + device" (new, small).
-- Whether `mountRole` truly defaults to "the rig's only mount" or must always be explicit —
-  check how `slew`/other mount-touching steps already resolve this today before adding a new
-  convention.
-- `scripts/plate_solve.yaml` and `scripts/plate_solve_until_precision.yaml` built-in script
-  definitions + typed `@mcp.tool()` wrappers (INDIMCP-49 pattern), and the wrapper/script
-  parameter-parity test (`89f7271`) needs to cover both.
-- `docs/ScriptSchema.md` and `docs/Deployment.md` updates once INDIMCP-45 lands (new step
-  reference table entry; `solve-field` + index files as a deployment prerequisite).
+`toleranceArcsec`/`maxAttempts` land on `PlateSolveStep` itself, per the design above — the
+retry loop lives in `_execute_plate_solve`'s own handler, not in YAML. The one thing this
+design left unresolved when INDIMCP-45 shipped was *what* "the mount's target coordinate" (the
+thing angular separation is measured against) actually is, and *how* a retry can possibly
+converge at all if nothing physically moves between attempts. Both are resolved the same way:
+
+- **The target is `TARGET_EOD_COORD`** — the standard INDI property recording the last
+  coordinate a `slew` (or any other `EQUATORIAL_EOD_COORD` command) commanded the mount to go
+  to, distinct from `EQUATORIAL_EOD_COORD` itself (where the mount currently reports actually
+  being). Already a live property on any real mount driver — no new state, no new schema
+  mechanism, consistent with every other hint this step already reads directly off the mount.
+  Read once, at the start of the loop, and reused for every attempt (nothing in the loop other
+  than a `slew` step changes it, and a `slew` step never runs mid-loop).
+- **Convergence comes from re-slewing between attempts, not from sync alone.** A sync
+  recalibrates the mount's *internal* pointing model — it doesn't move the telescope. Solving
+  the same static pointing over and over would report the same separation forever. So each
+  retry (attempt 2 onward): re-slews to `TARGET_EOD_COORD` using the model the *previous*
+  attempt's sync just corrected (mirrors `slew` exactly — `_check_not_parked`,
+  `_ensure_track_on_slew`, then the coordinate command and its `Busy`→`Ok` wait) — landing
+  closer than the previous, uncorrected attempt did — then captures and solves again. This is
+  the actual mechanism that makes the loop converge at all.
+- **The separation comparison happens in one consistent frame.** `TARGET_EOD_COORD` is
+  epoch-of-date; a solve result is J2000. `_sync_mount_to_solved_position` can send EOD
+  directly and ignore the EOD/J2000 offset, because a sync only needs to be coarse
+  (arcmin-level) accurate. This loop's `toleranceArcsec` is typically much tighter, so the
+  target is converted to J2000 first (`fits_headers.compute_target_position`, the same
+  EOD→ICRS transform already used for `capture_frame`'s `OBJCTRA`/`OBJCTDEC`) before comparing
+  with `astropy.coordinates.SkyCoord.separation()`.
+- **A failed solve doesn't abort immediately** (unlike single-attempt mode) — it consumes an
+  attempt and retries, since the next attempt's re-slew might put a star field back in frame
+  that the previous attempt's pointing missed entirely.
+- **Every attempt that solves gets its WCS written**, regardless of whether that specific
+  attempt happens to meet tolerance — each attempt is a distinct, real, persisted frame, and
+  deserves a correct header regardless of what the *loop* ultimately decides.
+- **`toleranceArcsec` requires `syncMount=true` and `exposureSeconds`** — without syncing the
+  model never improves (nothing to converge), and without a fresh capture every attempt would
+  just re-solve the same stale frame. Enforced by `PlateSolveStep`'s own validator for a
+  literal misconfiguration, and again in the engine handler for a parameterized one (a
+  `"{{ param }}"` reference's value isn't known until execution).
+
+`plate_solve_until_precision` (`scripts/plate_solve_until_precision.yaml` + a typed
+`@mcp.tool()` wrapper, matching the INDIMCP-49 pattern) is a thin one-step wrapper around
+`plate_solve` with `toleranceArcsec`/`maxAttempts` filled in — kept as a separate script from
+`plate_solve.yaml` (which stays single-attempt-only) rather than folding tolerance support into
+the base wrapper's own parameters, for the clearest separation between "solve once" and "solve
+to a tolerance" as two distinct, independently discoverable tools.
+
+## Open items resolved during implementation
+
+- Exact `frame_store` query for "most recent frame for run_id + device": `frame_store.list_frames`
+  already returns most-recently-captured-first, so no new query was needed.
+- `mountRole` is always explicit, never defaulted to "the rig's only mount" — see
+  `PlateSolveStep`'s own docstring for why.
+- `scripts/plate_solve.yaml` and `scripts/plate_solve_until_precision.yaml`, plus typed
+  `@mcp.tool()` wrappers and wrapper/script parameter-parity test coverage (`89f7271`'s
+  pattern), all shipped.
+- `docs/ScriptSchema.md` updated with the step's full reference table.

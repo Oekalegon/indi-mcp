@@ -27,6 +27,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, TypedDict
 
+import astropy.units as u
+from astropy.coordinates import SkyCoord
+
 from indi_mcp import (
     fits_headers,
     frame_store,
@@ -2392,7 +2395,8 @@ async def _execute_plate_solve(
     pausable: bool,
 ) -> None:
     """Capture (or reuse) a frame, plate-solve it via astrometry.net's local `solve-field`,
-    and best-effort sync the mount and write the solved WCS onto the frame's FITS header.
+    and best-effort sync the mount and write the solved WCS onto the frame's FITS header —
+    once, or repeatedly toward `step.toleranceArcsec` if set (INDIMCP-47).
 
     See `docs/PlateSolve.md` for the design. `step.exposureSeconds` set captures a fresh
     frame first — by delegating straight to `_execute_capture_frame`, so it gets the exact
@@ -2403,89 +2407,265 @@ async def _execute_plate_solve(
     nothing to solve and no way to get something is a script-authoring mistake, not a
     transient condition worth waiting out.
 
-    A failed/timed-out solve (no stars matched, wrong hint, clouds, bad focus — an ordinary
-    outcome, not a driver fault) also raises `ScriptExecutionError`: this step exists
+    **Single-attempt mode** (`toleranceArcsec` unset — one iteration of the loop below): a
+    failed/timed-out solve (no stars matched, wrong hint, clouds, bad focus — an ordinary
+    outcome, not a driver fault) raises `ScriptExecutionError` immediately: this step exists
     specifically to solve, so silently continuing would leave its caller with no way to tell
-    success from failure — including a future retry-until-tolerance step built on top of this
-    one (INDIMCP-47), which needs a clean failure signal per attempt.
+    success from failure.
 
-    Retrying toward a target tolerance is deliberately **not** implemented here — this step
-    is the single capture-and-solve-attempt primitive `plate_solve_until_precision`
-    (INDIMCP-47) builds its own retry loop on top of (a `Condition` can't check a computed
-    angular separation — see `docs/ScriptSchema.md`'s own note on this).
+    **Retry-toward-tolerance mode** (`toleranceArcsec` set, INDIMCP-47): rather than exposing
+    this loop to YAML via `repeat`/`until` (a `Condition` can't check a computed angular
+    separation — `docs/ScriptSchema.md`'s own note on this), it lives here, matching
+    `cool_camera`'s own internal wait-for-stabilization loop. Each retry:
 
-    Passes `ctx.cancel_event` through to `plate_solver.solve`, so a cancel issued while
-    `solve-field` is running kills the subprocess and is honored promptly — the same
-    "`cancel_script` always wins" contract every other long-running wait in this module
+    1. Re-slews to the mount's own `TARGET_EOD_COORD` (the last commanded slew target,
+       read *once* up front and reused — not re-read each attempt, since nothing in this
+       loop other than a `slew` step changes it, and a `slew` step never runs mid-loop) —
+       **but only if the previous attempt actually synced.** A sync is what corrects the
+       mount's internal pointing model; re-slewing to the *same* target afterward
+       (`_check_not_parked`/`_ensure_track_on_slew`, exactly like `slew` itself) lands
+       closer than the first, uncorrected attempt did — this is the actual mechanism that
+       makes repeated attempts converge at all. If the *previous* attempt's solve failed
+       (no sync happened, since there was no result to sync to), the model is exactly as
+       uncorrected as it was for that attempt — re-slewing to the identical target with the
+       identical model would just move the mount away and back to the same position, for no
+       benefit and a real, non-zero chunk of wall-clock time (and possibly added mechanical
+       backlash), so it's skipped: a retry immediately following a failed solve is a plain
+       "try imaging the same pointing again," not a corrected-model re-approach.
+    2. Captures a fresh frame and solves it, same as single-attempt mode.
+    3. A failed solve doesn't abort immediately (unlike single-attempt mode) — it consumes
+       an attempt and retries (without the re-slew above), since the field/conditions may
+       simply have been transiently bad (clouds, a vibration-blurred frame). `ScriptExecutionError`
+       only once `maxAttempts` is exhausted.
+    4. A successful solve is always synced and WCS-written (each attempt's frame is a
+       distinct, real, persisted capture — it deserves a correct header regardless of
+       whether *this* attempt happens to meet tolerance), then compared against the target
+       (converted to J2000 via `fits_headers.compute_target_position`, so the comparison
+       isn't skewed by the EOD/J2000 systematic offset the way `_sync_mount_to_solved_
+       position`'s own EOD-direct approach can afford to ignore at its coarser,
+       arcmin-level precision — this loop's tolerances are typically much tighter). Within
+       tolerance: done. Not, and attempts remain: retry. Not, and attempts are exhausted:
+       `ScriptExecutionError` reporting how close the best attempt got.
+
+    `toleranceArcsec` requires `syncMount=True` and `exposureSeconds` — enforced at load time
+    for a literal misconfiguration (`PlateSolveStep`'s own validator), and here too, since a
+    `"{{ param }}"` reference's actual value isn't known until execution.
+
+    Passes `ctx.cancel_event` through to `plate_solver.solve` on every attempt, so a cancel
+    issued while `solve-field` is running kills the subprocess and is honored promptly — the
+    same "`cancel_script` always wins" contract every other long-running wait in this module
     upholds by polling `_check_cancelled` in a loop, which isn't possible for a single
     `await` on a subprocess; `plate_solver.solve` races the cancel instead. Its
     `asyncio.CancelledError` is translated into this module's own `ScriptCancelled` here,
     keeping `plate_solver` decoupled from `script_engine`'s exception vocabulary.
+    `_check_cancelled` is also polled once per attempt directly, so a cancel between
+    attempts (e.g. during a multi-second re-slew) is honored promptly too.
 
-    The internal `exposureSeconds` capture (below) is dispatched straight to
-    `_execute_capture_frame`, not through `_run_one_step` — so it doesn't get its own
+    The internal `exposureSeconds` capture(s) are dispatched straight to
+    `_execute_capture_frame`, not through `_run_one_step` — so they don't get their own
     `stepsExecuted`/`scriptProgress` boundary the way a separate `capture_frame` step would.
-    A client watching progress still sees it happen: `_execute_capture_frame` reports its own
-    "Captured frame ..." `ScriptStatusMessage` regardless of how it's invoked, same channel
-    this step's own "Plate-solved frame ..." message below uses. Only the numbered
+    A client watching progress still sees each happen: `_execute_capture_frame` reports its
+    own "Captured frame ..." `ScriptStatusMessage` regardless of how it's invoked, same
+    channel this step's own "Plate-solved frame ..." message below uses. Only the numbered
     step-boundary/progress-fraction accounting is coarser (one `plate_solve` step "worth" of
-    progress covers both the capture and the solve) — acceptable here since `plate_solve` is
-    already the single unit of work a script author reasons about; not worth the complexity
-    of threading a synthetic extra step through `_count_total_steps`/`_report_progress` for.
+    progress covers every attempt) — acceptable here since `plate_solve` is already the
+    single unit of work a script author reasons about; not worth the complexity of threading
+    a synthetic extra step per attempt through `_count_total_steps`/`_report_progress` for.
     """
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
     mount_role = _substituted_role(step.mountRole, params)
     mount_device = _resolve_device(mount_role, ctx)
     timeout = float(_substitute(step.timeoutSeconds, params))
+    sync_mount = bool(_substitute(step.syncMount, params))
+    tolerance_arcsec = (
+        float(_substitute(step.toleranceArcsec, params))
+        if step.toleranceArcsec is not None
+        else None
+    )
 
-    if step.exposureSeconds is not None:
-        capture_step = CaptureFrameStep(
-            step="capture_frame", role=step.role, exposureSeconds=step.exposureSeconds
+    target_ra_hours = target_dec_deg = None
+    if tolerance_arcsec is not None:
+        if not sync_mount:
+            raise ScriptExecutionError(
+                "plate_solve: toleranceArcsec requires syncMount=true (retrying can't "
+                "converge without syncing the mount's corrected pointing model between "
+                "attempts)"
+            )
+        target = _plate_solve_target_coord(mount_device)
+        if target is None:
+            raise ScriptExecutionError(
+                "plate_solve: toleranceArcsec requires the mount's TARGET_EOD_COORD (the "
+                f"last commanded slew target) to compare against; {mount_device!r} reports "
+                "none — run a slew step first"
+            )
+        target_ra_hours, target_dec_deg = target
+
+    max_attempts = int(_substitute(step.maxAttempts, params)) if tolerance_arcsec is not None else 1
+    synced_since_last_attempt = False
+
+    for attempt in range(1, max_attempts + 1):
+        await _check_cancelled(ctx)
+
+        if attempt > 1 and synced_since_last_attempt:
+            # Only worth re-slewing if the *previous* attempt actually synced — that's what
+            # corrects the pointing model a re-slew benefits from. A previous attempt whose
+            # solve failed never synced, so the model is exactly as it was for that attempt;
+            # re-slewing to the same target with the same uncorrected model would just move
+            # the mount away and back to the identical position, for no benefit and a real
+            # `_SLEW_TIMEOUT_SECONDS`-sized chunk of wall-clock time (and, depending on the
+            # mount's own mechanics, possibly some added backlash) — worth skipping entirely.
+            assert target_ra_hours is not None
+            assert target_dec_deg is not None
+            await _plate_solve_reslew_to_target(ctx, mount_device, target_ra_hours, target_dec_deg)
+        synced_since_last_attempt = False
+
+        if step.exposureSeconds is not None:
+            capture_step = CaptureFrameStep(
+                step="capture_frame", role=step.role, exposureSeconds=step.exposureSeconds
+            )
+            await _execute_capture_frame(capture_step, ctx, params, script_id, pausable)
+
+        frames = await asyncio.to_thread(frame_store.list_frames, run_id=ctx.run_id, device=device)
+        if not frames:
+            raise ScriptExecutionError(
+                f"plate_solve found no captured frame for device {device!r} in this run; "
+                "set exposureSeconds to capture one, or run a capture_frame step first"
+            )
+        frame_id = frames[0]["frameId"]
+        frame_path = await asyncio.to_thread(frame_store.get_frame_path, frame_id)
+
+        ra_hint_hours, dec_hint_deg = _plate_solve_position_hint(mount_device)
+        scale_low, scale_high = _plate_solve_scale_hint(ctx, role)
+
+        try:
+            result = await plate_solver.solve(
+                frame_path,
+                ra_hint_hours=ra_hint_hours,
+                dec_hint_deg=dec_hint_deg,
+                scale_low_arcsec=scale_low,
+                scale_high_arcsec=scale_high,
+                timeout_seconds=timeout,
+                cancel_event=ctx.cancel_event,
+            )
+        except asyncio.CancelledError as exc:
+            raise ScriptCancelled("script run was cancelled") from exc
+
+        if result is None:
+            if attempt == max_attempts:
+                raise ScriptExecutionError(
+                    f"plate_solve did not solve frame {frame_id} after {attempt} attempt(s) "
+                    f"(no match found, or timed out after {timeout}s)"
+                )
+            continue
+
+        if sync_mount:
+            await _sync_mount_to_solved_position(ctx, mount_device, result)
+            synced_since_last_attempt = True
+
+        await plate_solver.write_wcs_headers(frame_id, frame_path, result)
+
+        if tolerance_arcsec is None:
+            _report_status(
+                ctx,
+                script_id,
+                role,
+                f"Plate-solved frame {frame_id}: RA={result.raDegJ2000:.4f} deg, "
+                f"Dec={result.decDegJ2000:.4f} deg",
+            )
+            return
+
+        assert target_ra_hours is not None
+        assert target_dec_deg is not None
+        last_separation_arcsec = _plate_solve_target_separation_arcsec(
+            result, target_ra_hours, target_dec_deg, datetime.now(tz=UTC)
         )
-        await _execute_capture_frame(capture_step, ctx, params, script_id, pausable)
+        if last_separation_arcsec <= tolerance_arcsec:
+            _report_status(
+                ctx,
+                script_id,
+                role,
+                f"Plate-solved frame {frame_id} within tolerance after {attempt} attempt(s): "
+                f"RA={result.raDegJ2000:.4f} deg, Dec={result.decDegJ2000:.4f} deg, "
+                f'separation={last_separation_arcsec:.2f}"',
+            )
+            return
+        if attempt == max_attempts:
+            raise ScriptExecutionError(
+                f'plate_solve did not reach {tolerance_arcsec}" tolerance after {attempt} '
+                f'attempt(s) (best: {last_separation_arcsec:.2f}" from target)'
+            )
 
-    frames = await asyncio.to_thread(frame_store.list_frames, run_id=ctx.run_id, device=device)
-    if not frames:
-        raise ScriptExecutionError(
-            f"plate_solve found no captured frame for device {device!r} in this run; "
-            "set exposureSeconds to capture one, or run a capture_frame step first"
-        )
-    frame_id = frames[0]["frameId"]
-    frame_path = await asyncio.to_thread(frame_store.get_frame_path, frame_id)
 
-    ra_hint_hours, dec_hint_deg = _plate_solve_position_hint(mount_device)
-    scale_low, scale_high = _plate_solve_scale_hint(ctx, role)
-
+def _plate_solve_target_coord(mount_device: str) -> tuple[float, float] | None:
+    """`mount_device`'s own `TARGET_EOD_COORD` (RA hours, Dec deg) — the last coordinate a
+    `slew` (or any other `EQUATORIAL_EOD_COORD` command) told this mount to go to, distinct
+    from `EQUATORIAL_EOD_COORD` itself (where the mount currently reports actually being).
+    `None` if undefined or unparseable — the retry-toward-tolerance loop
+    (`_execute_plate_solve`) has nothing to converge toward without it, and fails fast rather
+    than guessing.
+    """
+    values = indi_messaging.get_property_values(mount_device, "TARGET_EOD_COORD")
+    if values is None:
+        return None
     try:
-        result = await plate_solver.solve(
-            frame_path,
-            ra_hint_hours=ra_hint_hours,
-            dec_hint_deg=dec_hint_deg,
-            scale_low_arcsec=scale_low,
-            scale_high_arcsec=scale_high,
-            timeout_seconds=timeout,
-            cancel_event=ctx.cancel_event,
-        )
-    except asyncio.CancelledError as exc:
-        raise ScriptCancelled("script run was cancelled") from exc
-    if result is None:
-        raise ScriptExecutionError(
-            f"plate_solve did not solve frame {frame_id} (no match found, or timed out "
-            f"after {timeout}s)"
-        )
+        return float(values["RA"]), float(values["DEC"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
-    if bool(_substitute(step.syncMount, params)):
-        await _sync_mount_to_solved_position(ctx, mount_device, result)
 
-    await plate_solver.write_wcs_headers(frame_id, frame_path, result)
+def _plate_solve_target_separation_arcsec(
+    result: plate_solver.PlateSolveResult,
+    target_ra_hours_eod: float,
+    target_dec_deg_eod: float,
+    at: datetime,
+) -> float:
+    """Angular separation, in arcseconds, between a solve `result` (J2000) and a target
+    coordinate given in EOD (epoch-of-date, `TARGET_EOD_COORD`'s own convention).
 
-    _report_status(
+    Converts the target to J2000 first (`fits_headers.compute_target_position`, the same
+    EOD->ICRS transform already used for `capture_frame`'s `OBJCTRA`/`OBJCTDEC` headers) so
+    both sides of the comparison are in the same frame — unlike `_sync_mount_to_solved_
+    position`, which compares/sends EOD directly and can afford to ignore the EOD/J2000
+    systematic offset at its coarse, arcmin-level precision, this loop's `toleranceArcsec` is
+    typically much tighter (single-digit-to-tens of arcsec), where that offset (arcmin-scale,
+    growing with distance from the J2000 epoch) would otherwise swamp the actual pointing
+    error being measured. `compute_target_position` rounds its output to 4 decimal degrees
+    (~0.36" quantization) — a small fraction of any realistic `toleranceArcsec`, and reusing
+    that already-tested conversion outweighs hand-rolling an unrounded parallel version.
+    """
+    target_j2000 = fits_headers.compute_target_position(
+        ra_hours=target_ra_hours_eod, dec_deg=target_dec_deg_eod, at=at
+    )
+    solved = SkyCoord(ra=result.raDegJ2000 * u.deg, dec=result.decDegJ2000 * u.deg, frame="icrs")
+    target = SkyCoord(
+        ra=target_j2000["raDegJ2000"] * u.deg, dec=target_j2000["decDegJ2000"] * u.deg, frame="icrs"
+    )
+    return float(solved.separation(target).to_value(u.arcsec))
+
+
+async def _plate_solve_reslew_to_target(
+    ctx: _ExecutionContext, mount_device: str, ra_hours: float, dec_deg: float
+) -> None:
+    """Re-slew `mount_device` to `(ra_hours, dec_deg)` between `plate_solve` retry attempts —
+    unlike `_sync_mount_to_solved_position`, this is real physical motion (the whole point:
+    land closer to the target now that the previous attempt's sync corrected the mount's
+    pointing model), so it mirrors `_execute_slew` exactly: `_check_not_parked` first,
+    `_ensure_track_on_slew` before the coordinate command (so the mount ends up tracking
+    regardless of whatever `ON_COORD_SET` mode a previous sync left it in), then
+    `EQUATORIAL_EOD_COORD` and the same `Busy`->`Ok` wait `slew` uses.
+    """
+    _check_not_parked(mount_device)
+    await _ensure_track_on_slew(mount_device)
+    await indi_messaging.send_property(
+        mount_device, "EQUATORIAL_EOD_COORD", {"RA": str(ra_hours), "DEC": str(dec_deg)}
+    )
+    await _wait_for_property_state(
         ctx,
-        script_id,
-        role,
-        f"Plate-solved frame {frame_id}: RA={result.raDegJ2000:.4f} deg, "
-        f"Dec={result.decDegJ2000:.4f} deg",
+        mount_device,
+        "EQUATORIAL_EOD_COORD",
+        indi_messaging.PropertyState.OK,
+        _SLEW_TIMEOUT_SECONDS,
     )
 
 

@@ -155,6 +155,37 @@ def test_builtin_plate_solve_script_is_a_thin_wrapper_around_the_plate_solve_ste
     assert step.timeoutSeconds == "{{ timeoutSeconds }}"
 
 
+def test_builtin_plate_solve_until_precision_script_is_a_thin_wrapper() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    script = script_store.get_script("plate_solve_until_precision")
+
+    assert script.pausable is False
+    assert set(script.parameters) == {
+        "exposureSeconds",
+        "toleranceArcsec",
+        "maxAttempts",
+        "timeoutSeconds",
+    }
+    assert script.parameters["exposureSeconds"].required is True
+    assert script.parameters["toleranceArcsec"].required is False
+    assert script.parameters["toleranceArcsec"].default == 30
+    assert script.parameters["maxAttempts"].required is False
+    assert script.parameters["maxAttempts"].default == 3
+    assert script.parameters["timeoutSeconds"].required is False
+    assert script.parameters["timeoutSeconds"].default == 60
+    assert len(script.steps) == 1
+    step = script.steps[0]
+    assert isinstance(step, script_store.PlateSolveStep)
+    assert step.role == "camera"
+    assert step.mountRole == "mount"
+    assert step.exposureSeconds == "{{ exposureSeconds }}"
+    assert step.syncMount is True
+    assert step.toleranceArcsec == "{{ toleranceArcsec }}"
+    assert step.maxAttempts == "{{ maxAttempts }}"
+    assert step.timeoutSeconds == "{{ timeoutSeconds }}"
+
+
 def test_builtin_park_script_sets_park_and_waits() -> None:
     script_store.load_scripts(SCRIPTS_DIR)
 

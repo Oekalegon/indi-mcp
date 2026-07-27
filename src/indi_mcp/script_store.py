@@ -353,10 +353,22 @@ class PlateSolveStep(_StepBase):
     reasoning `SelectFilterStep.filterName` resolution is pushed into the execution engine,
     not this class) — simpler to just always ask for it explicitly, the same as `role`.
 
-    Retrying toward a target tolerance is deliberately not part of this step yet — this is
-    the single capture-and-solve-attempt primitive `plate_solve_until_precision`
-    (INDIMCP-47) is expected to build its own retry loop on top of, since a `Condition` here
-    can't check a computed angular separation (`docs/ScriptSchema.md`'s own note on this).
+    `toleranceArcsec`/`maxAttempts` (INDIMCP-47) let this step retry toward a target
+    tolerance itself, rather than exposing that loop to YAML via `repeat`/`until` — a
+    `Condition` can't check a computed angular separation (`docs/ScriptSchema.md`'s own note
+    on this), so the retry lives in the engine handler instead (`docs/PlateSolve.md`). Each
+    retry re-slews to the mount's own `TARGET_EOD_COORD` (the last commanded slew target),
+    *if* the previous attempt actually synced — the sync is what corrects the mount's
+    pointing model, so re-slewing to the *same* target afterward lands closer than the
+    first, uncorrected attempt did. A retry immediately following a *failed* solve skips the
+    re-slew entirely (no sync happened, so the model is unchanged — moving away and back to
+    the identical position would cost real time for no benefit) and just captures/solves
+    again at the same pointing. Requires `exposureSeconds` (each attempt needs a fresh
+    capture; re-solving the same static frame after moving the mount would just re-report the
+    same, now-stale position) and `syncMount=True` (without syncing, the model never
+    improves, so retrying could never converge) — both enforced below for a literal
+    misconfiguration; the engine handler enforces the same for a parameterized one, since a
+    `"{{ param }}"` reference's actual value isn't known until execution.
     """
 
     step: Literal["plate_solve"]
@@ -364,7 +376,25 @@ class PlateSolveStep(_StepBase):
     mountRole: str
     exposureSeconds: NumberOrReference | None = None
     syncMount: BoolOrReference = True
+    toleranceArcsec: NumberOrReference | None = None
+    maxAttempts: IntOrReference = 3
     timeoutSeconds: NumberOrReference = 60
+
+    @model_validator(mode="after")
+    def _check_tolerance_requirements(self) -> "PlateSolveStep":
+        if self.toleranceArcsec is None:
+            return self
+        if self.exposureSeconds is None:
+            raise ValueError(
+                "plate_solve.toleranceArcsec requires exposureSeconds (each retry attempt "
+                "needs a fresh capture)"
+            )
+        if self.syncMount is False:
+            raise ValueError(
+                "plate_solve.toleranceArcsec requires syncMount (retrying can't converge "
+                "without syncing the mount's corrected pointing model between attempts)"
+            )
+        return self
 
 
 class RunScriptStep(_StepBase):

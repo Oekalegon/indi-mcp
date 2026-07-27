@@ -481,6 +481,61 @@ def test_referenced_roles_includes_a_set_focus_position_steps_role() -> None:
     assert script_store.referenced_roles(script) == {"focuser"}
 
 
+def test_plate_solve_step_parses_with_defaults() -> None:
+    step = script_store.PlateSolveStep(step="plate_solve", role="camera", mountRole="mount")
+
+    assert step.exposureSeconds is None
+    assert step.syncMount is True
+    assert step.toleranceArcsec is None
+    assert step.maxAttempts == 3
+    assert step.timeoutSeconds == 60
+
+
+def test_plate_solve_step_accepts_tolerance_arcsec_with_its_requirements_met() -> None:
+    step = script_store.PlateSolveStep(
+        step="plate_solve",
+        role="camera",
+        mountRole="mount",
+        exposureSeconds=5,
+        syncMount=True,
+        toleranceArcsec=10,
+        maxAttempts=5,
+    )
+
+    assert step.toleranceArcsec == 10
+    assert step.maxAttempts == 5
+
+
+def test_plate_solve_step_rejects_tolerance_arcsec_without_exposure_seconds() -> None:
+    with pytest.raises(ValueError, match="requires exposureSeconds"):
+        script_store.PlateSolveStep(
+            step="plate_solve", role="camera", mountRole="mount", toleranceArcsec=10
+        )
+
+
+def test_plate_solve_step_rejects_tolerance_arcsec_with_sync_mount_false() -> None:
+    with pytest.raises(ValueError, match="requires syncMount"):
+        script_store.PlateSolveStep(
+            step="plate_solve",
+            role="camera",
+            mountRole="mount",
+            exposureSeconds=5,
+            syncMount=False,
+            toleranceArcsec=10,
+        )
+
+
+def test_referenced_roles_includes_a_plate_solve_steps_roles() -> None:
+    script = script_store.Script(
+        id="solve",
+        name="Solve",
+        pausable=False,
+        steps=[script_store.PlateSolveStep(step="plate_solve", role="camera", mountRole="mount")],
+    )
+
+    assert script_store.referenced_roles(script) == {"camera", "mount"}
+
+
 def test_repeat_step_rejects_both_count_and_until() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         script_store.RepeatStep(
