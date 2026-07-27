@@ -4923,3 +4923,21 @@ async def test_execute_script_plate_solve_fails_when_solve_field_does_not_solve(
 
     with pytest.raises(script_engine.ScriptExecutionError, match="did not solve"):
         await script_engine.execute_script("solve", "test-rig", {})
+
+
+async def test_execute_script_plate_solve_translates_a_cancelled_solve_into_script_cancelled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """`plate_solver.solve` races its own cancel_event and raises asyncio.CancelledError if
+    it fires first (see plate_solver.py) — this step must translate that into ScriptCancelled
+    rather than letting a bare CancelledError (a BaseException) escape execute_script, so a
+    cancel mid-solve is honored the same way cancellation is everywhere else in this engine."""
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step()])
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    solve.side_effect = asyncio.CancelledError()
+
+    with pytest.raises(script_engine.ScriptCancelled):
+        await script_engine.execute_script("solve", "test-rig", {})

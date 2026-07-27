@@ -2414,6 +2414,14 @@ async def _execute_plate_solve(
     is the single capture-and-solve-attempt primitive `plate_solve_until_precision`
     (INDIMCP-47) builds its own retry loop on top of (a `Condition` can't check a computed
     angular separation — see `docs/ScriptSchema.md`'s own note on this).
+
+    Passes `ctx.cancel_event` through to `plate_solver.solve`, so a cancel issued while
+    `solve-field` is running kills the subprocess and is honored promptly — the same
+    "`cancel_script` always wins" contract every other long-running wait in this module
+    upholds by polling `_check_cancelled` in a loop, which isn't possible for a single
+    `await` on a subprocess; `plate_solver.solve` races the cancel instead. Its
+    `asyncio.CancelledError` is translated into this module's own `ScriptCancelled` here,
+    keeping `plate_solver` decoupled from `script_engine`'s exception vocabulary.
     """
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
@@ -2439,14 +2447,18 @@ async def _execute_plate_solve(
     ra_hint_hours, dec_hint_deg = _plate_solve_position_hint(mount_device)
     scale_low, scale_high = _plate_solve_scale_hint(ctx, role)
 
-    result = await plate_solver.solve(
-        frame_path,
-        ra_hint_hours=ra_hint_hours,
-        dec_hint_deg=dec_hint_deg,
-        scale_low_arcsec=scale_low,
-        scale_high_arcsec=scale_high,
-        timeout_seconds=timeout,
-    )
+    try:
+        result = await plate_solver.solve(
+            frame_path,
+            ra_hint_hours=ra_hint_hours,
+            dec_hint_deg=dec_hint_deg,
+            scale_low_arcsec=scale_low,
+            scale_high_arcsec=scale_high,
+            timeout_seconds=timeout,
+            cancel_event=ctx.cancel_event,
+        )
+    except asyncio.CancelledError as exc:
+        raise ScriptCancelled("script run was cancelled") from exc
     if result is None:
         raise ScriptExecutionError(
             f"plate_solve did not solve frame {frame_id} (no match found, or timed out "

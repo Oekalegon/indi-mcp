@@ -18,6 +18,7 @@ directly — no hand-rolled WCS math.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import tempfile
@@ -98,6 +99,7 @@ async def solve(
     scale_high_arcsec: float | None = None,
     radius_deg: float = _DEFAULT_SEARCH_RADIUS_DEG,
     timeout_seconds: float | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> PlateSolveResult | None:
     """Run `solve-field` on `fits_path`, returning the solved WCS, or `None` if it didn't
     solve (or timed out).
@@ -114,11 +116,23 @@ async def solve(
     blind solve over the full index range can take tens of seconds to minutes on a Pi, while
     a properly hinted one typically resolves in a few seconds.
 
-    Uses `asyncio.create_subprocess_exec` + `asyncio.wait_for`, not this codebase's usual
-    `asyncio.to_thread` + blocking-call convention (`frame_store`, `fits_headers`): a solve
-    can legitimately run the full timeout, and unlike a brief disk write, a *hung* process
-    needs to be killable from here (`proc.kill()`) the moment a script run is cancelled or
-    times out, not left running in a thread this module has no handle to stop.
+    `cancel_event`, if given, is raced against the solve — the same event a caller (the
+    `plate_solve` step handler) already polls between steps elsewhere. Unlike every other
+    long-running wait in the execution engine (`_wait_for_property_state`, `_execute_wait_for`),
+    which can afford to poll `cancel_event` in a loop with a short sleep between checks, a
+    single `await proc.communicate()` can't be interrupted or polled mid-flight — so instead
+    of polling, this races `proc.communicate()` against `cancel_event.wait()` with
+    `asyncio.wait(..., return_when=FIRST_COMPLETED)`: whichever finishes first decides the
+    outcome, and the process is killed either way if it's still running. Raises
+    `asyncio.CancelledError` if `cancel_event` fires first — the caller (`script_engine`) is
+    expected to catch this and translate it into its own `ScriptCancelled`, matching this
+    module staying decoupled from `script_engine`'s exception vocabulary.
+
+    Uses `asyncio.create_subprocess_exec`, not this codebase's usual `asyncio.to_thread` +
+    blocking-call convention (`frame_store`, `fits_headers`): a solve can legitimately run
+    the full timeout, and unlike a brief disk write, a *hung* process needs to be killable
+    from here (`proc.kill()`) the moment a script run is cancelled or times out, not left
+    running in a thread this module has no handle to stop.
 
     All of `solve-field`'s own working files (`.wcs`, `.solved`, `.axy`, ...) are written to a
     fresh temporary directory (`--dir`), never next to `fits_path` itself — that's the frame
@@ -161,13 +175,37 @@ async def solve(
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except TimeoutError:
+        communicate_task = asyncio.ensure_future(proc.communicate())
+        cancel_task = asyncio.ensure_future(cancel_event.wait()) if cancel_event else None
+        waiters = [communicate_task, *([cancel_task] if cancel_task else [])]
+        done, _pending = await asyncio.wait(
+            waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+
+        if cancel_task is not None and cancel_task in done:
             proc.kill()
             await proc.wait()
+            communicate_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await communicate_task
+            logger.info("solve-field on %s cancelled", fits_path)
+            raise asyncio.CancelledError("solve-field cancelled")
+
+        if cancel_task is not None:
+            cancel_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancel_task
+
+        if communicate_task not in done:
+            proc.kill()
+            await proc.wait()
+            communicate_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await communicate_task
             logger.info("solve-field timed out after %ss on %s", timeout, fits_path)
             return None
+
+        _, stderr = communicate_task.result()
 
         if proc.returncode != 0:
             logger.info(
@@ -182,7 +220,7 @@ async def solve(
         if not wcs_path.is_file():
             logger.info("solve-field reported success but produced no %s", wcs_path)
             return None
-        return _parse_wcs(wcs_path)
+        return await asyncio.to_thread(_parse_wcs, wcs_path)
 
 
 def _parse_wcs(wcs_path: Path) -> PlateSolveResult | None:

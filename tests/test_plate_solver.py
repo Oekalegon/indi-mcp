@@ -7,6 +7,7 @@ writes what it was called with, are both controlled via env vars the fake script
 out of its own inherited environment (subprocesses inherit the parent's env by default).
 """
 
+import asyncio
 import json
 import stat
 from pathlib import Path
@@ -99,6 +100,29 @@ async def test_solve_returns_none_and_kills_the_process_on_timeout(
     result = await plate_solver.solve(fits_path, timeout_seconds=0.2)
 
     assert result is None
+
+
+async def test_solve_raises_cancelled_error_and_kills_the_process_when_cancelled(
+    fake_solve_field: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_SOLVE_FIELD_MODE", "timeout")  # sleeps 5s
+    fits_path = tmp_path / "frame.fits"
+    fits_path.write_bytes(b"not-really-fits")
+    cancel_event = asyncio.Event()
+
+    async def cancel_soon() -> None:
+        await asyncio.sleep(0.1)
+        cancel_event.set()
+
+    start = asyncio.get_event_loop().time()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.gather(
+            plate_solver.solve(fits_path, timeout_seconds=5, cancel_event=cancel_event),
+            cancel_soon(),
+        )
+    elapsed = asyncio.get_event_loop().time() - start
+
+    assert elapsed < 4  # well under the fake script's 5s sleep and the 5s timeout
 
 
 async def test_solve_passes_position_and_scale_hints_as_cli_args(
