@@ -681,7 +681,7 @@ async def plate_solve_uploaded_frame(
     or if `solve-field` doesn't solve it within `timeoutSeconds` (the frame is still saved
     and retrievable in that case — see `plate_solver.solve_uploaded_frame`).
     """
-    data = base64.b64decode(fitsDataBase64)
+    data = await asyncio.to_thread(base64.b64decode, fitsDataBase64)
     return await plate_solver.solve_uploaded_frame(
         data,
         ra_hint_hours=raHintHours,

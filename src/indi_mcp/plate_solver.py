@@ -237,6 +237,17 @@ async def solve(
         return await asyncio.to_thread(_parse_wcs, wcs_path)
 
 
+def _validate_fits(data: bytes) -> None:
+    """Raise `OSError` (astropy's own signal for "not a FITS file") if `data` isn't one.
+
+    A blocking, CPU/IO-bound parse of the header — run via `asyncio.to_thread` by
+    `solve_uploaded_frame`, not called directly, the same as every other FITS parse in this
+    codebase (`_parse_wcs`, `frame_store`).
+    """
+    with fits.open(io.BytesIO(data)):
+        pass
+
+
 def _parse_wcs(wcs_path: Path) -> PlateSolveResult | None:
     """Read `solve-field`'s own `.wcs` output (already a minimal, valid FITS header) into a
     `PlateSolveResult`. `None` if any of the core WCS keywords `solve-field` is expected to
@@ -345,8 +356,7 @@ async def solve_uploaded_frame(
     `FastMCP` tool raising is the ordinary way to surface a tool-call failure.
     """
     try:
-        with fits.open(io.BytesIO(data)):
-            pass
+        await asyncio.to_thread(_validate_fits, data)
     except OSError as exc:
         raise ValueError(f"not a valid FITS file: {exc}") from exc
 
