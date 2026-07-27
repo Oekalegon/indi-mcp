@@ -16,6 +16,7 @@ from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from indi_mcp import (
+    astrometry_index,
     event_log,
     event_streams,
     frame_store,
@@ -536,6 +537,113 @@ async def test_plate_solve_until_precision_delegates_to_start_script(
             None,
         )
     ]
+
+
+async def test_list_astrometry_index_files_delegates_without_a_rig(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[rig_store.Rig | None] = []
+
+    def fake_list_index_files(*, directory=None, rig=None):
+        calls.append(rig)
+        return [{"indexNumber": 7, "installed": True}]
+
+    monkeypatch.setattr(astrometry_index, "list_index_files", fake_list_index_files)
+
+    result = await server.list_astrometry_index_files()
+
+    assert result == [{"indexNumber": 7, "installed": True}]
+    assert calls == [None]
+
+
+async def test_list_astrometry_index_files_resolves_and_passes_the_rig(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+    calls: list[rig_store.Rig | None] = []
+    monkeypatch.setattr(
+        astrometry_index,
+        "list_index_files",
+        lambda *, directory=None, rig=None: calls.append(rig) or [],
+    )
+
+    await server.list_astrometry_index_files(rig_id="test-rig")
+
+    assert calls == [rig]
+
+
+async def test_download_astrometry_index_files_with_explicit_index_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[int]] = []
+
+    async def fake_download(index_numbers: list[int], *, directory=None) -> list[int]:
+        calls.append(index_numbers)
+        return index_numbers
+
+    monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
+
+    result = await server.download_astrometry_index_files(indexNumbers=[7, 8])
+
+    assert result == [7, 8]
+    assert calls == [[7, 8]]
+
+
+async def test_download_astrometry_index_files_with_explicit_arcmin_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[int]] = []
+
+    async def fake_download(index_numbers: list[int], *, directory=None) -> list[int]:
+        calls.append(index_numbers)
+        return index_numbers
+
+    monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
+
+    result = await server.download_astrometry_index_files(minArcmin=23.0, maxArcmin=29.0)
+
+    assert result == [7]
+    assert calls == [[7]]
+
+
+async def test_download_astrometry_index_files_with_rig_id_computes_the_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(
+        id="test-rig",
+        name="Test rig",
+        components=[
+            rig_store.Component(role="telescope", id="scope-1", focalLengthMm=750.0),
+            rig_store.Component(
+                role="camera",
+                id="cam-1",
+                device="CCD Simulator",
+                pixelSizeMicron=3.76,
+                pixelsX=6248,
+                pixelsY=4176,
+            ),
+        ],
+    )
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+    calls: list[list[int]] = []
+
+    async def fake_download(index_numbers: list[int], *, directory=None) -> list[int]:
+        calls.append(index_numbers)
+        return index_numbers
+
+    monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
+
+    await server.download_astrometry_index_files(rig_id="test-rig")
+
+    min_arcmin, max_arcmin = astrometry_index.field_of_view_arcmin_for_rig(rig)
+    expected = astrometry_index.index_numbers_for_field_of_view(min_arcmin, max_arcmin)
+    assert calls == [expected]
+
+
+async def test_download_astrometry_index_files_requires_one_selector() -> None:
+    with pytest.raises(ValueError, match="pass indexNumbers, rig_id"):
+        await server.download_astrometry_index_files()
 
 
 async def test_plate_solve_uploaded_frame_decodes_base64_and_delegates(

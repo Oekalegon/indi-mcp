@@ -17,6 +17,7 @@ from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import AnyUrl
 
 from indi_mcp import (
+    astrometry_index,
     event_log,
     event_streams,
     frame_store,
@@ -717,6 +718,52 @@ async def plate_solve_until_precision(
             "timeoutSeconds": timeoutSeconds,
         },
     )
+
+
+@mcp.tool()
+async def list_astrometry_index_files(
+    rig_id: str | None = None,
+) -> list[astrometry_index.IndexFileStatus]:
+    """List every known astrometry.net 4100-series index file and whether it's installed
+    under `INDI_MCP_ASTROMETRY_INDEX_DIR` (INDIMCP-77) — see `docs/PlateSolve.md`.
+
+    If `rig_id` is given, each entry's `neededForRig` flags whether that index's coverage
+    actually overlaps the rig's own configured field of view (its `telescope` component's
+    `focalLengthMm` and `camera` component's `pixelSizeMicron`/`pixelsX`/`pixelsY`) — `None`
+    throughout if `rig_id` is omitted, or if the rig doesn't have enough optics configured to
+    compute a field of view from.
+    """
+    rig = rig_store.get_rig(rig_id) if rig_id is not None else None
+    return await asyncio.to_thread(astrometry_index.list_index_files, rig=rig)
+
+
+@mcp.tool()
+async def download_astrometry_index_files(
+    indexNumbers: list[int] | None = None,
+    minArcmin: float | None = None,
+    maxArcmin: float | None = None,
+    rig_id: str | None = None,
+) -> list[int]:
+    """Download whichever astrometry.net 4100-series index files aren't already installed
+    under `INDI_MCP_ASTROMETRY_INDEX_DIR` (INDIMCP-77) — see `docs/PlateSolve.md`.
+
+    Pass exactly one of: `indexNumbers` (explicit index numbers, 7-19), `minArcmin`/
+    `maxArcmin` together (every index covering that field-of-view range), or `rig_id`
+    (computes `minArcmin`/`maxArcmin` from that rig's own configured optics, the same way
+    `list_astrometry_index_files`'s `neededForRig` does). Returns the index numbers actually
+    downloaded — already-installed ones are left alone.
+    """
+    if indexNumbers is not None:
+        return await astrometry_index.download_index_files(indexNumbers)
+    if rig_id is not None:
+        rig = rig_store.get_rig(rig_id)
+        minArcmin, maxArcmin = astrometry_index.field_of_view_arcmin_for_rig(rig)
+    elif minArcmin is None or maxArcmin is None:
+        raise ValueError("pass indexNumbers, rig_id, or both minArcmin and maxArcmin")
+    index_numbers = astrometry_index.index_numbers_for_field_of_view(minArcmin, maxArcmin)
+    if not index_numbers:
+        raise ValueError(f"no known 4100-series index covers {minArcmin}-{maxArcmin} arcmin")
+    return await astrometry_index.download_index_files(index_numbers)
 
 
 @mcp.tool()

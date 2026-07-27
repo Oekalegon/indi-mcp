@@ -3,10 +3,12 @@
 Local `solve-field` + index files, not the `nova.astrometry.net` web API — see
 `docs/PlateSolve.md` for why (this project's deployment target, a headless Pi running
 unattended imaging sequences, can't depend on outbound internet or a third-party service's
-availability/rate limits for something a running sequence blocks on). Index-file
-installation/management is a deployment concern (and a separate ticket, tracking which are
-present and downloading missing ones) — this module only assumes `solve-field` and *some*
-index files are already installed.
+availability/rate limits for something a running sequence blocks on). Checking which index
+files are installed and downloading missing ones is `astrometry_index.py`'s job
+(INDIMCP-77) — this module only *uses* whatever ends up there: if `INDI_MCP_ASTROMETRY_
+INDEX_DIR` is set, `solve()` points `solve-field` at it via a small generated config
+(`astrometry_index.ensure_astrometry_config`); if unset, `solve-field` falls back to its own
+system-default index search, unchanged from before this env var existed.
 
 `solve()` is the only entry point script_engine's `plate_solve` step handler needs; it shells
 out to `solve-field` with `asyncio.create_subprocess_exec` (not `asyncio.to_thread` +
@@ -42,7 +44,7 @@ from typing import TypedDict
 
 from astropy.io import fits
 
-from indi_mcp import fits_headers, frame_store
+from indi_mcp import astrometry_index, fits_headers, frame_store
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +174,14 @@ async def solve(
     none` skips writing a modified copy of the input FITS entirely, since the WCS this
     function returns is applied to the original frame by the caller instead
     (`fits_headers.write_fits_headers`), not by asking `solve-field` to do it.
+
+    If `astrometry_index.INDEX_DIR_ENV` is set, `--config` points `solve-field` at a small
+    generated config (`astrometry_index.ensure_astrometry_config`) so it actually searches
+    that managed directory for index files (`--dir` above is unrelated — it's
+    `solve-field`'s *output* directory, not where it looks for indices; that's only
+    configurable via a config file's `add_path`). Left unset (the default), `solve-field`
+    falls back to whatever indices its own system-default config already knows about,
+    exactly as before this env var existed.
     """
     timeout = timeout_seconds if timeout_seconds is not None else _default_timeout_seconds()
     with tempfile.TemporaryDirectory(prefix="indi-mcp-platesolve-") as work_dir:
@@ -202,6 +212,12 @@ async def solve(
                 "--scale-high",
                 str(scale_high_arcsec),
             ]
+        index_dir_value = os.environ.get(astrometry_index.INDEX_DIR_ENV)
+        if index_dir_value:
+            config_path = await asyncio.to_thread(
+                astrometry_index.ensure_astrometry_config, Path(index_dir_value)
+            )
+            args += ["--config", str(config_path)]
         args.append(str(fits_path))
 
         proc = await asyncio.create_subprocess_exec(

@@ -35,15 +35,58 @@ prerequisites (out of scope for this doc, but noted so INDIMCP-45 doesn't drop i
 ## Config
 
 Following the existing per-module `<NAME>_ENV` + default convention (`frame_store.py`,
-`rig_store.py`, `db.py`), a new `plate_solver.py` gets its own env-configurable constants:
+`rig_store.py`, `db.py`), `plate_solver.py`/`astrometry_index.py` get their own
+env-configurable constants:
 
 | Env var | Default | Purpose |
 |---|---|---|
 | `INDI_MCP_ASTROMETRY_BIN` | `"solve-field"` (resolved via `PATH`) | Path to the `solve-field` binary. |
-| `INDI_MCP_ASTROMETRY_INDEX_DIR` | unset (solve-field's own default, `/usr/share/astrometry`) | `--dir`/`--config`-equivalent override for index-file location, for non-standard installs. |
+| `INDI_MCP_ASTROMETRY_INDEX_DIR` | unset (`solve-field`'s own system-default index search) | Directory `astrometry_index.py` checks/downloads index files into, and `solve()` points `solve-field` at via a generated config (INDIMCP-77 — see below). |
 | `INDI_MCP_ASTROMETRY_TIMEOUT_SECONDS` | `60` | Hard timeout for one solve attempt; see below. |
+| `INDI_MCP_MAX_UPLOADED_FRAME_BYTES` | `200 MiB` | Upper bound on a client-uploaded frame's decoded size (INDIMCP-76). |
 
 No API key needed for the local-only design.
+
+## Managing index files (INDIMCP-77)
+
+`solve-field` needs local index files installed before it can solve anything — a one-time
+setup cost, not something indi-mcp can do without (see [Deployment.md](Deployment.md)).
+Checking what's installed and downloading what's missing is `astrometry_index.py`'s job,
+exposed as two MCP tools:
+
+- **`list_astrometry_index_files(rig_id=None)`** — every known 4100-series index file
+  (`index-4107.fits` through `index-4119.fits`, covering 22 arcmin to 33 degrees of field
+  diameter) and whether it's installed under `INDI_MCP_ASTROMETRY_INDEX_DIR`. Pass `rig_id`
+  to also get a `neededForRig` flag per entry, computed from that rig's own configured
+  optics (`telescope.focalLengthMm` + `camera.pixelSizeMicron`/`pixelsX`/`pixelsY` — the
+  same numbers `plate_solve`'s own scale hint already uses) — so "missing but irrelevant to
+  this rig" can be told apart from "missing and actually needed."
+- **`download_astrometry_index_files(indexNumbers=None, minArcmin=None, maxArcmin=None,
+  rig_id=None)`** — downloads whichever aren't already installed. Pass exactly one
+  selector: explicit index numbers, an explicit field-of-view range, or a `rig_id` (computes
+  the range from its optics, same as `list_astrometry_index_files`'s `neededForRig`).
+  Streamed to disk in chunks (never buffered whole in memory — files run up to ~165 MB) to a
+  `.part` temp name, renamed only once complete, so an interrupted download is never
+  mistaken for a valid index the next time it's checked.
+
+**Deliberately scoped to the 4100-series (Tycho-2) only.** That series is a single file per
+scale, hosted directly under `data.astrometry.net/4100/` with a simple, predictable URL —
+and it happens to cover the field-of-view range the overwhelming majority of amateur setups
+actually need. The narrower-field 5200-series is sharded into many per-healpix files and
+hosted on a different server (`portal.nersc.gov`); a setup narrow enough to need it (very
+long focal length + small pixels, sub-22-arcmin fields) still works with `plate_solve`, it
+just needs those index files installed by some other means for now — a real, known
+limitation, not an oversight, and worth revisiting if it turns out to matter in practice.
+
+`solve()` only *uses* whatever ends up in the configured directory: if
+`INDI_MCP_ASTROMETRY_INDEX_DIR` is set, it points `solve-field` there via a small generated
+`astrometry.cfg` (`astrometry_index.ensure_astrometry_config`) — `solve-field` has no
+`--index-dir` flag of its own; index-file location is only configurable through a config
+file's `add_path` directives, passed with `--config` (`--dir`, used elsewhere in this same
+`solve()` call, is unrelated — that's `solve-field`'s *output* directory, not where it looks
+for indices). Left unset (the default), `solve-field` falls back to whatever indices its own
+system-default config already knows about, exactly as before this env var existed — fully
+backward compatible with an operator who already has indices installed system-wide.
 
 ## Subprocess invocation
 
