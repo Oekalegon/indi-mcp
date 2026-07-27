@@ -514,6 +514,30 @@ async def test_plate_solve_delegates_to_start_script(monkeypatch: pytest.MonkeyP
     ]
 
 
+async def test_plate_solve_until_precision_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.plate_solve_until_precision(
+        "test-rig", exposureSeconds=5.0, toleranceArcsec=15, maxAttempts=5, timeoutSeconds=30
+    )
+
+    assert calls == [
+        (
+            "plate_solve_until_precision",
+            "test-rig",
+            {
+                "exposureSeconds": 5.0,
+                "toleranceArcsec": 15,
+                "maxAttempts": 5,
+                "timeoutSeconds": 30,
+            },
+            None,
+        )
+    ]
+
+
 async def test_plate_solve_uploaded_frame_decodes_base64_and_delegates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -561,6 +585,7 @@ _WRAPPER_TOOLS_BY_SCRIPT_ID = {
     "set_track_mode": server.set_track_mode,
     "set_custom_tracking_rate": server.set_custom_tracking_rate,
     "plate_solve": server.plate_solve,
+    "plate_solve_until_precision": server.plate_solve_until_precision,
 }
 
 

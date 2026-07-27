@@ -4976,3 +4976,191 @@ async def test_execute_script_plate_solve_translates_a_cancelled_solve_into_scri
 
     with pytest.raises(script_engine.ScriptCancelled):
         await script_engine.execute_script("solve", "test-rig", {})
+
+
+def _mock_plate_solve_target(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    target_ra_deg_j2000: float = 150.0,
+    target_dec_deg_j2000: float = 20.0,
+) -> None:
+    """Wire up `TARGET_EOD_COORD` on `Mount Simulator` plus a `compute_target_position` mock
+    that maps it (regardless of its EOD value) to a known, fixed J2000 position — decoupling
+    the retry-loop tests below from real astropy precession math, while still exercising the
+    actual conversion/comparison call this engine code makes."""
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name == "CONNECTION":
+            return {"CONNECT": "On", "DISCONNECT": "Off"}
+        if device == "Mount Simulator" and name == "TARGET_EOD_COORD":
+            return {"RA": "10.0", "DEC": "20.0"}
+        return None
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    monkeypatch.setattr(
+        fits_headers,
+        "compute_target_position",
+        lambda **kwargs: {
+            "raDegJ2000": target_ra_deg_j2000,
+            "decDegJ2000": target_dec_deg_j2000,
+            "raSexagesimalJ2000": "",
+            "decSexagesimalJ2000": "",
+        },
+    )
+
+
+def _plate_solve_result_at(
+    ra_deg_j2000: float, dec_deg_j2000: float
+) -> script_engine.plate_solver.PlateSolveResult:
+    return script_engine.plate_solver.PlateSolveResult(
+        raDegJ2000=ra_deg_j2000,
+        decDegJ2000=dec_deg_j2000,
+        crpix1=512.0,
+        crpix2=512.0,
+        ctype1="RA---TAN",
+        ctype2="DEC--TAN",
+        cd1_1=-0.0002,
+        cd1_2=0.0,
+        cd2_1=0.0,
+        cd2_2=0.0002,
+    )
+
+
+async def test_execute_script_plate_solve_succeeds_within_tolerance_on_first_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script(
+        "solve", steps=[_plate_solve_step(exposureSeconds=5, toleranceArcsec=30, maxAttempts=3)]
+    )
+    _mock_capture_frame_success(monkeypatch)
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _mock_plate_solve_target(monkeypatch)
+    send_property, _, _, _, solve = _mock_plate_solve(
+        monkeypatch, frame_path=frame_path, result=_plate_solve_result_at(150.0, 20.0)
+    )
+    write_headers = MagicMock(return_value=None)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", write_headers)
+
+    result = await script_engine.execute_script("solve", "test-rig", {})
+
+    solve.assert_awaited_once()
+    # once for capture_frame's own DATE-OBS/INSTRUME headers, once for the plate-solved WCS
+    assert write_headers.call_count == 2
+    assert result["framesCaptured"] == 1
+    # exactly one EQUATORIAL_EOD_COORD send: the sync's own — no retry, so no re-slew
+    eq_calls = [c for c in send_property.await_args_list if c.args[1] == "EQUATORIAL_EOD_COORD"]
+    assert len(eq_calls) == 1
+
+
+async def test_execute_script_plate_solve_retries_and_reslews_until_within_tolerance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script(
+        "solve", steps=[_plate_solve_step(exposureSeconds=5, toleranceArcsec=30, maxAttempts=3)]
+    )
+    _mock_capture_frame_success(monkeypatch)
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _mock_plate_solve_target(monkeypatch)
+    send_property, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    solve.side_effect = [
+        _plate_solve_result_at(155.0, 20.0),  # far from the target: won't converge
+        _plate_solve_result_at(150.0, 20.0),  # matches the target exactly
+    ]
+    write_headers = MagicMock(return_value=None)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", write_headers)
+
+    result = await script_engine.execute_script("solve", "test-rig", {})
+
+    assert solve.await_count == 2
+    assert result["framesCaptured"] == 2
+    # every solved attempt gets its WCS written, not just the one that meets tolerance: 2
+    # capture_frame header writes + 2 plate-solved WCS writes, one pair per attempt
+    assert write_headers.call_count == 4
+    # sync (attempt 1) + re-slew (before attempt 2) + sync (attempt 2)
+    eq_calls = [c for c in send_property.await_args_list if c.args[1] == "EQUATORIAL_EOD_COORD"]
+    assert len(eq_calls) == 3
+
+
+async def test_execute_script_plate_solve_retries_after_a_failed_solve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script(
+        "solve", steps=[_plate_solve_step(exposureSeconds=5, toleranceArcsec=30, maxAttempts=3)]
+    )
+    _mock_capture_frame_success(monkeypatch)
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _mock_plate_solve_target(monkeypatch)
+    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    solve.side_effect = [None, _plate_solve_result_at(150.0, 20.0)]
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    result = await script_engine.execute_script("solve", "test-rig", {})
+
+    assert solve.await_count == 2
+    assert result["framesCaptured"] == 2
+
+
+async def test_execute_script_plate_solve_fails_after_exhausting_max_attempts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step(exposureSeconds=5, toleranceArcsec=1, maxAttempts=2)])
+    _mock_capture_frame_success(monkeypatch)
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _mock_plate_solve_target(monkeypatch)
+    _, _, _, _, solve = _mock_plate_solve(
+        monkeypatch, frame_path=frame_path, result=_plate_solve_result_at(150.01, 20.0)
+    )
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="did not reach"):
+        await script_engine.execute_script("solve", "test-rig", {})
+
+    assert solve.await_count == 2
+
+
+async def test_execute_script_plate_solve_tolerance_requires_target_eod_coord(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _plate_solve_rig()
+    _script("solve", steps=[_plate_solve_step(exposureSeconds=5, toleranceArcsec=10)])
+    _mock_capture_frame_success(monkeypatch)
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    # default get_property_values reports CONNECTION only -> no TARGET_EOD_COORD
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="TARGET_EOD_COORD"):
+        await script_engine.execute_script("solve", "test-rig", {})
+
+    solve.assert_not_awaited()
+
+
+async def test_execute_script_plate_solve_tolerance_requires_sync_mount_at_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """`PlateSolveStep`'s own validator only catches a literal `syncMount: false` at load
+    time — a `"{{ param }}"` reference resolving to `False` at runtime needs its own check,
+    since a Condition/reference's actual value isn't known until execution."""
+    _plate_solve_rig()
+    _script(
+        "solve",
+        parameters={"sync": script_store.Parameter(type="boolean", required=True)},
+        steps=[_plate_solve_step(exposureSeconds=5, toleranceArcsec=10, syncMount="{{ sync }}")],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="requires syncMount"):
+        await script_engine.execute_script("solve", "test-rig", {"sync": False})
+
+    solve.assert_not_awaited()

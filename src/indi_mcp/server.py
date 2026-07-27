@@ -693,6 +693,33 @@ async def plate_solve_uploaded_frame(
 
 
 @mcp.tool()
+async def plate_solve_until_precision(
+    rig_id: str,
+    exposureSeconds: float,
+    toleranceArcsec: float = 30,
+    maxAttempts: int = 3,
+    timeoutSeconds: float = 60,
+) -> ScriptRunStarted:
+    """Repeatedly plate-solve, sync, and re-slew toward the rig's mount's own commanded
+    target until within `toleranceArcsec`, or `maxAttempts` is exhausted — see
+    `scripts/plate_solve_until_precision.yaml` (INDIMCP-27/47).
+
+    Requires a prior slew (so the mount's `TARGET_EOD_COORD` — the last commanded slew
+    target — is actually set to something meaningful); fails immediately if it isn't.
+    """
+    return await script_runs.start_script(
+        "plate_solve_until_precision",
+        rig_id,
+        {
+            "exposureSeconds": exposureSeconds,
+            "toleranceArcsec": toleranceArcsec,
+            "maxAttempts": maxAttempts,
+            "timeoutSeconds": timeoutSeconds,
+        },
+    )
+
+
+@mcp.tool()
 async def track_off(rig_id: str) -> ScriptRunStarted:
     """Turn off the rig's mount tracking — see `scripts/track_off.yaml` (INDIMCP-49)."""
     return await script_runs.start_script("track_off", rig_id, {})
