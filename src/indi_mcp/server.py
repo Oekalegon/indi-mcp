@@ -1,6 +1,7 @@
 """The INDI MCP server instance and its entrypoint."""
 
 import asyncio
+import base64
 import contextlib
 import logging
 from collections.abc import AsyncIterator
@@ -23,6 +24,7 @@ from indi_mcp import (
     indi_messaging,
     indi_server,
     observatory_store,
+    plate_solver,
     rig_store,
     script_engine,
     script_runs,
@@ -645,6 +647,48 @@ async def plate_solve(
             "syncMount": syncMount,
             "timeoutSeconds": timeoutSeconds,
         },
+    )
+
+
+@mcp.tool()
+async def plate_solve_uploaded_frame(
+    fitsDataBase64: str,
+    raHintHours: float | None = None,
+    decHintDeg: float | None = None,
+    scaleLowArcsecPerPixel: float | None = None,
+    scaleHighArcsecPerPixel: float | None = None,
+    timeoutSeconds: float = 60,
+) -> plate_solver.UploadedFrameSolveResult:
+    """Plate-solve a FITS file the Client Computer supplies directly — INDIMCP-76 — rather
+    than one captured from a rig's camera (see `plate_solve` for that).
+
+    `fitsDataBase64` is the FITS file's raw bytes, base64-encoded (MCP tool arguments are
+    JSON; there's no binary parameter type, so this is the same encoding `frame://{frameId}`
+    already returns captured frames in, just in the upload direction).
+
+    Saved into the frame store (`device="uploaded"`, no `run_id`) before solving, so it's
+    retrievable afterward via `list_frames`/`frame://{frameId}` like any other frame — WCS
+    headers included if the solve succeeds, kept even if it doesn't, so a failed solve
+    doesn't lose the upload.
+
+    There's no rig/mount to derive a position or plate-scale hint from automatically (unlike
+    `plate_solve`, which reads both off the rig's own configuration and the mount's live
+    coordinates) — pass `raHintHours`/`decHintDeg` and/or `scaleLowArcsecPerPixel`/
+    `scaleHighArcsecPerPixel` directly if known, to narrow and speed up the search; omit
+    either pair for an unhinted solve (slower, still valid).
+
+    Raises an error if `fitsDataBase64` doesn't decode to a file `astropy.io.fits` can open,
+    or if `solve-field` doesn't solve it within `timeoutSeconds` (the frame is still saved
+    and retrievable in that case — see `plate_solver.solve_uploaded_frame`).
+    """
+    data = await asyncio.to_thread(base64.b64decode, fitsDataBase64)
+    return await plate_solver.solve_uploaded_frame(
+        data,
+        ra_hint_hours=raHintHours,
+        dec_hint_deg=decHintDeg,
+        scale_low_arcsec=scaleLowArcsecPerPixel,
+        scale_high_arcsec=scaleHighArcsecPerPixel,
+        timeout_seconds=timeoutSeconds,
     )
 
 
