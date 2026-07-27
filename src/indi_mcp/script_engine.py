@@ -2423,6 +2423,17 @@ async def _execute_plate_solve(
     `await` on a subprocess; `plate_solver.solve` races the cancel instead. Its
     `asyncio.CancelledError` is translated into this module's own `ScriptCancelled` here,
     keeping `plate_solver` decoupled from `script_engine`'s exception vocabulary.
+
+    The internal `exposureSeconds` capture (below) is dispatched straight to
+    `_execute_capture_frame`, not through `_run_one_step` — so it doesn't get its own
+    `stepsExecuted`/`scriptProgress` boundary the way a separate `capture_frame` step would.
+    A client watching progress still sees it happen: `_execute_capture_frame` reports its own
+    "Captured frame ..." `ScriptStatusMessage` regardless of how it's invoked, same channel
+    this step's own "Plate-solved frame ..." message below uses. Only the numbered
+    step-boundary/progress-fraction accounting is coarser (one `plate_solve` step "worth" of
+    progress covers both the capture and the solve) — acceptable here since `plate_solve` is
+    already the single unit of work a script author reasons about; not worth the complexity
+    of threading a synthetic extra step through `_count_total_steps`/`_report_progress` for.
     """
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
@@ -2535,6 +2546,11 @@ async def _sync_mount_to_solved_position(
     epoch-of-date — used directly here without `fits_headers`' J2000<->EOD conversion
     machinery, since a sync corrects coarse (arcmin-level) pointing-model error, and the
     J2000/EOD difference at the current epoch is well below that.
+
+    Unlike `slew`, there's no `_check_not_parked` guard here — a sync recalibrates the
+    mount's software pointing model only, with no physical motion, so whether the mount
+    happens to be parked doesn't matter the way it does for a command that actually needs to
+    move the mount.
     """
     ra_hours = result.raDegJ2000 / 15.0
     await indi_messaging.send_property(mount_device, "ON_COORD_SET", {"SYNC": "On"})
