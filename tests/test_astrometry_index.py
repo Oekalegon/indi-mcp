@@ -1,4 +1,6 @@
+import asyncio
 import io
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -161,6 +163,32 @@ async def test_download_index_files_downloads_missing_ones(
     dest = tmp_path / "index-4109.fits"
     assert dest.read_bytes() == b"fake-index-data"
     assert not (tmp_path / "index-4109.fits.part").exists()
+
+
+async def test_download_index_files_serializes_concurrent_requests_for_the_same_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two callers racing the same missing index (e.g. a client retrying a timed-out
+    download while the first attempt is still in flight) must not both start downloading —
+    the second should see the first's completed file and skip, not corrupt it."""
+    call_count = 0
+
+    def fake_urlopen(url: str, timeout: float):
+        nonlocal call_count
+        call_count += 1
+        time.sleep(0.05)  # long enough that a second, unlocked caller would overlap it
+        return io.BytesIO(b"fake-index-data")
+
+    monkeypatch.setattr(astrometry_index.urllib.request, "urlopen", fake_urlopen)
+
+    first, second = await asyncio.gather(
+        astrometry_index.download_index_files([9], directory=tmp_path),
+        astrometry_index.download_index_files([9], directory=tmp_path),
+    )
+
+    assert call_count == 1
+    assert {tuple(first), tuple(second)} == {(9,), ()}
+    assert (tmp_path / "index-4109.fits").read_bytes() == b"fake-index-data"
 
 
 async def test_download_index_files_rejects_unknown_index_numbers(tmp_path: Path) -> None:

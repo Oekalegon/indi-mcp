@@ -60,6 +60,12 @@ project cares about not fully buffering large binary data in memory on a resourc
 constrained Pi (the same reasoning `frame://{frameId}`'s own docstring discusses, just
 applied to a download instead of a read)."""
 
+_download_locks: dict[Path, asyncio.Lock] = {}
+"""Serializes `download_index_files` per destination path — see that function's own
+docstring for the check-then-act race this prevents. Never cleaned up, but bounded: at most
+one entry per known 4100-series index number (13 total) per directory ever downloaded into,
+across the server's whole lifetime — not worth the complexity of pruning."""
+
 # index number -> (min, max) field diameter in arcminutes a solve should be narrowed to
 # before this index is a good match — from astrometry.net's own reference table
 # (https://astrometry.net/doc/readme.html), matching the 4100-series' actual scale range.
@@ -237,6 +243,14 @@ async def download_index_files(
     for the same bandwidth with no real speedup, only a higher chance of a partial-progress
     failure. Each download runs via `asyncio.to_thread` (`_download_one_index_file`), so it
     never blocks the event loop other script runs/device messaging depend on.
+
+    Serialized per destination path (`_download_locks`) against a *second* caller racing the
+    same missing index — e.g. two script runs on similar rigs, or an MCP client that times
+    out waiting for a ~165 MB download and retries the same tool call while the first is
+    still in flight. Without this, both callers would pass the `is_file()` check and both
+    open the same `.part` path with `"wb"` (which truncates on open), corrupting whichever
+    download was already in progress — the same check-then-act race `script_store.py`'s own
+    `_save_script_lock` exists to prevent for concurrent script uploads.
     """
     unknown = [n for n in index_numbers if n not in _INDEX_SCALE_RANGES_ARCMIN]
     if unknown:
@@ -246,10 +260,12 @@ async def download_index_files(
     downloaded: list[int] = []
     for index_number in index_numbers:
         dest = resolved_dir / _index_filename(index_number)
-        if dest.is_file():
-            continue
-        await asyncio.to_thread(_download_one_index_file, index_number, resolved_dir)
-        downloaded.append(index_number)
+        lock = _download_locks.setdefault(dest, asyncio.Lock())
+        async with lock:
+            if dest.is_file():
+                continue
+            await asyncio.to_thread(_download_one_index_file, index_number, resolved_dir)
+            downloaded.append(index_number)
     return downloaded
 
 
