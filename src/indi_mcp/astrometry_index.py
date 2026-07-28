@@ -319,7 +319,7 @@ def list_index_files(
 
     statuses: list[IndexFileStatus] = []
     for scale_number in sorted(spec.scale_numbers):
-        min_arcmin, max_arcmin = _SCALE_RANGES_ARCMIN[scale_number]
+        scale_min_arcmin, scale_max_arcmin = _SCALE_RANGES_ARCMIN[scale_number]
         filenames = _index_filenames(catalog, scale_number)
         paths = [resolved_dir / name for name in filenames]
         installed_sizes = [p.stat().st_size for p in paths if p.is_file()]
@@ -328,8 +328,8 @@ def list_index_files(
                 "catalog": catalog,
                 "indexNumber": scale_number,
                 "filenames": filenames,
-                "minArcmin": min_arcmin,
-                "maxArcmin": max_arcmin,
+                "minArcmin": scale_min_arcmin,
+                "maxArcmin": scale_max_arcmin,
                 "installed": len(installed_sizes) == len(filenames),
                 "installedFileCount": len(installed_sizes),
                 "sizeBytes": sum(installed_sizes) if installed_sizes else None,

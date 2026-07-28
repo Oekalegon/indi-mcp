@@ -696,6 +696,12 @@ async def test_download_astrometry_index_files_rejects_partial_arcmin_range() ->
         await server.download_astrometry_index_files(minArcmin=23.0)
 
 
+async def test_download_astrometry_index_files_rejects_a_range_no_scale_covers() -> None:
+    # tycho2 only publishes scales 7-19 (22 arcmin+) -- a narrower range matches nothing
+    with pytest.raises(ValueError, match="no known 'tycho2' scale covers"):
+        await server.download_astrometry_index_files(minArcmin=1.0, maxArcmin=2.0)
+
+
 async def test_plate_solve_uploaded_frame_decodes_base64_and_delegates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
