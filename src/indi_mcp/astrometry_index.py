@@ -162,9 +162,9 @@ class IndexFileStatus(TypedDict):
     sizeBytes: int | None
     """Sum of the installed files' sizes, or `None` if none are installed yet."""
 
-    neededForRig: bool | None
-    """Whether this scale's range overlaps the rig's own field of view — `None` if
-    `list_index_files` wasn't given a rig to check against."""
+    needed: bool | None
+    """Whether this scale's range overlaps the requested field of view — `None` if
+    `list_index_files` wasn't given a `rig` or `min_arcmin`/`max_arcmin` to check against."""
 
 
 def _index_dir(directory: Path | None) -> Path:
@@ -273,34 +273,49 @@ def list_index_files(
     catalog: Catalog = "tycho2",
     directory: Path | None = None,
     rig: rig_store.Rig | None = None,
+    min_arcmin: float | None = None,
+    max_arcmin: float | None = None,
 ) -> list[IndexFileStatus]:
     """List every scale number `catalog` publishes and whether it's installed under
     `directory` (defaults to `INDEX_DIR_ENV`, falling back to `./astrometry_index`).
 
-    If `rig` is given, each entry's `neededForRig` flags whether that scale's range actually
-    overlaps the rig's own configured field of view (`field_of_view_arcmin_for_rig`), padded
-    by `DEFAULT_RIG_MARGIN_SCALES` extra scales on each side (a rig's computed field of view
-    is only ever an estimate) — so "missing but irrelevant to this rig" can be told apart
-    from "missing and needed." `None` throughout if `rig` isn't given, or if it has no
-    computable field of view.
+    Pass **at most one** of `rig` or `min_arcmin`+`max_arcmin` to also get a `needed` flag
+    per entry (`None` throughout otherwise) — this doubles as a way to see which files would
+    be needed for a field of view *without downloading anything*: pass the range (or a rig)
+    and filter the result for `needed is True`, no disk writes or network access involved
+    beyond the installed-status check already being made. `rig` computes the field of view
+    from its own configured optics (`field_of_view_arcmin_for_rig`) and pads it by
+    `DEFAULT_RIG_MARGIN_SCALES` extra scales on each side, since a rig's computed field of
+    view is only ever an estimate; `min_arcmin`/`max_arcmin` given directly is used exactly
+    as given, no padding, for a caller who already knows precisely what range they want
+    (e.g. checking coverage for a setup that has no saved rig at all) — matching
+    `index_numbers_for_field_of_view`'s own default. Raises `ValueError` if both are given,
+    or if only one of `min_arcmin`/`max_arcmin` is given.
     """
+    if rig is not None and (min_arcmin is not None or max_arcmin is not None):
+        raise ValueError("pass rig or min_arcmin/max_arcmin, not both")
+    if (min_arcmin is None) != (max_arcmin is None):
+        raise ValueError("pass both min_arcmin and max_arcmin together, not just one")
+
     spec = _catalog_spec(catalog)
     resolved_dir = _index_dir(directory)
     needed: set[int] | None = None
     if rig is not None:
         try:
-            min_arcmin, max_arcmin = field_of_view_arcmin_for_rig(rig)
+            fov_min_arcmin, fov_max_arcmin = field_of_view_arcmin_for_rig(rig)
         except ValueError:
             needed = None
         else:
             needed = set(
                 index_numbers_for_field_of_view(
-                    min_arcmin,
-                    max_arcmin,
+                    fov_min_arcmin,
+                    fov_max_arcmin,
                     catalog=catalog,
                     margin_scales=DEFAULT_RIG_MARGIN_SCALES,
                 )
             )
+    elif min_arcmin is not None and max_arcmin is not None:
+        needed = set(index_numbers_for_field_of_view(min_arcmin, max_arcmin, catalog=catalog))
 
     statuses: list[IndexFileStatus] = []
     for scale_number in sorted(spec.scale_numbers):
@@ -318,7 +333,7 @@ def list_index_files(
                 "installed": len(installed_sizes) == len(filenames),
                 "installedFileCount": len(installed_sizes),
                 "sizeBytes": sum(installed_sizes) if installed_sizes else None,
-                "neededForRig": (scale_number in needed) if needed is not None else None,
+                "needed": (scale_number in needed) if needed is not None else None,
             }
         )
     return statuses

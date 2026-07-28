@@ -542,10 +542,12 @@ async def test_plate_solve_until_precision_delegates_to_start_script(
 async def test_list_astrometry_index_files_delegates_without_a_rig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, rig_store.Rig | None]] = []
+    calls: list[tuple[str, rig_store.Rig | None, float | None, float | None]] = []
 
-    def fake_list_index_files(*, catalog="tycho2", directory=None, rig=None):
-        calls.append((catalog, rig))
+    def fake_list_index_files(
+        *, catalog="tycho2", directory=None, rig=None, min_arcmin=None, max_arcmin=None
+    ):
+        calls.append((catalog, rig, min_arcmin, max_arcmin))
         return [{"indexNumber": 7, "installed": True}]
 
     monkeypatch.setattr(astrometry_index, "list_index_files", fake_list_index_files)
@@ -553,7 +555,7 @@ async def test_list_astrometry_index_files_delegates_without_a_rig(
     result = await server.list_astrometry_index_files()
 
     assert result == [{"indexNumber": 7, "installed": True}]
-    assert calls == [("tycho2", None)]
+    assert calls == [("tycho2", None, None, None)]
 
 
 async def test_list_astrometry_index_files_passes_catalog_and_rig(
@@ -561,16 +563,45 @@ async def test_list_astrometry_index_files_passes_catalog_and_rig(
 ) -> None:
     rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
     monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
-    calls: list[tuple[str, rig_store.Rig | None]] = []
+    calls: list[tuple[str, rig_store.Rig | None, float | None, float | None]] = []
     monkeypatch.setattr(
         astrometry_index,
         "list_index_files",
-        lambda *, catalog="tycho2", directory=None, rig=None: calls.append((catalog, rig)) or [],
+        lambda *, catalog="tycho2", directory=None, rig=None, min_arcmin=None, max_arcmin=None: (
+            calls.append((catalog, rig, min_arcmin, max_arcmin)) or []
+        ),
     )
 
     await server.list_astrometry_index_files(catalog="2mass", rig_id="test-rig")
 
-    assert calls == [("2mass", rig)]
+    assert calls == [("2mass", rig, None, None)]
+
+
+async def test_list_astrometry_index_files_passes_explicit_arcmin_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, rig_store.Rig | None, float | None, float | None]] = []
+    monkeypatch.setattr(
+        astrometry_index,
+        "list_index_files",
+        lambda *, catalog="tycho2", directory=None, rig=None, min_arcmin=None, max_arcmin=None: (
+            calls.append((catalog, rig, min_arcmin, max_arcmin)) or []
+        ),
+    )
+
+    await server.list_astrometry_index_files(minArcmin=23.0, maxArcmin=29.0)
+
+    assert calls == [("tycho2", None, 23.0, 29.0)]
+
+
+async def test_list_astrometry_index_files_rejects_rig_and_arcmin_range_together() -> None:
+    with pytest.raises(ValueError, match="not both"):
+        await server.list_astrometry_index_files(rig_id="test-rig", minArcmin=23.0, maxArcmin=29.0)
+
+
+async def test_list_astrometry_index_files_rejects_partial_arcmin_range() -> None:
+    with pytest.raises(ValueError, match="pass both minArcmin and maxArcmin"):
+        await server.list_astrometry_index_files(minArcmin=23.0)
 
 
 async def test_download_astrometry_index_files_with_explicit_index_numbers(

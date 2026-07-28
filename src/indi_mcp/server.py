@@ -724,6 +724,8 @@ async def plate_solve_until_precision(
 async def list_astrometry_index_files(
     catalog: astrometry_index.Catalog = "tycho2",
     rig_id: str | None = None,
+    minArcmin: float | None = None,
+    maxArcmin: float | None = None,
 ) -> list[astrometry_index.IndexFileStatus]:
     """List every scale `catalog` publishes and whether it's installed under
     `INDI_MCP_ASTROMETRY_INDEX_DIR` (INDIMCP-77) — see `docs/PlateSolve.md`.
@@ -731,16 +733,34 @@ async def list_astrometry_index_files(
     `catalog` is `"tycho2"` (wide fields, 22 arcmin-33deg) or `"2mass"` (the full 2-2000
     arcmin range) — the same two choices Ekos's own index-file downloader offers.
 
-    If `rig_id` is given, each entry's `neededForRig` flags whether that scale's coverage
-    (padded by `astrometry_index.DEFAULT_RIG_MARGIN_SCALES` extra scales on each side, since
-    a rig's computed field of view is only ever an estimate) actually overlaps the rig's own
-    configured field of view (its `telescope` component's `focalLengthMm` and `camera`
-    component's `pixelSizeMicron`/`pixelsX`/`pixelsY`) — `None` throughout if `rig_id` is
-    omitted, or if the rig doesn't have enough optics configured to compute a field of view
-    from.
+    Pass **at most one** of `rig_id` or `minArcmin`/`maxArcmin` together to also get a
+    `needed` flag per entry (`None` throughout otherwise) — this is also how to preview which
+    files a field of view would need *without downloading anything*: pass the range (or a
+    rig) here, then filter the result for `needed: true`; nothing is written to disk or
+    fetched over the network by this tool regardless. `rig_id` computes the field of view
+    from that rig's own configured optics (its `telescope` component's `focalLengthMm` and
+    `camera` component's `pixelSizeMicron`/`pixelsX`/`pixelsY`) and pads it by
+    `astrometry_index.DEFAULT_RIG_MARGIN_SCALES` extra scales on each side, since a rig's
+    computed field of view is only ever an estimate; `minArcmin`/`maxArcmin` given directly is
+    used exactly as given, no padding — for a caller who already knows precisely what range
+    they want, e.g. previewing coverage for a setup with no saved rig at all. `needed` is
+    `None` throughout if neither is given, or if `rig_id` is given but that rig doesn't have
+    enough optics configured to compute a field of view from. Raises `ValueError` if both
+    `rig_id` and an arcmin range are given, or if only one of `minArcmin`/`maxArcmin` is
+    given.
     """
+    if rig_id is not None and (minArcmin is not None or maxArcmin is not None):
+        raise ValueError("pass rig_id or minArcmin/maxArcmin, not both")
+    if (minArcmin is None) != (maxArcmin is None):
+        raise ValueError("pass both minArcmin and maxArcmin together, not just one")
     rig = rig_store.get_rig(rig_id) if rig_id is not None else None
-    return await asyncio.to_thread(astrometry_index.list_index_files, catalog=catalog, rig=rig)
+    return await asyncio.to_thread(
+        astrometry_index.list_index_files,
+        catalog=catalog,
+        rig=rig,
+        min_arcmin=minArcmin,
+        max_arcmin=maxArcmin,
+    )
 
 
 @mcp.tool()
@@ -761,7 +781,7 @@ async def download_astrometry_index_files(
     `minArcmin`/`maxArcmin` together (every scale covering that exact field-of-view range),
     or `rig_id` (computes `minArcmin`/`maxArcmin` from that rig's own configured optics, then
     pads by `astrometry_index.DEFAULT_RIG_MARGIN_SCALES` extra scales on each side — the same
-    way `list_astrometry_index_files`'s `neededForRig` does, and for the same reason: a rig's
+    way `list_astrometry_index_files`'s `needed` does, and for the same reason: a rig's
     computed field of view is only ever an estimate, so this installs a little headroom
     rather than exactly one bracket that might just miss) — rejected if none or more than one
     is given, rather than silently prioritizing one, so a call that accidentally passes two

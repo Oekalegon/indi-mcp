@@ -147,7 +147,7 @@ def test_list_index_files_reports_installed_and_missing_for_tycho2(tmp_path: Pat
     assert by_number[8]["installed"] is False
     assert by_number[8]["sizeBytes"] is None
     assert by_number[8]["installedFileCount"] == 0
-    assert by_number[7]["neededForRig"] is None
+    assert by_number[7]["needed"] is None
 
 
 def test_list_index_files_reports_sharded_2mass_scales(tmp_path: Path) -> None:
@@ -183,17 +183,46 @@ def test_list_index_files_flags_needed_for_rig_with_margin(tmp_path: Path) -> No
     )
     by_number = {s["indexNumber"]: s for s in statuses}
     for index_number, status in by_number.items():
-        assert status["neededForRig"] == (index_number in expected_needed)
+        assert status["needed"] == (index_number in expected_needed)
 
 
-def test_list_index_files_neededForRig_is_none_when_rig_has_no_optics(tmp_path: Path) -> None:
+def test_list_index_files_needed_is_none_when_rig_has_no_optics(tmp_path: Path) -> None:
     rig = rig_store.Rig(
         id="test-rig", name="Test rig", components=[rig_store.Component(role="mount", id="m-1")]
     )
 
     statuses = astrometry_index.list_index_files(directory=tmp_path, rig=rig)
 
-    assert all(status["neededForRig"] is None for status in statuses)
+    assert all(status["needed"] is None for status in statuses)
+
+
+def test_list_index_files_flags_needed_for_explicit_arcmin_range_no_margin(
+    tmp_path: Path,
+) -> None:
+    statuses = astrometry_index.list_index_files(
+        catalog="tycho2", directory=tmp_path, min_arcmin=45.0, max_arcmin=50.0
+    )
+
+    by_number = {s["indexNumber"]: s for s in statuses}
+    # no rig/margin involved -- exactly the overlapping bracket, index_numbers_for_field_of_view's
+    # own default (margin_scales=0)
+    assert by_number[9]["needed"] is True
+    assert by_number[8]["needed"] is False
+    assert by_number[10]["needed"] is False
+
+
+def test_list_index_files_rejects_rig_and_arcmin_range_together(tmp_path: Path) -> None:
+    rig = _rig_with_optics()
+
+    with pytest.raises(ValueError, match="not both"):
+        astrometry_index.list_index_files(
+            directory=tmp_path, rig=rig, min_arcmin=45.0, max_arcmin=50.0
+        )
+
+
+def test_list_index_files_rejects_partial_arcmin_range(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="both min_arcmin and max_arcmin"):
+        astrometry_index.list_index_files(directory=tmp_path, min_arcmin=45.0)
 
 
 def test_ensure_astrometry_config_writes_add_path_and_autoindex(tmp_path: Path) -> None:

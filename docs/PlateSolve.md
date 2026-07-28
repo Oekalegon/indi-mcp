@@ -54,18 +54,24 @@ setup cost, not something indi-mcp can do without (see [Deployment.md](Deploymen
 Checking what's installed and downloading what's missing is `astrometry_index.py`'s job,
 exposed as two MCP tools:
 
-- **`list_astrometry_index_files(catalog="tycho2", rig_id=None)`** — every scale `catalog`
-  publishes and whether it's installed under `INDI_MCP_ASTROMETRY_INDEX_DIR`. Pass `rig_id`
-  to also get a `neededForRig` flag per entry, computed from that rig's own configured
-  optics (`telescope.focalLengthMm` + `camera.pixelSizeMicron`/`pixelsX`/`pixelsY` — the
-  same numbers `plate_solve`'s own scale hint already uses), padded by
-  `DEFAULT_RIG_MARGIN_SCALES` extra scales on each side (see below) — so "missing but
-  irrelevant to this rig" can be told apart from "missing and actually needed."
+- **`list_astrometry_index_files(catalog="tycho2", rig_id=None, minArcmin=None,
+  maxArcmin=None)`** — every scale `catalog` publishes and whether it's installed under
+  `INDI_MCP_ASTROMETRY_INDEX_DIR`. Pass **at most one** of `rig_id` or `minArcmin`/
+  `maxArcmin` together to also get a `needed` flag per entry, computed either from that
+  rig's own configured optics (`telescope.focalLengthMm` + `camera.pixelSizeMicron`/
+  `pixelsX`/`pixelsY` — the same numbers `plate_solve`'s own scale hint already uses), padded
+  by `DEFAULT_RIG_MARGIN_SCALES` extra scales on each side (see below), or from an explicit
+  field-of-view range given directly, no padding — so "missing but irrelevant to this field
+  of view" can be told apart from "missing and actually needed." This doubles as a way to
+  preview which files a field of view (or rig) would need *without downloading anything*:
+  call it with `minArcmin`/`maxArcmin` or `rig_id` and filter the result for `needed: true`
+  — nothing is written to disk or fetched over the network by this tool regardless of what's
+  passed.
 - **`download_astrometry_index_files(catalog="tycho2", indexNumbers=None, minArcmin=None,
   maxArcmin=None, rig_id=None)`** — downloads whichever aren't already installed. Pass
   exactly one selector: explicit scale numbers, an explicit field-of-view range, or a
   `rig_id` (computes the range from its optics, same as `list_astrometry_index_files`'s
-  `neededForRig`, margin included). Streamed to disk in chunks (never buffered whole in
+  `needed`, margin included). Streamed to disk in chunks (never buffered whole in
   memory — files run up to ~165 MB) to a `.part` temp name, renamed only once complete, so
   an interrupted download is never mistaken for a valid index the next time it's checked;
   serialized per destination file against a second caller racing the same missing one (e.g.
