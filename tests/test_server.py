@@ -642,8 +642,18 @@ async def test_download_astrometry_index_files_with_rig_id_computes_the_range(
 
 
 async def test_download_astrometry_index_files_requires_one_selector() -> None:
-    with pytest.raises(ValueError, match="pass indexNumbers, rig_id"):
+    with pytest.raises(ValueError, match="pass exactly one of"):
         await server.download_astrometry_index_files()
+
+
+async def test_download_astrometry_index_files_rejects_more_than_one_selector() -> None:
+    with pytest.raises(ValueError, match="pass exactly one of"):
+        await server.download_astrometry_index_files(indexNumbers=[7], rig_id="test-rig")
+
+
+async def test_download_astrometry_index_files_rejects_partial_arcmin_range() -> None:
+    with pytest.raises(ValueError, match="pass both minArcmin and maxArcmin"):
+        await server.download_astrometry_index_files(minArcmin=23.0)
 
 
 async def test_plate_solve_uploaded_frame_decodes_base64_and_delegates(

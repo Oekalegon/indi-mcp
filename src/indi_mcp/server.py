@@ -747,19 +747,34 @@ async def download_astrometry_index_files(
     """Download whichever astrometry.net 4100-series index files aren't already installed
     under `INDI_MCP_ASTROMETRY_INDEX_DIR` (INDIMCP-77) — see `docs/PlateSolve.md`.
 
-    Pass exactly one of: `indexNumbers` (explicit index numbers, 7-19), `minArcmin`/
+    Pass **exactly one** of: `indexNumbers` (explicit index numbers, 7-19), `minArcmin`/
     `maxArcmin` together (every index covering that field-of-view range), or `rig_id`
     (computes `minArcmin`/`maxArcmin` from that rig's own configured optics, the same way
-    `list_astrometry_index_files`'s `neededForRig` does). Returns the index numbers actually
-    downloaded — already-installed ones are left alone.
+    `list_astrometry_index_files`'s `neededForRig` does) — rejected if none or more than one
+    is given, rather than silently prioritizing one, so a call that accidentally passes two
+    (e.g. `rig_id` alongside explicit `indexNumbers`) fails loudly instead of quietly
+    ignoring one of them. Returns the index numbers actually downloaded — already-installed
+    ones are left alone.
     """
+    arcmin_range_given = minArcmin is not None or maxArcmin is not None
+    selectors_given = sum([indexNumbers is not None, rig_id is not None, arcmin_range_given])
+    if selectors_given != 1:
+        raise ValueError(
+            "pass exactly one of indexNumbers, rig_id, or both minArcmin and maxArcmin"
+        )
+    if arcmin_range_given and (minArcmin is None or maxArcmin is None):
+        raise ValueError("pass both minArcmin and maxArcmin together, not just one")
+
     if indexNumbers is not None:
         return await astrometry_index.download_index_files(indexNumbers)
     if rig_id is not None:
         rig = rig_store.get_rig(rig_id)
         minArcmin, maxArcmin = astrometry_index.field_of_view_arcmin_for_rig(rig)
-    elif minArcmin is None or maxArcmin is None:
-        raise ValueError("pass indexNumbers, rig_id, or both minArcmin and maxArcmin")
+    # Reached only when exactly one selector was given (checked above) and it wasn't
+    # indexNumbers -- so either rig_id just resolved both above, or arcmin_range_given's own
+    # check already confirmed neither is None. Asserted here purely for the type checker.
+    assert minArcmin is not None
+    assert maxArcmin is not None
     index_numbers = astrometry_index.index_numbers_for_field_of_view(minArcmin, maxArcmin)
     if not index_numbers:
         raise ValueError(f"no known 4100-series index covers {minArcmin}-{maxArcmin} arcmin")
