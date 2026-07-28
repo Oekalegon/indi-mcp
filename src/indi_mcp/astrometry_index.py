@@ -47,7 +47,7 @@ INDEX_DIR_ENV = "INDI_MCP_ASTROMETRY_INDEX_DIR"
 _DEFAULT_INDEX_DIR = Path("astrometry_index")
 
 INDEX_BASE_URL_ENV = "INDI_MCP_ASTROMETRY_INDEX_BASE_URL"
-_DEFAULT_INDEX_BASE_URL = "http://data.astrometry.net/4100"
+_DEFAULT_INDEX_BASE_URL = "https://data.astrometry.net/4100"
 
 _DOWNLOAD_TIMEOUT_SECONDS = 30.0
 """Timeout for the *connection* (and each individual read), not the whole download — a

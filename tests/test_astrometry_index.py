@@ -152,7 +152,7 @@ async def test_download_index_files_downloads_missing_ones(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fake_urlopen(url: str, timeout: float):
-        assert url == "http://data.astrometry.net/4100/index-4109.fits"
+        assert url == "https://data.astrometry.net/4100/index-4109.fits"
         return io.BytesIO(b"fake-index-data")
 
     monkeypatch.setattr(astrometry_index.urllib.request, "urlopen", fake_urlopen)
