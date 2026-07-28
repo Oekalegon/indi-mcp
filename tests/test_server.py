@@ -16,6 +16,7 @@ from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
 from indi_mcp import (
+    astrometry_index,
     event_log,
     event_streams,
     frame_store,
@@ -536,6 +537,169 @@ async def test_plate_solve_until_precision_delegates_to_start_script(
             None,
         )
     ]
+
+
+async def test_list_astrometry_index_files_delegates_without_a_rig(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, rig_store.Rig | None, float | None, float | None]] = []
+
+    def fake_list_index_files(
+        *, catalog="tycho2", directory=None, rig=None, min_arcmin=None, max_arcmin=None
+    ):
+        calls.append((catalog, rig, min_arcmin, max_arcmin))
+        return [{"indexNumber": 7, "installed": True}]
+
+    monkeypatch.setattr(astrometry_index, "list_index_files", fake_list_index_files)
+
+    result = await server.list_astrometry_index_files()
+
+    assert result == [{"indexNumber": 7, "installed": True}]
+    assert calls == [("tycho2", None, None, None)]
+
+
+async def test_list_astrometry_index_files_passes_catalog_and_rig(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+    calls: list[tuple[str, rig_store.Rig | None, float | None, float | None]] = []
+    monkeypatch.setattr(
+        astrometry_index,
+        "list_index_files",
+        lambda *, catalog="tycho2", directory=None, rig=None, min_arcmin=None, max_arcmin=None: (
+            calls.append((catalog, rig, min_arcmin, max_arcmin)) or []
+        ),
+    )
+
+    await server.list_astrometry_index_files(catalog="2mass", rig_id="test-rig")
+
+    assert calls == [("2mass", rig, None, None)]
+
+
+async def test_list_astrometry_index_files_passes_explicit_arcmin_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, rig_store.Rig | None, float | None, float | None]] = []
+    monkeypatch.setattr(
+        astrometry_index,
+        "list_index_files",
+        lambda *, catalog="tycho2", directory=None, rig=None, min_arcmin=None, max_arcmin=None: (
+            calls.append((catalog, rig, min_arcmin, max_arcmin)) or []
+        ),
+    )
+
+    await server.list_astrometry_index_files(minArcmin=23.0, maxArcmin=29.0)
+
+    assert calls == [("tycho2", None, 23.0, 29.0)]
+
+
+async def test_list_astrometry_index_files_rejects_rig_and_arcmin_range_together() -> None:
+    with pytest.raises(ValueError, match="not both"):
+        await server.list_astrometry_index_files(rig_id="test-rig", minArcmin=23.0, maxArcmin=29.0)
+
+
+async def test_list_astrometry_index_files_rejects_partial_arcmin_range() -> None:
+    with pytest.raises(ValueError, match="pass both minArcmin and maxArcmin"):
+        await server.list_astrometry_index_files(minArcmin=23.0)
+
+
+async def test_download_astrometry_index_files_with_explicit_index_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[int], str]] = []
+
+    async def fake_download(
+        index_numbers: list[int], *, catalog="tycho2", directory=None
+    ) -> list[int]:
+        calls.append((index_numbers, catalog))
+        return index_numbers
+
+    monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
+
+    result = await server.download_astrometry_index_files(indexNumbers=[7, 8], catalog="2mass")
+
+    assert result == [7, 8]
+    assert calls == [([7, 8], "2mass")]
+
+
+async def test_download_astrometry_index_files_with_explicit_arcmin_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[int]] = []
+
+    async def fake_download(
+        index_numbers: list[int], *, catalog="tycho2", directory=None
+    ) -> list[int]:
+        calls.append(index_numbers)
+        return index_numbers
+
+    monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
+
+    result = await server.download_astrometry_index_files(minArcmin=23.0, maxArcmin=29.0)
+
+    assert result == [7]
+    assert calls == [[7]]
+
+
+async def test_download_astrometry_index_files_with_rig_id_computes_the_range_with_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = rig_store.Rig(
+        id="test-rig",
+        name="Test rig",
+        components=[
+            rig_store.Component(role="telescope", id="scope-1", focalLengthMm=750.0),
+            rig_store.Component(
+                role="camera",
+                id="cam-1",
+                device="CCD Simulator",
+                pixelSizeMicron=3.76,
+                pixelsX=6248,
+                pixelsY=4176,
+            ),
+        ],
+    )
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+    calls: list[list[int]] = []
+
+    async def fake_download(
+        index_numbers: list[int], *, catalog="tycho2", directory=None
+    ) -> list[int]:
+        calls.append(index_numbers)
+        return index_numbers
+
+    monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
+
+    await server.download_astrometry_index_files(rig_id="test-rig")
+
+    min_arcmin, max_arcmin = astrometry_index.field_of_view_arcmin_for_rig(rig)
+    expected = astrometry_index.index_numbers_for_field_of_view(
+        min_arcmin, max_arcmin, margin_scales=astrometry_index.DEFAULT_RIG_MARGIN_SCALES
+    )
+    assert calls == [expected]
+    assert len(expected) > 1  # confirms the margin actually widened the exact bracket
+
+
+async def test_download_astrometry_index_files_requires_one_selector() -> None:
+    with pytest.raises(ValueError, match="pass exactly one of"):
+        await server.download_astrometry_index_files()
+
+
+async def test_download_astrometry_index_files_rejects_more_than_one_selector() -> None:
+    with pytest.raises(ValueError, match="pass exactly one of"):
+        await server.download_astrometry_index_files(indexNumbers=[7], rig_id="test-rig")
+
+
+async def test_download_astrometry_index_files_rejects_partial_arcmin_range() -> None:
+    with pytest.raises(ValueError, match="pass both minArcmin and maxArcmin"):
+        await server.download_astrometry_index_files(minArcmin=23.0)
+
+
+async def test_download_astrometry_index_files_rejects_a_range_no_scale_covers() -> None:
+    # tycho2 only publishes scales 7-19 (22 arcmin+) -- a narrower range matches nothing
+    with pytest.raises(ValueError, match="no known 'tycho2' scale covers"):
+        await server.download_astrometry_index_files(minArcmin=1.0, maxArcmin=2.0)
 
 
 async def test_plate_solve_uploaded_frame_decodes_base64_and_delegates(

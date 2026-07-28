@@ -17,6 +17,7 @@ from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import AnyUrl
 
 from indi_mcp import (
+    astrometry_index,
     event_log,
     event_streams,
     frame_store,
@@ -717,6 +718,105 @@ async def plate_solve_until_precision(
             "timeoutSeconds": timeoutSeconds,
         },
     )
+
+
+@mcp.tool()
+async def list_astrometry_index_files(
+    catalog: astrometry_index.Catalog = "tycho2",
+    rig_id: str | None = None,
+    minArcmin: float | None = None,
+    maxArcmin: float | None = None,
+) -> list[astrometry_index.IndexFileStatus]:
+    """List every scale `catalog` publishes and whether it's installed under
+    `INDI_MCP_ASTROMETRY_INDEX_DIR` (INDIMCP-77) — see `docs/PlateSolve.md`.
+
+    `catalog` is `"tycho2"` (wide fields, 22 arcmin-33deg) or `"2mass"` (the full 2-2000
+    arcmin range) — the same two choices Ekos's own index-file downloader offers.
+
+    Pass **at most one** of `rig_id` or `minArcmin`/`maxArcmin` together to also get a
+    `needed` flag per entry (`None` throughout otherwise) — this is also how to preview which
+    files a field of view would need *without downloading anything*: pass the range (or a
+    rig) here, then filter the result for `needed: true`; nothing is written to disk or
+    fetched over the network by this tool regardless. `rig_id` computes the field of view
+    from that rig's own configured optics (its `telescope` component's `focalLengthMm` and
+    `camera` component's `pixelSizeMicron`/`pixelsX`/`pixelsY`) and pads it by
+    `astrometry_index.DEFAULT_RIG_MARGIN_SCALES` extra scales on each side, since a rig's
+    computed field of view is only ever an estimate; `minArcmin`/`maxArcmin` given directly is
+    used exactly as given, no padding — for a caller who already knows precisely what range
+    they want, e.g. previewing coverage for a setup with no saved rig at all. `needed` is
+    `None` throughout if neither is given, or if `rig_id` is given but that rig doesn't have
+    enough optics configured to compute a field of view from. Raises `ValueError` if both
+    `rig_id` and an arcmin range are given, or if only one of `minArcmin`/`maxArcmin` is
+    given.
+    """
+    if rig_id is not None and (minArcmin is not None or maxArcmin is not None):
+        raise ValueError("pass rig_id or minArcmin/maxArcmin, not both")
+    if (minArcmin is None) != (maxArcmin is None):
+        raise ValueError("pass both minArcmin and maxArcmin together, not just one")
+    rig = rig_store.get_rig(rig_id) if rig_id is not None else None
+    return await asyncio.to_thread(
+        astrometry_index.list_index_files,
+        catalog=catalog,
+        rig=rig,
+        min_arcmin=minArcmin,
+        max_arcmin=maxArcmin,
+    )
+
+
+@mcp.tool()
+async def download_astrometry_index_files(
+    catalog: astrometry_index.Catalog = "tycho2",
+    indexNumbers: list[int] | None = None,
+    minArcmin: float | None = None,
+    maxArcmin: float | None = None,
+    rig_id: str | None = None,
+) -> list[int]:
+    """Download whichever `catalog` index files aren't already installed under
+    `INDI_MCP_ASTROMETRY_INDEX_DIR` (INDIMCP-77) — see `docs/PlateSolve.md`.
+
+    `catalog` is `"tycho2"` (wide fields, 22 arcmin-33deg) or `"2mass"` (the full 2-2000
+    arcmin range) — the same two choices Ekos's own index-file downloader offers.
+
+    Pass **exactly one** of: `indexNumbers` (explicit scale numbers `catalog` publishes),
+    `minArcmin`/`maxArcmin` together (every scale covering that exact field-of-view range),
+    or `rig_id` (computes `minArcmin`/`maxArcmin` from that rig's own configured optics, then
+    pads by `astrometry_index.DEFAULT_RIG_MARGIN_SCALES` extra scales on each side — the same
+    way `list_astrometry_index_files`'s `needed` does, and for the same reason: a rig's
+    computed field of view is only ever an estimate, so this installs a little headroom
+    rather than exactly one bracket that might just miss) — rejected if none or more than one
+    is given, rather than silently prioritizing one, so a call that accidentally passes two
+    (e.g. `rig_id` alongside explicit `indexNumbers`) fails loudly instead of quietly
+    ignoring one of them. Returns the scale numbers that had at least one file actually
+    downloaded — already-fully-installed ones are left alone.
+    """
+    arcmin_range_given = minArcmin is not None or maxArcmin is not None
+    selectors_given = sum([indexNumbers is not None, rig_id is not None, arcmin_range_given])
+    if selectors_given != 1:
+        raise ValueError(
+            "pass exactly one of indexNumbers, rig_id, or both minArcmin and maxArcmin"
+        )
+    if arcmin_range_given and (minArcmin is None or maxArcmin is None):
+        raise ValueError("pass both minArcmin and maxArcmin together, not just one")
+
+    if indexNumbers is not None:
+        return await astrometry_index.download_index_files(indexNumbers, catalog=catalog)
+
+    margin_scales = 0
+    if rig_id is not None:
+        rig = rig_store.get_rig(rig_id)
+        minArcmin, maxArcmin = astrometry_index.field_of_view_arcmin_for_rig(rig)
+        margin_scales = astrometry_index.DEFAULT_RIG_MARGIN_SCALES
+    # Reached only when exactly one selector was given (checked above) and it wasn't
+    # indexNumbers -- so either rig_id just resolved both above, or arcmin_range_given's own
+    # check already confirmed neither is None. Asserted here purely for the type checker.
+    assert minArcmin is not None
+    assert maxArcmin is not None
+    index_numbers = astrometry_index.index_numbers_for_field_of_view(
+        minArcmin, maxArcmin, catalog=catalog, margin_scales=margin_scales
+    )
+    if not index_numbers:
+        raise ValueError(f"no known {catalog!r} scale covers {minArcmin}-{maxArcmin} arcmin")
+    return await astrometry_index.download_index_files(index_numbers, catalog=catalog)
 
 
 @mcp.tool()

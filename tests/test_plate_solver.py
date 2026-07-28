@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from indi_mcp import db, frame_store, plate_solver
+from indi_mcp import astrometry_index, db, frame_store, plate_solver
 
 _FAKE_SOLVE_FIELD = """#!/usr/bin/env python3
 import json
@@ -191,6 +191,41 @@ async def test_solve_omits_hint_args_when_not_given(
     args = json.loads(args_file.read_text())
     assert "--ra" not in args
     assert "--scale-low" not in args
+
+
+async def test_solve_passes_config_pointing_at_the_managed_index_dir_when_set(
+    fake_solve_field: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args_file = tmp_path / "args.json"
+    monkeypatch.setenv("FAKE_SOLVE_FIELD_ARGS_FILE", str(args_file))
+    index_dir = tmp_path / "index"
+    monkeypatch.setenv(astrometry_index.INDEX_DIR_ENV, str(index_dir))
+    fits_path = tmp_path / "frame.fits"
+    fits_path.write_bytes(b"not-really-fits")
+
+    await plate_solver.solve(fits_path, timeout_seconds=5)
+
+    args = json.loads(args_file.read_text())
+    assert "--config" in args
+    config_path = Path(args[args.index("--config") + 1])
+    assert config_path == index_dir / ".indi-mcp-astrometry.cfg"
+    config_content = await asyncio.to_thread(config_path.read_text)
+    assert f"add_path {index_dir.resolve()}" in config_content
+
+
+async def test_solve_omits_config_when_index_dir_env_not_set(
+    fake_solve_field: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(astrometry_index.INDEX_DIR_ENV, raising=False)
+    args_file = tmp_path / "args.json"
+    monkeypatch.setenv("FAKE_SOLVE_FIELD_ARGS_FILE", str(args_file))
+    fits_path = tmp_path / "frame.fits"
+    fits_path.write_bytes(b"not-really-fits")
+
+    await plate_solver.solve(fits_path, timeout_seconds=5)
+
+    args = json.loads(args_file.read_text())
+    assert "--config" not in args
 
 
 async def test_solve_uploaded_frame_saves_solves_and_writes_wcs_headers(
