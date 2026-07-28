@@ -54,29 +54,51 @@ setup cost, not something indi-mcp can do without (see [Deployment.md](Deploymen
 Checking what's installed and downloading what's missing is `astrometry_index.py`'s job,
 exposed as two MCP tools:
 
-- **`list_astrometry_index_files(rig_id=None)`** — every known 4100-series index file
-  (`index-4107.fits` through `index-4119.fits`, covering 22 arcmin to 33 degrees of field
-  diameter) and whether it's installed under `INDI_MCP_ASTROMETRY_INDEX_DIR`. Pass `rig_id`
+- **`list_astrometry_index_files(catalog="tycho2", rig_id=None)`** — every scale `catalog`
+  publishes and whether it's installed under `INDI_MCP_ASTROMETRY_INDEX_DIR`. Pass `rig_id`
   to also get a `neededForRig` flag per entry, computed from that rig's own configured
   optics (`telescope.focalLengthMm` + `camera.pixelSizeMicron`/`pixelsX`/`pixelsY` — the
-  same numbers `plate_solve`'s own scale hint already uses) — so "missing but irrelevant to
-  this rig" can be told apart from "missing and actually needed."
-- **`download_astrometry_index_files(indexNumbers=None, minArcmin=None, maxArcmin=None,
-  rig_id=None)`** — downloads whichever aren't already installed. Pass exactly one
-  selector: explicit index numbers, an explicit field-of-view range, or a `rig_id` (computes
-  the range from its optics, same as `list_astrometry_index_files`'s `neededForRig`).
-  Streamed to disk in chunks (never buffered whole in memory — files run up to ~165 MB) to a
-  `.part` temp name, renamed only once complete, so an interrupted download is never
-  mistaken for a valid index the next time it's checked.
+  same numbers `plate_solve`'s own scale hint already uses), padded by
+  `DEFAULT_RIG_MARGIN_SCALES` extra scales on each side (see below) — so "missing but
+  irrelevant to this rig" can be told apart from "missing and actually needed."
+- **`download_astrometry_index_files(catalog="tycho2", indexNumbers=None, minArcmin=None,
+  maxArcmin=None, rig_id=None)`** — downloads whichever aren't already installed. Pass
+  exactly one selector: explicit scale numbers, an explicit field-of-view range, or a
+  `rig_id` (computes the range from its optics, same as `list_astrometry_index_files`'s
+  `neededForRig`, margin included). Streamed to disk in chunks (never buffered whole in
+  memory — files run up to ~165 MB) to a `.part` temp name, renamed only once complete, so
+  an interrupted download is never mistaken for a valid index the next time it's checked;
+  serialized per destination file against a second caller racing the same missing one (e.g.
+  a client retrying a timed-out download while the first attempt is still in flight).
 
-**Deliberately scoped to the 4100-series (Tycho-2) only.** That series is a single file per
-scale, hosted directly under `data.astrometry.net/4100/` with a simple, predictable URL —
-and it happens to cover the field-of-view range the overwhelming majority of amateur setups
-actually need. The narrower-field 5200-series is sharded into many per-healpix files and
-hosted on a different server (`portal.nersc.gov`); a setup narrow enough to need it (very
-long focal length + small pixels, sub-22-arcmin fields) still works with `plate_solve`, it
-just needs those index files installed by some other means for now — a real, known
-limitation, not an oversight, and worth revisiting if it turns out to matter in practice.
+**Two catalogs: `"tycho2"` (the 4100-series) and `"2mass"` (the 4200-series)** — the same
+two choices Ekos's own index-file downloader has historically offered. Both verified
+directly against `data.astrometry.net`'s real directory listings, not assumed:
+
+- `tycho2` only publishes scales 7-19 (22 arcmin-33deg field diameter), one file per scale,
+  hosted directly under `data.astrometry.net/4100/`.
+- `2mass` publishes the full 0-19 range (2 arcmin-33deg). Its narrower scales are sharded
+  into many per-healpix files — 48 files for scales 0-4, 12 for scales 5-7 — hosted under
+  `data.astrometry.net/4200/`; scales 8-19 are single files, same shape as `tycho2`.
+  `list_index_files`/`download_index_files` treat a whole scale as one unit regardless of
+  sharding: `installed` is only `True` once every shard is present, and downloading a scale
+  fetches every missing shard.
+
+A third, narrower-field catalog exists at astrometry.net (a Gaia-based 5200-series, "LITE"/
+"HEAVY") but is hosted separately at `portal.nersc.gov`, which doesn't currently respond at
+all (verified directly, not just from this server) — left out until that's reachable again
+to confirm its real file layout, rather than guessing at a healpix-sharding scheme for a
+feature that downloads real files onto a real Pi. Not a design preference; a fact about the
+current state of that host, worth revisiting if it comes back.
+
+**`DEFAULT_RIG_MARGIN_SCALES` (currently `1`)**: a rig's *computed* field of view is only
+ever an estimate — binning, a slightly-off `focalLengthMm`/`pixelSizeMicron`, and a
+rectangular sensor's diagonal vs. its width/height all shift the real value around — so
+deriving index scales from a rig (`rig_id` on either tool) installs that many extra scales
+immediately below and above the exact overlapping bracket, not just the one bracket that
+might just barely miss. `index_numbers_for_field_of_view`'s own `margin_scales` parameter
+defaults to `0` for a caller who already knows precisely what range they want
+(`minArcmin`/`maxArcmin` given directly); only the rig-derived path pads.
 
 `solve()` only *uses* whatever ends up in the configured directory: if
 `INDI_MCP_ASTROMETRY_INDEX_DIR` is set, it points `solve-field` there via a small generated

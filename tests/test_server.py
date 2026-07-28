@@ -542,10 +542,10 @@ async def test_plate_solve_until_precision_delegates_to_start_script(
 async def test_list_astrometry_index_files_delegates_without_a_rig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[rig_store.Rig | None] = []
+    calls: list[tuple[str, rig_store.Rig | None]] = []
 
-    def fake_list_index_files(*, directory=None, rig=None):
-        calls.append(rig)
+    def fake_list_index_files(*, catalog="tycho2", directory=None, rig=None):
+        calls.append((catalog, rig))
         return [{"indexNumber": 7, "installed": True}]
 
     monkeypatch.setattr(astrometry_index, "list_index_files", fake_list_index_files)
@@ -553,41 +553,43 @@ async def test_list_astrometry_index_files_delegates_without_a_rig(
     result = await server.list_astrometry_index_files()
 
     assert result == [{"indexNumber": 7, "installed": True}]
-    assert calls == [None]
+    assert calls == [("tycho2", None)]
 
 
-async def test_list_astrometry_index_files_resolves_and_passes_the_rig(
+async def test_list_astrometry_index_files_passes_catalog_and_rig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
     monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
-    calls: list[rig_store.Rig | None] = []
+    calls: list[tuple[str, rig_store.Rig | None]] = []
     monkeypatch.setattr(
         astrometry_index,
         "list_index_files",
-        lambda *, directory=None, rig=None: calls.append(rig) or [],
+        lambda *, catalog="tycho2", directory=None, rig=None: calls.append((catalog, rig)) or [],
     )
 
-    await server.list_astrometry_index_files(rig_id="test-rig")
+    await server.list_astrometry_index_files(catalog="2mass", rig_id="test-rig")
 
-    assert calls == [rig]
+    assert calls == [("2mass", rig)]
 
 
 async def test_download_astrometry_index_files_with_explicit_index_numbers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[list[int]] = []
+    calls: list[tuple[list[int], str]] = []
 
-    async def fake_download(index_numbers: list[int], *, directory=None) -> list[int]:
-        calls.append(index_numbers)
+    async def fake_download(
+        index_numbers: list[int], *, catalog="tycho2", directory=None
+    ) -> list[int]:
+        calls.append((index_numbers, catalog))
         return index_numbers
 
     monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
 
-    result = await server.download_astrometry_index_files(indexNumbers=[7, 8])
+    result = await server.download_astrometry_index_files(indexNumbers=[7, 8], catalog="2mass")
 
     assert result == [7, 8]
-    assert calls == [[7, 8]]
+    assert calls == [([7, 8], "2mass")]
 
 
 async def test_download_astrometry_index_files_with_explicit_arcmin_range(
@@ -595,7 +597,9 @@ async def test_download_astrometry_index_files_with_explicit_arcmin_range(
 ) -> None:
     calls: list[list[int]] = []
 
-    async def fake_download(index_numbers: list[int], *, directory=None) -> list[int]:
+    async def fake_download(
+        index_numbers: list[int], *, catalog="tycho2", directory=None
+    ) -> list[int]:
         calls.append(index_numbers)
         return index_numbers
 
@@ -607,7 +611,7 @@ async def test_download_astrometry_index_files_with_explicit_arcmin_range(
     assert calls == [[7]]
 
 
-async def test_download_astrometry_index_files_with_rig_id_computes_the_range(
+async def test_download_astrometry_index_files_with_rig_id_computes_the_range_with_margin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(
@@ -628,7 +632,9 @@ async def test_download_astrometry_index_files_with_rig_id_computes_the_range(
     monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
     calls: list[list[int]] = []
 
-    async def fake_download(index_numbers: list[int], *, directory=None) -> list[int]:
+    async def fake_download(
+        index_numbers: list[int], *, catalog="tycho2", directory=None
+    ) -> list[int]:
         calls.append(index_numbers)
         return index_numbers
 
@@ -637,8 +643,11 @@ async def test_download_astrometry_index_files_with_rig_id_computes_the_range(
     await server.download_astrometry_index_files(rig_id="test-rig")
 
     min_arcmin, max_arcmin = astrometry_index.field_of_view_arcmin_for_rig(rig)
-    expected = astrometry_index.index_numbers_for_field_of_view(min_arcmin, max_arcmin)
+    expected = astrometry_index.index_numbers_for_field_of_view(
+        min_arcmin, max_arcmin, margin_scales=astrometry_index.DEFAULT_RIG_MARGIN_SCALES
+    )
     assert calls == [expected]
+    assert len(expected) > 1  # confirms the margin actually widened the exact bracket
 
 
 async def test_download_astrometry_index_files_requires_one_selector() -> None:

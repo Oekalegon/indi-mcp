@@ -81,37 +81,106 @@ def test_field_of_view_arcmin_for_rig_raises_without_camera_pixel_geometry() -> 
         (23.0, 29.0, [7]),  # fully inside index 7's own range, no boundary touch
         (20.0, 65.0, [7, 8, 9, 10]),
         (1005.0, 1395.0, [18]),  # fully inside index 18's own range
-        (0.5, 1.0, []),
+        (500.0, 501.0, [16]),  # fully inside index 16's own range
     ],
 )
-def test_index_numbers_for_field_of_view_selects_overlapping_ranges(
+def test_index_numbers_for_field_of_view_selects_overlapping_ranges_for_tycho2(
     min_arcmin: float, max_arcmin: float, expected: list[int]
 ) -> None:
-    assert astrometry_index.index_numbers_for_field_of_view(min_arcmin, max_arcmin) == expected
+    assert (
+        astrometry_index.index_numbers_for_field_of_view(min_arcmin, max_arcmin, catalog="tycho2")
+        == expected
+    )
 
 
-def test_list_index_files_reports_installed_and_missing(tmp_path: Path) -> None:
+def test_index_numbers_for_field_of_view_finds_nothing_below_tycho2s_range() -> None:
+    # tycho2 only publishes scales 7-19 (22 arcmin+) -- a narrower field has no match at all
+    assert astrometry_index.index_numbers_for_field_of_view(0.5, 1.0, catalog="tycho2") == []
+
+
+def test_index_numbers_for_field_of_view_covers_narrow_fields_for_2mass() -> None:
+    # 2mass publishes the full 0-19 range, unlike tycho2
+    assert astrometry_index.index_numbers_for_field_of_view(2.1, 2.7, catalog="2mass") == [0]
+
+
+def test_index_numbers_for_field_of_view_defaults_to_tycho2() -> None:
+    assert astrometry_index.index_numbers_for_field_of_view(23.0, 29.0) == [7]
+
+
+@pytest.mark.parametrize(
+    "margin_scales,expected",
+    [
+        (0, [9]),
+        (1, [8, 9, 10]),
+        (2, [7, 8, 9, 10, 11]),
+    ],
+)
+def test_index_numbers_for_field_of_view_margin_extends_on_both_sides(
+    margin_scales: int, expected: list[int]
+) -> None:
+    result = astrometry_index.index_numbers_for_field_of_view(
+        45.0, 50.0, catalog="tycho2", margin_scales=margin_scales
+    )
+    assert result == expected
+
+
+def test_index_numbers_for_field_of_view_margin_clamps_at_catalogs_own_edges() -> None:
+    # tycho2's lowest published scale is 7 -- a large margin must not go below that
+    result = astrometry_index.index_numbers_for_field_of_view(
+        23.0, 29.0, catalog="tycho2", margin_scales=5
+    )
+    assert result == [7, 8, 9, 10, 11, 12]
+
+
+def test_list_index_files_reports_installed_and_missing_for_tycho2(tmp_path: Path) -> None:
     (tmp_path / "index-4107.fits").write_bytes(b"x" * 100)
 
-    statuses = astrometry_index.list_index_files(directory=tmp_path)
+    statuses = astrometry_index.list_index_files(catalog="tycho2", directory=tmp_path)
 
     by_number = {s["indexNumber"]: s for s in statuses}
     assert set(by_number) == set(range(7, 20))
+    assert by_number[7]["catalog"] == "tycho2"
     assert by_number[7]["installed"] is True
     assert by_number[7]["sizeBytes"] == 100
-    assert by_number[7]["filename"] == "index-4107.fits"
+    assert by_number[7]["filenames"] == ["index-4107.fits"]
+    assert by_number[7]["installedFileCount"] == 1
     assert by_number[8]["installed"] is False
     assert by_number[8]["sizeBytes"] is None
+    assert by_number[8]["installedFileCount"] == 0
     assert by_number[7]["neededForRig"] is None
 
 
-def test_list_index_files_flags_needed_for_rig(tmp_path: Path) -> None:
+def test_list_index_files_reports_sharded_2mass_scales(tmp_path: Path) -> None:
+    # scale 0 has 48 shards; install just one of them
+    (tmp_path / "index-4200-00.fits").write_bytes(b"x" * 50)
+
+    statuses = astrometry_index.list_index_files(catalog="2mass", directory=tmp_path)
+
+    by_number = {s["indexNumber"]: s for s in statuses}
+    assert set(by_number) == set(range(0, 20))
+    assert len(by_number[0]["filenames"]) == 48
+    assert by_number[0]["installedFileCount"] == 1
+    assert by_number[0]["installed"] is False  # only 1 of 48 shards present
+    assert by_number[0]["sizeBytes"] == 50
+    # a single-file scale (8-19 aren't sharded for 2mass)
+    assert len(by_number[8]["filenames"]) == 1
+    assert by_number[8]["filenames"] == ["index-4208.fits"]
+
+
+def test_list_index_files_flags_needed_for_rig_with_margin(tmp_path: Path) -> None:
     rig = _rig_with_optics(focal_length_mm=750.0, pixel_size_micron=3.76)
 
-    statuses = astrometry_index.list_index_files(directory=tmp_path, rig=rig)
+    statuses = astrometry_index.list_index_files(catalog="tycho2", directory=tmp_path, rig=rig)
 
     min_arcmin, max_arcmin = astrometry_index.field_of_view_arcmin_for_rig(rig)
-    expected_needed = set(astrometry_index.index_numbers_for_field_of_view(min_arcmin, max_arcmin))
+    expected_needed = set(
+        astrometry_index.index_numbers_for_field_of_view(
+            min_arcmin,
+            max_arcmin,
+            catalog="tycho2",
+            margin_scales=astrometry_index.DEFAULT_RIG_MARGIN_SCALES,
+        )
+    )
     by_number = {s["indexNumber"]: s for s in statuses}
     for index_number, status in by_number.items():
         assert status["neededForRig"] == (index_number in expected_needed)
@@ -165,6 +234,28 @@ async def test_download_index_files_downloads_missing_ones(
     assert not (tmp_path / "index-4109.fits.part").exists()
 
 
+async def test_download_index_files_downloads_every_shard_of_a_sharded_2mass_scale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    urls_requested: list[str] = []
+
+    def fake_urlopen(url: str, timeout: float):
+        urls_requested.append(url)
+        return io.BytesIO(b"fake-shard-data")
+
+    monkeypatch.setattr(astrometry_index.urllib.request, "urlopen", fake_urlopen)
+
+    # scale 6 has 12 shards for 2mass
+    downloaded = await astrometry_index.download_index_files(
+        [6], catalog="2mass", directory=tmp_path
+    )
+
+    assert downloaded == [6]
+    assert len(urls_requested) == 12
+    for shard in range(12):
+        assert (tmp_path / f"index-4206-{shard:02d}.fits").read_bytes() == b"fake-shard-data"
+
+
 async def test_download_index_files_serializes_concurrent_requests_for_the_same_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -191,9 +282,9 @@ async def test_download_index_files_serializes_concurrent_requests_for_the_same_
     assert (tmp_path / "index-4109.fits").read_bytes() == b"fake-index-data"
 
 
-async def test_download_index_files_rejects_unknown_index_numbers(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="unknown 4100-series index number"):
-        await astrometry_index.download_index_files([3], directory=tmp_path)
+async def test_download_index_files_rejects_unpublished_scale_numbers(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="doesn't publish scale"):
+        await astrometry_index.download_index_files([3], catalog="tycho2", directory=tmp_path)
 
 
 async def test_download_index_files_cleans_up_part_file_on_failure(
