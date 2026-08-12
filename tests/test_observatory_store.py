@@ -344,6 +344,4 @@ def test_draft_observatory_uses_first_device_and_notes_others_on_multiple_fixes(
     )
 
     assert draft["sourceDevice"] == "Telescope Simulator"
-    assert any(
-        "Telescope Simulator" in note and "GPS Simulator" in note for note in draft["notes"]
-    )
+    assert any("Telescope Simulator" in note and "GPS Simulator" in note for note in draft["notes"])
