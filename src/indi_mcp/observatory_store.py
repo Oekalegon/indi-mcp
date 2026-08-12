@@ -14,12 +14,18 @@ mounted, a location describes *where*, and the same rig can be used from
 more than one site. This module mirrors `rig_store`'s loading/saving
 discipline (`yaml.safe_load`, skip-and-log invalid files, exclusive-create
 unless overwriting), but has no `suggest_location`/`check_location`
-equivalent — there is no INDI-visible signal to cross-check a location
-against, so it is always selected explicitly by `id`.
+equivalent — a saved location is always selected explicitly by `id`, never
+auto-detected. It does have a `draft_observatory` (mirroring `rig_store`'s
+`draft_rig`): INDI's `GEOGRAPHIC_COORD` standard property (LAT/LONG/ELEV) is
+exposed by GPS drivers and often by mount drivers too, so a connected
+device's live reading can pre-fill a draft the operator reviews and saves
+via `save_observatory` — advisory only, never auto-selected/authoritative,
+same as `draft_rig`.
 """
 
 import logging
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TypedDict
 
@@ -29,8 +35,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DraftLocationDeviceInfo",
     "Observatory",
+    "ObservatoryDraft",
     "ObservatorySummary",
+    "draft_observatory",
     "get_observatory",
     "list_observatories",
     "load_observatories",
@@ -70,6 +79,42 @@ class ObservatorySummary(TypedDict):
 
     id: str
     name: str
+
+
+class DraftLocationDeviceInfo(TypedDict):
+    """One connected INDI device's live `GEOGRAPHIC_COORD` reading, as gathered by the caller
+    for `draft_observatory`.
+
+    `draft_observatory` itself never talks to INDI — the caller
+    (`server.draft_observatory`) resolves property values via the messaging
+    layer, so this module stays testable with plain data (the same split
+    `rig_store.DraftDeviceInfo` uses for `draft_rig`).
+    """
+
+    name: str
+    geographicCoord: dict[str, str] | None
+    state: str | None
+
+
+class ObservatoryDraft(TypedDict):
+    """A pre-filled observatory location skeleton for the operator to review and save.
+
+    Never a finalized, saved `Observatory`: `id`/`name` have no INDI
+    equivalent and are left `None` for the operator to fill in, same as
+    `draft_rig` leaves `apertureMm`/`focalLengthMm` for the operator.
+    `notes` calls out anything that needs a second look before saving —
+    most importantly a GPS fix that's missing, not yet valid, or reporting
+    the common all-zero "no fix yet" default.
+    """
+
+    kind: str
+    id: str | None
+    name: str | None
+    latitudeDeg: float | None
+    longitudeDeg: float | None
+    elevationMeters: float | None
+    sourceDevice: str | None
+    notes: list[str]
 
 
 _observatories: dict[str, Observatory] = {}
@@ -179,3 +224,93 @@ def save_observatory(
     logger.info("Saved observatory location %r to %s", observatory.id, path)
     load_observatories(directory)
     return get_observatory(observatory.id)
+
+
+def draft_observatory(devices: Iterable[DraftLocationDeviceInfo]) -> ObservatoryDraft:
+    """Pre-fill a draft observatory location from a connected device's live `GEOGRAPHIC_COORD`.
+
+    INDI's `GEOGRAPHIC_COORD` standard property (LAT/LONG/ELEV) is exposed
+    by GPS drivers and often by mount drivers too, so it's read the same way
+    `rig_store.draft_rig` reads `CCD_INFO`/`FILTER_NAME` from whichever
+    connected devices report it. `LONG` is converted from INDI's 0-360
+    East-positive convention to this schema's -180..180
+    (`Observatory.longitudeDeg`, astropy's `EarthLocation.from_geodetic`
+    convention).
+
+    This is always advisory, never authoritative — like `draft_rig`'s
+    output, the result is a starting point for the operator to review and
+    save themselves via `save_observatory`, never auto-selected. `id`/`name`
+    have no INDI equivalent and are left `None`. `notes` flags anything that
+    needs a second look: no connected device currently reports a fix, more
+    than one disagrees (the first, in device order, is used), the reading is
+    the common all-zero "no fix yet" default, or the property's vector
+    `state` isn't `"Ok"` (still settling, or in error).
+    """
+    candidates: list[tuple[str, float, float, float]] = []
+    notes: list[str] = []
+    for device in devices:
+        coord = device["geographicCoord"]
+        if coord is None:
+            continue
+        lat = _parse_coord(coord.get("LAT"))
+        lon = _parse_coord(coord.get("LONG"))
+        elev = _parse_coord(coord.get("ELEV"))
+        if lat is None or lon is None or elev is None:
+            continue
+        if lon > 180:
+            lon -= 360
+        candidates.append((device["name"], lat, lon, elev))
+        if device["state"] not in (None, "Ok"):
+            notes.append(
+                f"{device['name']}'s GEOGRAPHIC_COORD state is {device['state']!r}, not "
+                "'Ok' — the reading may not be a valid fix yet."
+            )
+        if lat == 0 and lon == 0 and elev == 0:
+            notes.append(
+                f"{device['name']}'s GEOGRAPHIC_COORD reads back as 0/0/0, the common "
+                "default before a GPS fix — confirm this is a real location, not a missing fix."
+            )
+
+    if not candidates:
+        notes.append(
+            "No connected device currently reports GEOGRAPHIC_COORD; fill in latitudeDeg/"
+            "longitudeDeg/elevationMeters by hand before saving."
+        )
+        return {
+            "kind": "observatoryDraft",
+            "id": None,
+            "name": None,
+            "latitudeDeg": None,
+            "longitudeDeg": None,
+            "elevationMeters": None,
+            "sourceDevice": None,
+            "notes": notes,
+        }
+
+    if len(candidates) > 1:
+        notes.append(
+            "More than one connected device reports GEOGRAPHIC_COORD "
+            f"({', '.join(name for name, *_ in candidates)}); used {candidates[0][0]}. "
+            "Confirm this is the right source before saving."
+        )
+
+    source, lat, lon, elev = candidates[0]
+    return {
+        "kind": "observatoryDraft",
+        "id": None,
+        "name": None,
+        "latitudeDeg": lat,
+        "longitudeDeg": lon,
+        "elevationMeters": elev,
+        "sourceDevice": source,
+        "notes": notes,
+    }
+
+
+def _parse_coord(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None

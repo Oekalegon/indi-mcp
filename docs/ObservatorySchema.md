@@ -34,11 +34,13 @@ sorted filename order) — again matching `load_rigs`.
 
 **Multiple locations, explicitly selected — no auto-detection.** A user may run the same server
 from more than one site (home observatory vs. a travel/remote setup), so the store holds any
-number of location definitions, not just one. There is nothing for the server to auto-detect a
-location *from* (no INDI device reports GPS coordinates), so this goes further than a rig's
-"no silent auto-selection" rule: there is no `suggest_location` at all. A script or tool call that
-needs a location takes an explicit `locationId` parameter (the same shape as `run_script`'s
-`rigId`, see [ScriptSchema.md § Resolving roles to devices](ScriptSchema.md#resolving-roles-to-devices)),
+number of location definitions, not just one. Unlike a rig, which `suggest_rig` can propose a
+likely candidate for by matching connected device names, there is no `suggest_location`: even
+though a connected GPS or mount device can *pre-fill* a location's coordinates (see
+"Drafting a location from a connected device's GPS fix" below), it can't tell the server which
+*saved* location — with its human-assigned `id`/`name` — that reading corresponds to. A script
+or tool call that needs a location takes an explicit `locationId` parameter (the same shape as
+`run_script`'s `rigId`, see [ScriptSchema.md § Resolving roles to devices](ScriptSchema.md#resolving-roles-to-devices)),
 resolved against this store the same way a rig id is resolved against the rig store.
 
 ## Example
@@ -70,11 +72,31 @@ time/coordinate calculations run in UTC regardless of the site's local timezone,
 `timezone` field now for display purposes with no current consumer would be speculative — it can
 be added later if a concrete use (e.g. showing local sunset time in a client) needs it.
 
+## Drafting a location from a connected device's GPS fix
+
+INDI's `GEOGRAPHIC_COORD` standard property (`LAT`/`LONG`/`ELEV`) is exposed by GPS drivers and
+often by mount drivers too, once they have a fix — unlike a rig's camera pixel geometry it isn't
+tied to one driver family, so it's whatever connected device happens to report it. A
+`draft_observatory` tool (mirroring `draft_rig`) reads it from whichever connected device
+exposes it and returns a pre-filled skeleton — `latitudeDeg`/`longitudeDeg`/`elevationMeters`
+filled in (`LONG` converted from INDI's 0–360 East-positive convention to this schema's
+-180..180), `id`/`name` left blank for the operator to choose, and `sourceDevice` naming which
+device it came from. If more than one connected device reports a fix, the first (in device
+order) is used and the rest are named in `notes` for the operator to check.
+
+This is advisory only, exactly like `draft_rig`'s output: never auto-selected or auto-saved,
+just a starting point the operator reviews and completes before calling `save_observatory`
+themselves — consistent with the "no silent auto-selection" rule established for rigs. A GPS
+fix that hasn't settled yet is a real failure mode worth flagging before it's saved as a real
+location: `notes` calls out a property vector `state` that isn't `Ok` (still acquiring, or in
+error) and the common all-zero `0/0/0` reading many drivers report before their first fix.
+
 ## Design notes
 
-* **The YAML definition is authoritative.** There is no live signal to cross-check it against
-  (unlike a rig's `device` fields, which the messaging layer can at least confirm are connected)
-  — a location is trusted operator input, full stop.
+* **The saved YAML definition is authoritative.** A connected GPS/mount device can *pre-fill* a
+  draft via `draft_observatory` (above), but that reading is never cross-checked against a
+  *saved* location the way a rig's `device` fields are checked for presence — once saved, a
+  location is trusted operator input, full stop.
 * **Unknown top-level fields are rejected**, not ignored, matching rigs and scripts — a typo'd
   field name fails loudly (as a skipped file, logged) instead of silently having no effect.
 * **Latitude/longitude bounds are validated**, not just typed as numbers, since a value outside

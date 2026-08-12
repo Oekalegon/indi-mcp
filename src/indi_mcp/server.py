@@ -35,7 +35,12 @@ from indi_mcp.frame_store import FrameMetadata
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
-from indi_mcp.observatory_store import Observatory, ObservatorySummary
+from indi_mcp.observatory_store import (
+    DraftLocationDeviceInfo,
+    Observatory,
+    ObservatoryDraft,
+    ObservatorySummary,
+)
 from indi_mcp.rig_store import DraftDeviceInfo, Rig, RigCheck, RigDraft, RigSuggestion, RigSummary
 from indi_mcp.script_engine import FilterAdoptOutcome, FilterSyncOutcome
 from indi_mcp.script_runs import (
@@ -431,7 +436,8 @@ def get_observatory(observatory_id: str) -> Observatory:
 
 @mcp.tool()
 async def save_observatory(observatory: Observatory, overwrite: bool = False) -> Observatory:
-    """Save an observatory location definition.
+    """Save an observatory location definition — hand-authored, or completed from a
+    `draft_observatory` result.
 
     Writes `observatory` to `observatories/<observatory.id>.yaml` and reloads
     it so it's immediately available by `id` to `get_observatory`. Refuses to
@@ -442,6 +448,34 @@ async def save_observatory(observatory: Observatory, overwrite: bool = False) ->
     return await asyncio.to_thread(
         observatory_store.save_observatory, observatory, overwrite=overwrite
     )
+
+
+@mcp.tool()
+async def draft_observatory() -> ObservatoryDraft:
+    """Pre-fill a draft observatory location from a connected device's live `GEOGRAPHIC_COORD`.
+
+    INDI's `GEOGRAPHIC_COORD` standard property (LAT/LONG/ELEV) is exposed
+    by GPS drivers and often by mount drivers too. Never auto-selects or
+    auto-saves a location: the result is a starting point — `id`/`name` have
+    no INDI equivalent, and a stale/missing/all-zero fix is flagged in
+    `notes` — for the operator to complete and save themselves via
+    `save_observatory`, consistent with `draft_rig`.
+    """
+    devices: list[DraftLocationDeviceInfo] = []
+    for name in indi_messaging.list_devices():
+        coord = indi_messaging.get_property_values(name, "GEOGRAPHIC_COORD")
+        devices.append(
+            {
+                "name": name,
+                "geographicCoord": coord,
+                "state": (
+                    indi_messaging.get_property_state(name, "GEOGRAPHIC_COORD")
+                    if coord is not None
+                    else None
+                ),
+            }
+        )
+    return observatory_store.draft_observatory(devices)
 
 
 @mcp.tool()

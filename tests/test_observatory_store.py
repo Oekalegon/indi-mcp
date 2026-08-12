@@ -260,3 +260,88 @@ def test_save_observatory_rejects_an_id_whose_file_path_is_already_a_directory(
 
     with pytest.raises(ValueError, match="is a directory"):
         observatory_store.save_observatory(_minimal_observatory(), directory=tmp_path)
+
+
+def _device(
+    name: str,
+    *,
+    lat: str = "52.3676",
+    lon: str = "4.9041",
+    elev: str = "4",
+    state: str | None = "Ok",
+    no_property: bool = False,
+) -> observatory_store.DraftLocationDeviceInfo:
+    coord = None if no_property else {"LAT": lat, "LONG": lon, "ELEV": elev}
+    return {"name": name, "geographicCoord": coord, "state": None if no_property else state}
+
+
+def test_draft_observatory_drafts_from_a_single_devices_geographic_coord() -> None:
+    draft = observatory_store.draft_observatory([_device("Telescope Simulator")])
+
+    assert draft["kind"] == "observatoryDraft"
+    assert draft["id"] is None
+    assert draft["name"] is None
+    assert draft["latitudeDeg"] == 52.3676
+    assert draft["longitudeDeg"] == 4.9041
+    assert draft["elevationMeters"] == 4
+    assert draft["sourceDevice"] == "Telescope Simulator"
+    assert draft["notes"] == []
+
+
+def test_draft_observatory_converts_long_from_indis_0_360_convention() -> None:
+    draft = observatory_store.draft_observatory([_device("Telescope Simulator", lon="350")])
+
+    assert draft["longitudeDeg"] == -10
+
+
+def test_draft_observatory_ignores_devices_with_no_geographic_coord() -> None:
+    draft = observatory_store.draft_observatory(
+        [_device("CCD Simulator", no_property=True), _device("Telescope Simulator")]
+    )
+
+    assert draft["sourceDevice"] == "Telescope Simulator"
+
+
+def test_draft_observatory_with_no_devices_returns_an_empty_draft_with_a_note() -> None:
+    draft = observatory_store.draft_observatory([])
+
+    assert draft == {
+        "kind": "observatoryDraft",
+        "id": None,
+        "name": None,
+        "latitudeDeg": None,
+        "longitudeDeg": None,
+        "elevationMeters": None,
+        "sourceDevice": None,
+        "notes": [
+            "No connected device currently reports GEOGRAPHIC_COORD; fill in latitudeDeg/"
+            "longitudeDeg/elevationMeters by hand before saving."
+        ],
+    }
+
+
+def test_draft_observatory_flags_the_all_zero_default_as_a_missing_fix() -> None:
+    draft = observatory_store.draft_observatory(
+        [_device("GPS Simulator", lat="0", lon="0", elev="0")]
+    )
+
+    assert draft["latitudeDeg"] == 0
+    assert any("0/0/0" in note for note in draft["notes"])
+
+
+def test_draft_observatory_flags_a_non_ok_state() -> None:
+    draft = observatory_store.draft_observatory([_device("GPS Simulator", state="Busy")])
+
+    assert any("'Busy'" in note for note in draft["notes"])
+
+
+def test_draft_observatory_uses_first_device_and_notes_others_on_multiple_fixes() -> None:
+    draft = observatory_store.draft_observatory(
+        [
+            _device("Telescope Simulator", lat="52.3676", lon="4.9041"),
+            _device("GPS Simulator", lat="1", lon="1"),
+        ]
+    )
+
+    assert draft["sourceDevice"] == "Telescope Simulator"
+    assert any("Telescope Simulator" in note and "GPS Simulator" in note for note in draft["notes"])
