@@ -39,6 +39,10 @@ under one writer can plausibly outlast 5 seconds while the other is blocked wait
 (reproduced live, INDIMCP-83/INDIMCP-79) — 30s gives that legitimate contention room to resolve
 on its own via SQLite's normal retry-until-unlocked behavior, rather than failing a whole script
 run over a transient few-second overlap.
+
+Chosen as a comfortable safety margin above the observed few-second contention, not a measured
+worst case — if this ever proves insufficient, reproduce and measure the actual contention
+duration again rather than just raising the number further.
 """
 
 

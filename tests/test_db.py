@@ -97,6 +97,8 @@ def test_connect_still_fails_once_the_busy_timeout_is_exceeded(
     """The busy-timeout bounds the wait — a lock held longer than that still surfaces as
     `OperationalError`, it isn't waited out forever.
     """
+    # `monkeypatch` reverts this automatically at teardown regardless of outcome, so no
+    # explicit restore/finally is needed for it alongside `holder`'s own cleanup below.
     monkeypatch.setattr(db, "_BUSY_TIMEOUT_SECONDS", 0.05)
     db_path = tmp_path / "indi_mcp.sqlite3"
     with db.connect(db_path) as conn:
