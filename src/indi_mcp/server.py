@@ -584,6 +584,18 @@ async def cool_camera(
 
 
 @mcp.tool()
+async def cooler_on(rig_id: str) -> ScriptRunStarted:
+    """Turn on the rig's camera cooler — see `scripts/cooler_on.yaml` (INDIMCP-84)."""
+    return await script_runs.start_script("cooler_on", rig_id, {})
+
+
+@mcp.tool()
+async def cooler_off(rig_id: str) -> ScriptRunStarted:
+    """Turn off the rig's camera cooler — see `scripts/cooler_off.yaml` (INDIMCP-84)."""
+    return await script_runs.start_script("cooler_off", rig_id, {})
+
+
+@mcp.tool()
 async def select_filter(rig_id: str, filterName: str) -> ScriptRunStarted:
     """Select a filter on the rig's filter wheel by name — see `scripts/select_filter.yaml`
     (INDIMCP-61).

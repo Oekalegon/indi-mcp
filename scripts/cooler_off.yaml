@@ -1,0 +1,24 @@
+id: cooler_off
+name: Turn off the camera's active cooler
+description: >
+  Turns off the rig's camera cooler (CCD_COOLER.COOLER_OFF=On) and waits for the driver
+  to confirm — a thin, reusable wrapper so composed sequences or a standalone call can
+  `run_script: cooler_off` instead of repeating the raw set_property/wait_for steps, see
+  docs/Design.md's "Composing scripts" section (INDIMCP-84).
+
+  Not every camera has active cooling. This standalone script fails outright if
+  CCD_COOLER is undefined on the device, matching cooler_on's own reasoning - a direct
+  cooler_off call implies the operator expects the camera to actually have one.
+pausable: false
+steps:
+  - step: set_property
+    role: camera
+    property: CCD_COOLER
+    elements: { COOLER_OFF: "On" }
+  - step: wait_for
+    condition:
+      role: camera
+      property: CCD_COOLER
+      operator: equals
+      value: Ok
+    timeoutSeconds: 30
