@@ -11,7 +11,7 @@ composed capture sequences — `capture_light_sequence`, `capture_flat_sequence`
 `sync_filter_names`/`adopt_filter_names_from_driver` (INDIMCP-64), mount
 tracking control — `track_off`, `set_track_mode` (generic across
 sidereal/solar/lunar/custom via a parameterized `set_property` element key,
-INDIMCP-49), `set_custom_tracking_rate` —, and `cooler_on`/`cooler_off`
+INDIMCP-49), `set_custom_tracking_rate` — and `cooler_on`/`cooler_off`
 (INDIMCP-84) ship so far; the remaining primitives are tracked separately
 (INDIMCP-45, INDIMCP-47). This just
 confirms whatever's here loads and validates cleanly, the way any script a
