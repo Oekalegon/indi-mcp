@@ -27,6 +27,24 @@ __all__ = ["DB_PATH_ENV", "connect"]
 DB_PATH_ENV = "INDI_MCP_DB_PATH"
 _DEFAULT_DB_PATH = Path("indi_mcp.sqlite3")
 
+_BUSY_TIMEOUT_SECONDS = 30.0
+"""How long a connection retries against SQLite's own busy-handler before raising
+`sqlite3.OperationalError: database is locked`, instead of `sqlite3`'s 5-second default.
+
+Even in WAL mode there's still only one writer at a time (see this module's docstring), and this
+process has two independent write paths that can land close together — `frame_store.save_frame`
+(a fresh `asyncio.to_thread` per captured frame) and the event log's single durable-write worker
+(`event_streams`'s queue-drain task, INDIMCP-59). On the Pi's SD-card I/O, a page-cache flush
+under one writer can plausibly outlast 5 seconds while the other is blocked waiting for the lock
+(reproduced live, INDIMCP-83/INDIMCP-79) — 30s gives that legitimate contention room to resolve
+on its own via SQLite's normal retry-until-unlocked behavior, rather than failing a whole script
+run over a transient few-second overlap.
+
+Chosen as a comfortable safety margin above the observed few-second contention, not a measured
+worst case — if this ever proves insufficient, reproduce and measure the actual contention
+duration again rather than just raising the number further.
+"""
+
 
 def _db_path(path: Path | None) -> Path:
     return path if path is not None else Path(os.environ.get(DB_PATH_ENV, _DEFAULT_DB_PATH))
@@ -48,7 +66,7 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
     """
     resolved = _db_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(resolved)
+    conn = sqlite3.connect(resolved, timeout=_BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     try:
         # `auto_vacuum` can only take effect on a brand-new (table-free) database file — SQLite
