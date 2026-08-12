@@ -304,6 +304,73 @@ async def test_save_observatory_delegates_to_observatory_store_with_the_overwrit
     assert calls == [(observatory, True)]
 
 
+async def test_draft_observatory_only_fetches_state_for_devices_reporting_the_coord(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    devices = ["Telescope Simulator", "GPS Simulator", "CCD Simulator"]
+    monkeypatch.setattr(indi_messaging, "list_devices", lambda: devices)
+
+    values = {
+        "Telescope Simulator": {"LAT": "52.3676", "LONG": "4.9041", "ELEV": "4"},
+        "GPS Simulator": None,
+        "CCD Simulator": None,
+    }
+    value_calls: list[tuple[str, str]] = []
+
+    def fake_get_property_values(device: str, name: str) -> dict[str, str] | None:
+        value_calls.append((device, name))
+        return values[device]
+
+    state_calls: list[tuple[str, str]] = []
+
+    def fake_get_property_state(device: str, name: str) -> str | None:
+        state_calls.append((device, name))
+        return "Ok"
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", fake_get_property_values)
+    monkeypatch.setattr(indi_messaging, "get_property_state", fake_get_property_state)
+
+    captured: list[observatory_store.DraftLocationDeviceInfo] = []
+
+    def fake_draft_observatory(
+        devices: list[observatory_store.DraftLocationDeviceInfo],
+    ) -> observatory_store.ObservatoryDraft:
+        captured.extend(devices)
+        return {
+            "kind": "observatoryDraft",
+            "id": None,
+            "name": None,
+            "latitudeDeg": None,
+            "longitudeDeg": None,
+            "elevationMeters": None,
+            "sourceDevice": None,
+            "notes": [],
+        }
+
+    monkeypatch.setattr(observatory_store, "draft_observatory", fake_draft_observatory)
+
+    result = await server.draft_observatory()
+
+    assert result["kind"] == "observatoryDraft"
+    # GEOGRAPHIC_COORD is queried for every device; state is only queried when it's present.
+    assert value_calls == [
+        ("Telescope Simulator", "GEOGRAPHIC_COORD"),
+        ("GPS Simulator", "GEOGRAPHIC_COORD"),
+        ("CCD Simulator", "GEOGRAPHIC_COORD"),
+    ]
+    assert state_calls == [("Telescope Simulator", "GEOGRAPHIC_COORD")]
+
+    by_name = {device["name"]: device for device in captured}
+    assert by_name["Telescope Simulator"]["geographicCoord"] == {
+        "LAT": "52.3676",
+        "LONG": "4.9041",
+        "ELEV": "4",
+    }
+    assert by_name["Telescope Simulator"]["state"] == "Ok"
+    assert by_name["GPS Simulator"]["geographicCoord"] is None
+    assert by_name["GPS Simulator"]["state"] is None
+
+
 async def test_run_script_delegates_to_script_runs_start_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
