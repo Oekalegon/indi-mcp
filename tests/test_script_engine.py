@@ -2747,6 +2747,114 @@ async def test_wait_for_property_state_fails_fast_on_alert(
         )
 
 
+async def test_wait_for_property_state_without_require_transition_accepts_stale_ok_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (`require_transition=False`) behavior is unchanged: a vector already sitting
+    at `target_state` when polling starts is accepted right away — matching `slew`/
+    `capture_frame`'s existing, already-correct-in-practice usage (INDIMCP-82).
+    """
+    calls = 0
+
+    def get_property_state(device: str, name: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "Ok"
+
+    monkeypatch.setattr(indi_messaging, "get_property_state", get_property_state)
+    ctx = script_engine._ExecutionContext(
+        rig_id="test-rig",
+        role_to_device={},
+        cancel_event=None,
+        pause_event=None,
+        on_progress=None,
+        total_steps=None,
+        scripts={},
+        run_id=None,
+    )
+
+    await asyncio.wait_for(
+        script_engine._wait_for_property_state(
+            ctx, "CCD Simulator", "CCD_EXPOSURE", indi_messaging.PropertyState.OK, 60.0
+        ),
+        timeout=1.0,
+    )
+
+    assert calls == 1
+
+
+async def test_wait_for_property_state_require_transition_waits_past_stale_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`require_transition=True` (used by `cool_camera`, INDIMCP-82) guards against the race
+    where `send_property` returns before the driver has processed the command: a vector
+    already sitting at `target_state` when polling starts must first be observed leaving it
+    (e.g. to `Busy`) before a later `target_state` is accepted as genuine completion — rather
+    than treating a stale pre-command reading as if the new command had already finished.
+    """
+    states = iter(["Ok", "Ok", "Busy", "Ok"])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: next(states))
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    ctx = script_engine._ExecutionContext(
+        rig_id="test-rig",
+        role_to_device={},
+        cancel_event=None,
+        pause_event=None,
+        on_progress=None,
+        total_steps=None,
+        scripts={},
+        run_id=None,
+    )
+
+    await asyncio.wait_for(
+        script_engine._wait_for_property_state(
+            ctx,
+            "CCD Simulator",
+            "CCD_TEMPERATURE",
+            indi_messaging.PropertyState.OK,
+            60.0,
+            require_transition=True,
+        ),
+        timeout=1.0,
+    )
+
+    with pytest.raises(StopIteration):
+        next(states)
+
+
+async def test_wait_for_property_state_require_transition_times_out_if_never_leaves_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the vector never leaves `target_state` at all — the driver never actually reacted to
+    the command — `require_transition=True` times out rather than waiting forever.
+    """
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    ctx = script_engine._ExecutionContext(
+        rig_id="test-rig",
+        role_to_device={},
+        cancel_event=None,
+        pause_event=None,
+        on_progress=None,
+        total_steps=None,
+        scripts={},
+        run_id=None,
+    )
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="never left"):
+        await asyncio.wait_for(
+            script_engine._wait_for_property_state(
+                ctx,
+                "CCD Simulator",
+                "CCD_TEMPERATURE",
+                indi_messaging.PropertyState.OK,
+                0.01,
+                require_transition=True,
+            ),
+            timeout=1.0,
+        )
+
+
 async def test_execute_script_capture_frame_times_out_waiting_for_blob(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3097,7 +3205,9 @@ async def test_execute_script_cool_camera_substitutes_parameter_reference_in_tar
     )
     send_property = AsyncMock()
     monkeypatch.setattr(indi_messaging, "send_property", send_property)
-    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    states = iter(["Ok", "Busy", "Ok"])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: next(states))
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
 
     await script_engine.execute_script("cool_camera", "test-rig", {"targetTempC": -15.0})
 
@@ -3117,7 +3227,9 @@ async def test_execute_script_cool_camera_skips_cooler_when_camera_has_no_such_p
     )
     send_property = AsyncMock()
     monkeypatch.setattr(indi_messaging, "send_property", send_property)
-    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Ok")
+    states = iter(["Ok", "Busy", "Ok"])
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: next(states))
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
 
     await script_engine.execute_script("cool_camera", "test-rig", {})
 

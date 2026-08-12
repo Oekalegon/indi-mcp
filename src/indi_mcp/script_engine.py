@@ -1295,22 +1295,59 @@ async def _wait_for_property_state(
     property_name: str,
     target_state: indi_messaging.PropertyState,
     timeout_seconds: float,
+    *,
+    require_transition: bool = False,
 ) -> None:
     """Poll `device`'s `property_name` vector until it reaches `target_state`, or time out.
 
     A lower-level cousin of `_execute_wait_for`: that one evaluates an
     arbitrary script-authored `Condition` (any property/element/operator);
-    this one is for engine-implemented primitives (`slew`, `capture_frame`)
-    that need to wait for their own specific `Busy`->`Ok` transition, with
-    no `Condition` for a script author to write.
+    this one is for engine-implemented primitives (`slew`, `capture_frame`,
+    `cool_camera`) that need to wait for their own specific `Busy`->`Ok`
+    transition, with no `Condition` for a script author to write.
 
     Fails immediately (rather than waiting out the full timeout) if the
     driver reports `Alert` instead of `target_state` — a driver-reported
     hardware fault (aborted exposure, mount fault, disconnected device)
     isn't something more polling will resolve, so there's no reason to
     keep a caller waiting on it, unlike a genuine "still working" `Busy`.
+
+    `require_transition`, when set, guards against a race with
+    `send_property`, which returns as soon as the command is written to the
+    socket, before the driver has necessarily processed it (see
+    `indi_messaging.send_property`). If the vector already reports
+    `target_state` the moment polling starts, that's ambiguous — it could
+    mean the driver already finished, or it could be a stale reading from
+    *before* the new command was sent (e.g. a camera already sitting at
+    `Ok`/idle when a new `cool_camera` target is set). To resolve that, this
+    first waits for the vector to visibly leave `target_state` — i.e. for the
+    driver to actually start reacting, typically by moving to `Busy` — before
+    accepting a subsequent `target_state` as genuine completion.
+
+    Not the default: `slew`/`capture_frame` don't need it in practice (the
+    steps they run before this wait give the driver enough time to publish
+    its own `Busy` first) and always requiring a transition would misfire on
+    a callers whose property is already sitting at `target_state` for a
+    legitimate reason unrelated to the just-sent command — `cool_camera`
+    (INDIMCP-82) opts in explicitly since it reproduced the race live.
     """
     deadline = asyncio.get_running_loop().time() + timeout_seconds
+
+    if require_transition and (
+        indi_messaging.get_property_state(device, property_name) == target_state
+    ):
+        while True:
+            await _check_cancelled(ctx)
+            if indi_messaging.get_property_state(device, property_name) != target_state:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise ScriptExecutionError(
+                    f"{property_name} on {device} never left {target_state} after the new "
+                    f"command was sent (within {timeout_seconds}s) — the driver may not have "
+                    "processed it"
+                )
+            await asyncio.sleep(_WAIT_POLL_INTERVAL_SECONDS)
+
     while True:
         await _check_cancelled(ctx)
         state = indi_messaging.get_property_state(device, property_name)
@@ -1981,7 +2018,11 @@ async def _execute_cool_camera(
     standard INDI CCD drivers hold the vector at `Busy` until the sensor
     settles at or near the setpoint), using `_wait_for_property_state`, the
     same primitive `slew`/`capture_frame` use for their own `Busy`->`Ok`
-    waits.
+    waits — with `require_transition=True` (INDIMCP-82), since the camera is
+    often already sitting at `CCD_TEMPERATURE`'s `Ok` state (e.g. idle at
+    ambient) right before a new target is set, and without that guard the
+    wait would accept that stale `Ok` immediately instead of actually
+    waiting for the sensor to reach the new setpoint.
     """
     device = _resolve_device(_substituted_role(step.role, params), ctx)
     target_temp = float(_substitute(step.targetTempC, params))
@@ -1992,7 +2033,12 @@ async def _execute_cool_camera(
         device, "CCD_TEMPERATURE", {"CCD_TEMPERATURE_VALUE": str(target_temp)}
     )
     await _wait_for_property_state(
-        ctx, device, "CCD_TEMPERATURE", indi_messaging.PropertyState.OK, timeout
+        ctx,
+        device,
+        "CCD_TEMPERATURE",
+        indi_messaging.PropertyState.OK,
+        timeout,
+        require_transition=True,
     )
 
 
