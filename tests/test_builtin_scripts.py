@@ -8,11 +8,12 @@ role-parameterized (INDIMCP-52), `cool_camera` (INDIMCP-41), `select_filter`,
 `set_focus_position` (INDIMCP-63), `capture_frame` (INDIMCP-44), a set of
 composed capture sequences — `capture_light_sequence`, `capture_flat_sequence`,
 `capture_dark_sequence`, `capture_bias_sequence` (INDIMCP-46) —,
-`sync_filter_names`/`adopt_filter_names_from_driver` (INDIMCP-64), and mount
+`sync_filter_names`/`adopt_filter_names_from_driver` (INDIMCP-64), mount
 tracking control — `track_off`, `set_track_mode` (generic across
 sidereal/solar/lunar/custom via a parameterized `set_property` element key,
-INDIMCP-49), `set_custom_tracking_rate` — ship so far; the remaining
-primitives are tracked separately (INDIMCP-45, INDIMCP-47). This just
+INDIMCP-49), `set_custom_tracking_rate` —, and `cooler_on`/`cooler_off`
+(INDIMCP-84) ship so far; the remaining primitives are tracked separately
+(INDIMCP-45, INDIMCP-47). This just
 confirms whatever's here loads and validates cleanly, the way any script a
 client might upload would.
 """
@@ -251,6 +252,46 @@ def test_builtin_disconnect_script_is_role_parameterized_and_waits_on_connect_el
     assert wait_step.condition.property == "CONNECTION"
     assert wait_step.condition.element == "CONNECT"
     assert wait_step.condition.value == "Off"
+
+
+def test_builtin_cooler_on_script_sets_cooler_on_and_waits() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    cooler_on = script_store.get_script("cooler_on")
+
+    assert cooler_on.pausable is False
+    assert cooler_on.parameters == {}
+    assert len(cooler_on.steps) == 2
+    set_step, wait_step = cooler_on.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "camera"
+    assert set_step.property == "CCD_COOLER"
+    assert set_step.elements == {"COOLER_ON": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "camera"
+    assert wait_step.condition.property == "CCD_COOLER"
+    assert wait_step.condition.element is None
+    assert wait_step.condition.value == "Ok"
+
+
+def test_builtin_cooler_off_script_sets_cooler_off_and_waits() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    cooler_off = script_store.get_script("cooler_off")
+
+    assert cooler_off.pausable is False
+    assert cooler_off.parameters == {}
+    assert len(cooler_off.steps) == 2
+    set_step, wait_step = cooler_off.steps
+    assert isinstance(set_step, script_store.SetPropertyStep)
+    assert set_step.role == "camera"
+    assert set_step.property == "CCD_COOLER"
+    assert set_step.elements == {"COOLER_OFF": "On"}
+    assert isinstance(wait_step, script_store.WaitForStep)
+    assert wait_step.condition.role == "camera"
+    assert wait_step.condition.property == "CCD_COOLER"
+    assert wait_step.condition.element is None
+    assert wait_step.condition.value == "Ok"
 
 
 def test_builtin_select_filter_script_is_a_thin_wrapper_around_the_select_filter_step() -> None:

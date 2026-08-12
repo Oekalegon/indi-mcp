@@ -460,6 +460,22 @@ async def test_cool_camera_delegates_to_start_script_with_defaults(
     assert calls == [("cool_camera", "test-rig", {"targetTempC": -10, "timeoutSeconds": 300}, None)]
 
 
+async def test_cooler_on_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.cooler_on("test-rig")
+
+    assert calls == [("cooler_on", "test-rig", {}, None)]
+
+
+async def test_cooler_off_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.cooler_off("test-rig")
+
+    assert calls == [("cooler_off", "test-rig", {}, None)]
+
+
 async def test_select_filter_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _fake_start_script(monkeypatch)
 
