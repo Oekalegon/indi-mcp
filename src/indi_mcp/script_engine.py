@@ -1327,9 +1327,18 @@ async def _wait_for_property_state(
     Not the default: `slew`/`capture_frame` don't need it in practice (the
     steps they run before this wait give the driver enough time to publish
     its own `Busy` first) and always requiring a transition would misfire on
-    a callers whose property is already sitting at `target_state` for a
+    callers whose property is already sitting at `target_state` for a
     legitimate reason unrelated to the just-sent command — `cool_camera`
     (INDIMCP-82) opts in explicitly since it reproduced the race live.
+
+    Only safe for a property whose genuine `Busy`->`target_state` cycle can't
+    complete faster than one poll interval (`_WAIT_POLL_INTERVAL_SECONDS`) —
+    a transition that starts and finishes between two polls would never be
+    observed, and this would time out on a call that actually succeeded.
+    `cool_camera`'s temperature stabilization is safe by construction (real
+    cooldowns take many seconds); a future caller reaching for
+    `require_transition=True` on a near-instantaneous property should
+    confirm the same holds before relying on it.
     """
     deadline = asyncio.get_running_loop().time() + timeout_seconds
 
