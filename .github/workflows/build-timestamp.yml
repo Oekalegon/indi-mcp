@@ -1,5 +1,12 @@
 name: Update build timestamp
 
+# This workflow's own commit lands on develop without going through
+# python-ci.yml — the bot push below uses the default GITHUB_TOKEN, which
+# doesn't retrigger other push-based workflows, so it is never linted,
+# type-checked, or tested. This bypasses ruff/ty/pytest by design; keep the
+# generated content in _build_info.py to the trivial single-line literal it
+# is today so that gap stays low-risk.
+
 on:
   push:
     branches: [develop]
