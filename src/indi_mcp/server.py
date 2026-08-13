@@ -37,7 +37,7 @@ from indi_mcp import (
 )
 from indi_mcp.frame_store import FrameMetadata
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
-from indi_mcp.indi_messaging import IndiEvent, MessagingStatus
+from indi_mcp.indi_messaging import DeviceProperties, IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
 from indi_mcp.observatory_store import (
     DraftLocationDeviceInfo,
@@ -255,6 +255,19 @@ async def list_indi_messages(device: str | None = None, limit: int = 50) -> list
 async def send_indi_property(device: str, name: str, elements: dict[str, str]) -> IndiEvent:
     """Send a command to an INDI device, setting `elements` on its property `name`."""
     return await indi_messaging.send_property(device, name, elements)
+
+
+@mcp.tool()
+async def get_device_properties(device: str) -> DeviceProperties:
+    """Query the INDI server for the live state of every property on `device`.
+
+    Queries `indiserver` directly (`getProperties`) rather than returning
+    whatever was last cached, so the result reflects the device's actual
+    state at call time when possible — check the returned `refreshed` flag,
+    which is `False` if the driver didn't respond in time and `properties`
+    fell back to a previously-cached reading.
+    """
+    return await indi_messaging.get_device_properties(device)
 
 
 @mcp.resource("indi://messages", mime_type="application/json")

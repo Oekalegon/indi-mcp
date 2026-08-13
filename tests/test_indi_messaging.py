@@ -1,3 +1,4 @@
+import asyncio
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -34,9 +35,12 @@ class _FakeVector:
     `__getitem__` returns the member's value, matching `Vector.__getitem__`.
     """
 
-    def __init__(self, members: dict[str, _FakeMember], state: str = "Ok") -> None:
+    def __init__(
+        self, members: dict[str, _FakeMember], state: str = "Ok", vectortype: str = ""
+    ) -> None:
         self.data = members
         self.state = state
+        self.vectortype = vectortype
 
     def __getitem__(self, membername: str) -> str:
         return self.data[membername].membervalue
@@ -70,6 +74,7 @@ def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
     client.connected = True
     client.asyncrun = AsyncMock()
     client.send_newVector = AsyncMock()
+    client.send_getProperties = AsyncMock()
 
     def _fake_client(host: str, port: int) -> MagicMock:
         return client
@@ -343,6 +348,82 @@ async def test_get_property_values_returns_none_for_an_undefined_property(mocks:
     await indi_messaging.start_messaging()
 
     assert indi_messaging.get_property_values("CCD Simulator", "CCD_INFO") is None
+
+
+async def test_get_device_properties_rejects_when_not_started() -> None:
+    with pytest.raises(RuntimeError, match="not started"):
+        await indi_messaging.get_device_properties("CCD Simulator")
+
+
+async def test_get_device_properties_returns_early_and_refreshed_once_driver_replies(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(indi_messaging, "_PROPERTY_REFRESH_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(indi_messaging, "_PROPERTY_REFRESH_QUIET_PERIOD", 0.02)
+    connection = _FakeVector({"CONNECT": _FakeMember("On")}, state="Ok", vectortype="SwitchVector")
+    device = MagicMock()
+    device.data = {"CONNECTION": connection}
+    mocks.client.data = {"CCD Simulator": device}
+    await indi_messaging.start_messaging()
+
+    async def _simulate_driver_reply() -> None:
+        await asyncio.sleep(0.01)
+        indi_messaging._device_last_property_event_at["CCD Simulator"] = (
+            asyncio.get_running_loop().time()
+        )
+
+    reply_task = asyncio.create_task(_simulate_driver_reply())
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+
+    result = await indi_messaging.get_device_properties("CCD Simulator", timeout_seconds=5)
+
+    elapsed = loop.time() - started_at
+    await reply_task
+    mocks.client.send_getProperties.assert_called_once_with("CCD Simulator")
+    assert elapsed < 1.0, "should return once the quiet period settles, not wait out the timeout"
+    assert result == {
+        "properties": {
+            "CONNECTION": {
+                "type": "switch",
+                "state": indi_messaging.PropertyState.OK,
+                "elements": {"CONNECT": "On"},
+            }
+        },
+        "refreshed": True,
+    }
+
+
+async def test_get_device_properties_falls_back_to_cache_when_driver_never_replies(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(indi_messaging, "_PROPERTY_REFRESH_POLL_INTERVAL", 0.001)
+    connection = _FakeVector({"CONNECT": _FakeMember("On")}, state="Ok", vectortype="SwitchVector")
+    device = MagicMock()
+    device.data = {"CONNECTION": connection}
+    mocks.client.data = {"CCD Simulator": device}
+    await indi_messaging.start_messaging()
+
+    result = await indi_messaging.get_device_properties("CCD Simulator", timeout_seconds=0.02)
+
+    assert result == {
+        "properties": {
+            "CONNECTION": {
+                "type": "switch",
+                "state": indi_messaging.PropertyState.OK,
+                "elements": {"CONNECT": "On"},
+            }
+        },
+        "refreshed": False,
+    }
+
+
+async def test_get_device_properties_rejects_unknown_device(mocks: Mocks) -> None:
+    mocks.client.data = {}
+    await indi_messaging.start_messaging()
+
+    with pytest.raises(ValueError, match="Unknown INDI device"):
+        await indi_messaging.get_device_properties("Nonexistent", timeout_seconds=0)
 
 
 async def test_get_property_state_returns_current_vector_state(mocks: Mocks) -> None:
