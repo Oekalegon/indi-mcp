@@ -476,6 +476,14 @@ async def test_cooler_off_delegates_to_start_script(monkeypatch: pytest.MonkeyPa
     assert calls == [("cooler_off", "test-rig", {}, None)]
 
 
+async def test_abort_exposure_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.abort_exposure("test-rig")
+
+    assert calls == [("abort_exposure", "test-rig", {}, None)]
+
+
 async def test_select_filter_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _fake_start_script(monkeypatch)
 
