@@ -11,9 +11,12 @@ This module is the storage layer only — `save_frame`/`list_frames`/
 `purge_transferred_frames` are plain functions, not MCP tools. Draining a
 BLOB out of `indi_messaging` and calling `save_frame` with the result is
 `script_engine`'s `capture_frame` step handler (INDIMCP-37, built);
-exposing these as MCP tools, plus a `frame://{frameId}` resource for the
-bytes themselves, is INDIMCP-11 (also built) — mirroring how `rig_store`'s
-plain functions are wired up as `@mcp.tool()`s separately in `server.py`.
+exposing these as MCP tools, plus a `GET /frames/{frameId}` HTTP download
+endpoint for the bytes themselves (`server.download_frame`, INDIMCP-89,
+superseding an original `frame://{frameId}` MCP resource from INDIMCP-11
+that broke on real frame sizes), is INDIMCP-11/INDIMCP-89 — mirroring how
+`rig_store`'s plain functions are wired up as `@mcp.tool()`s separately
+in `server.py`.
 
 Neither `delete_frame` nor `purge_transferred_frames` is ever called by
 anything in this module or `script_engine` — the Raspberry Pi's storage is
@@ -244,8 +247,9 @@ def get_frame_path(frame_id: str, *, db_path: Path | None = None) -> Path:
     """Return the on-disk path for `frame_id`'s file. Raises `FrameNotFoundError` if unknown.
 
     Internal-only — see `FrameMetadata` for why `path` itself is never
-    returned to a client. This is for INDIMCP-11's `frame://{frameId}`
-    resource handler to actually read the frame's bytes.
+    returned to a client. This is for `server.download_frame`'s `GET
+    /frames/{frameId}` handler (INDIMCP-89) to actually read the frame's
+    bytes.
     """
     return Path(_get_row(frame_id, db_path)["path"])
 
@@ -334,7 +338,7 @@ def delete_frame(
     Deletes the `frames` row before the file, the opposite order from
     `save_frame`'s own failure handling: if something goes wrong partway
     through, a metadata row surviving with no file behind it (broken for
-    `frame://{frameId}` reads) is worse than a file surviving with no row
+    `GET /frames/{frameId}` downloads) is worse than a file surviving with no row
     pointing to it (just unused disk space, and never returned by
     `list_frames`/`get_frame_metadata` again either way).
     """

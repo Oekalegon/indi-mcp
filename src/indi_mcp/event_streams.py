@@ -223,7 +223,7 @@ def is_subscribable_uri(uri: str) -> bool:
     non-empty scope segment with no further `/` — not whether that particular device/run
     currently exists. Subscribing ahead of a device connecting or a run starting is expected
     and should still succeed; this only rejects URIs this module can never publish an update
-    to at all (a typo like `indi://message`, or an unrelated resource like `frame://foo`),
+    to at all (a typo like `indi://message`, or an unrelated resource like `foo://bar`),
     which would otherwise register a subscription that silently never fires.
     """
     if uri in _UNSCOPED_URIS:

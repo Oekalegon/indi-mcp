@@ -4,17 +4,20 @@ import asyncio
 import base64
 import contextlib
 import logging
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, Literal, cast
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import AnyUrl
+from starlette.requests import Request
+from starlette.responses import FileResponse, PlainTextResponse, Response
 
 from indi_mcp import (
     astrometry_index,
@@ -127,7 +130,7 @@ def _require_subscribable_uri(uri: AnyUrl) -> str:
     """Return `uri` as a string, rejecting anything that isn't a real event-stream resource.
 
     Without this, `resources/subscribe` for a typo'd URI (`indi://message`) or an unrelated
-    resource (`frame://foo`) would silently "succeed" — `event_streams` would register the
+    resource (`foo://bar`) would silently "succeed" — `event_streams` would register the
     subscription but never publish to it, so the client would just never get a notification
     with no indication anything was wrong. Raising here instead gives a buggy client immediate,
     actionable feedback.
@@ -724,12 +727,13 @@ async def plate_solve_uploaded_frame(
     """Plate-solve a FITS file the Client Computer supplies directly — INDIMCP-76 — rather
     than one captured from a rig's camera (see `plate_solve` for that).
 
-    `fitsDataBase64` is the FITS file's raw bytes, base64-encoded (MCP tool arguments are
-    JSON; there's no binary parameter type, so this is the same encoding `frame://{frameId}`
-    already returns captured frames in, just in the upload direction).
+    `fitsDataBase64` is the FITS file's raw bytes, base64-encoded — MCP tool arguments are
+    JSON, with no binary parameter type, so there's no way around base64 for this upload
+    direction (unlike downloading a captured frame, INDIMCP-89, which streams raw bytes over
+    plain HTTP instead).
 
     Saved into the frame store (`device="uploaded"`, no `run_id`) before solving, so it's
-    retrievable afterward via `list_frames`/`frame://{frameId}` like any other frame — WCS
+    retrievable afterward via `list_frames`'s returned `downloadUrl` like any other frame — WCS
     headers included if the solve succeeds, kept even if it doesn't, so a failed solve
     doesn't lose the upload.
 
@@ -992,13 +996,42 @@ async def get_events(
     )
 
 
+class FrameMetadataResponse(FrameMetadata):
+    """`FrameMetadata` plus `downloadUrl` — what `list_frames`/`get_frame_metadata` actually
+    return to a client (INDIMCP-89). `downloadUrl` is computed per response, not stored, since
+    it depends on the server's own current transport/host/port, not anything about the frame
+    itself — see `_frame_download_url`.
+    """
+
+    downloadUrl: str | None
+
+
+def _frame_download_url(frame_id: str) -> str | None:
+    """The URL a LAN client can `GET` to download `frame_id`'s raw bytes, or `None`.
+
+    `None` whenever there's no HTTP listener to point at at all — running under `stdio`
+    (`_current_transport`), or before `run()` has set it. Built from `socket.gethostname()`
+    rather than `mcp.settings.host`: the latter is the server's own *bind* address, which in
+    production (`docs/Deployment.md`) is the wildcard `0.0.0.0` — not itself a reachable
+    address for a client to connect back to. `frame_id` is a `uuid4` in practice
+    (`frame_store.save_frame`) so this quoting is defensive, not load-bearing.
+    """
+    if _current_transport in (None, "stdio"):
+        return None
+    return f"http://{socket.gethostname()}:{mcp.settings.port}/frames/{quote(frame_id, safe='')}"
+
+
+def _with_download_url(metadata: FrameMetadata) -> FrameMetadataResponse:
+    return {**metadata, "downloadUrl": _frame_download_url(metadata["frameId"])}
+
+
 @mcp.tool()
 async def list_frames(
     run_id: str | None = None,
     device: str | None = None,
     since: str | None = None,
     transferred: bool | None = None,
-) -> list[FrameMetadata]:
+) -> list[FrameMetadataResponse]:
     """List captured frame metadata, most recently captured first, with optional filters.
 
     `transferred` is a tri-state: omitted/`None` returns every frame,
@@ -1006,17 +1039,21 @@ async def list_frames(
     (`confirm_frame_transfer`), `false` only ones still waiting to be
     retrieved — useful for checking what's left to download before
     running `purge_transferred_frames`. Never returns a frame's on-disk
-    path; read its actual bytes via the `frame://{frameId}` resource.
+    path; each frame's `downloadUrl` is a `GET`-able HTTP URL for its raw
+    bytes (INDIMCP-89), `None` if this server has no HTTP listener to
+    build one from (`stdio` transport).
     """
-    return await asyncio.to_thread(
+    metadata = await asyncio.to_thread(
         frame_store.list_frames, run_id=run_id, device=device, since=since, transferred=transferred
     )
+    return [_with_download_url(m) for m in metadata]
 
 
 @mcp.tool()
-async def get_frame_metadata(frame_id: str) -> FrameMetadata:
+async def get_frame_metadata(frame_id: str) -> FrameMetadataResponse:
     """Return the metadata for a single captured frame identified by `frame_id`."""
-    return await asyncio.to_thread(frame_store.get_frame_metadata, frame_id)
+    metadata = await asyncio.to_thread(frame_store.get_frame_metadata, frame_id)
+    return _with_download_url(metadata)
 
 
 @mcp.tool()
@@ -1024,10 +1061,11 @@ async def confirm_frame_transfer(frame_id: str) -> FrameMetadata:
     """Confirm the Client Computer has safely saved a copy of `frame_id`.
 
     Sets `transferredAt`. Call this only after actually verifying the
-    bytes read from `frame://{frameId}` were received intact — this is
-    what makes a frame eligible for `delete_frame`/`purge_transferred_frames`
-    later, so confirming a transfer that didn't really complete risks
-    losing the only copy of that frame.
+    bytes downloaded via `list_frames`'s/`get_frame_metadata`'s
+    `downloadUrl` were received intact — this is what makes a frame
+    eligible for `delete_frame`/`purge_transferred_frames` later, so
+    confirming a transfer that didn't really complete risks losing the
+    only copy of that frame.
     """
     return await asyncio.to_thread(frame_store.confirm_frame_transfer, frame_id)
 
@@ -1063,26 +1101,35 @@ async def purge_transferred_frames(older_than_days: float) -> list[FrameMetadata
     )
 
 
-# `frameId` below (not `frame_id`): FastMCP requires the parameter name to
-# match the `{frameId}` placeholder in the URI template exactly.
-@mcp.resource("frame://{frameId}", mime_type="application/octet-stream")
-async def read_frame(frameId: str) -> bytes:
-    """Read a captured frame's raw bytes (e.g. FITS data), identified by its `frameId`.
+@mcp.custom_route("/frames/{frameId}", methods=["GET"])
+async def download_frame(request: Request) -> Response:
+    """Stream a captured frame's raw bytes over plain HTTP — INDIMCP-89, replacing the old
+    `frame://{frameId}` MCP resource.
 
-    Returned as a base64 `blob` resource content, per
-    `docs/Design.md#retrieving-frames` — reuses MCP's standard binary
-    resource handling rather than a bespoke download tool. The whole frame
-    is read into memory and returned in one response: this SDK's resource
-    mechanism has no native chunked/range read, so a very large frame is
-    fully buffered here. Left as-is per Design.md's own open question on
-    this ("deferred until real frame sizes are known" rather than solved
-    speculatively) — not an oversight.
+    That resource read the whole frame into memory and returned it as one base64-encoded
+    blob in a single JSON-RPC response — a ~17-23MB dark frame disconnected a real MCP client
+    reading it (INDIMCP-89), since the MCP resource protocol has no chunked/range-read
+    primitive to fall back on. `FileResponse` here streams straight from disk in normal-sized
+    chunks instead, with no base64 inflation, so frame size stops being a protocol-level
+    scalability wall. Registered via `custom_route` rather than `@mcp.tool()`/`@mcp.resource()`
+    — this is a plain Starlette route living on the same host/port as the MCP endpoint itself,
+    outside the MCP session/protocol entirely (see `mcp.server.fastmcp.FastMCP.custom_route`).
+
+    Unauthenticated, same as every other tool/resource this server exposes (see
+    `docs/Deployment.md`'s Hardening notes) — this doesn't introduce a new class of exposure,
+    just a new URL path with the same trust model already accepted for the whole server.
     """
-    path = await asyncio.to_thread(frame_store.get_frame_path, frameId)
-    return await asyncio.to_thread(path.read_bytes)
+    frame_id = request.path_params["frameId"]
+    try:
+        path = await asyncio.to_thread(frame_store.get_frame_path, frame_id)
+    except frame_store.FrameNotFoundError:
+        return PlainTextResponse("Frame not found", status_code=404)
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_current_transport: Transport | None = None
+"""Set by `run()` — lets `_frame_download_url` tell whether an HTTP listener exists at all."""
 
 
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
@@ -1090,7 +1137,9 @@ def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 800
 
     `host`/`port` only apply to the `sse` and `streamable-http` transports.
     """
+    global _current_transport
     logging.basicConfig(level=logging.INFO)
+    _current_transport = transport
     rig_store.load_rigs()
     observatory_store.load_observatories()
     script_store.load_scripts()

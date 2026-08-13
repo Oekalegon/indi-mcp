@@ -76,8 +76,8 @@ connection that never delivers another byte within this long shouldn't hang fore
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 """Streamed to disk this many bytes at a time — index files run up to ~165 MB, and this
 project cares about not fully buffering large binary data in memory on a resource-
-constrained Pi (the same reasoning `frame://{frameId}`'s own docstring discusses, just
-applied to a download instead of a read)."""
+constrained Pi (the same reasoning `server.download_frame`'s own docstring discusses for
+captured frames, INDIMCP-89, just applied to a download instead of an upload/read)."""
 
 DEFAULT_RIG_MARGIN_SCALES = 1
 """Default `index_numbers_for_field_of_view`'s `margin_scales` for a rig-derived field of

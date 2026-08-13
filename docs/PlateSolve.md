@@ -269,8 +269,8 @@ Consequences:
    attempt count, and final separation if `toleranceArcsec` was set — this is the only place
    the result becomes visible to a client, consistent with the "no step returns a value the
    YAML layer can consume" constraint above; a client wanting the numeric result reads it off
-   `indi://scripts`, or off the frame's own FITS headers/`frame://{frameId}` resource once
-   written.
+   `indi://scripts`, or off the frame's own FITS headers, downloadable via `list_frames`'s
+   returned `downloadUrl` (INDIMCP-89), once written.
 
 ## Plate-solving a client-uploaded frame (INDIMCP-76)
 
@@ -301,12 +301,14 @@ Differences from the `plate_solve` step, driven entirely by there being no rig/m
   `ScriptExecutionError`/`scriptFailed`.
 - **The frame is kept even if the solve fails.** Saved (`device="uploaded"`, `run_id=None`)
   before solving, not after, so a failed solve doesn't lose what was uploaded — the caller
-  can still retrieve it (without WCS headers) via `list_frames`/`frame://{frameId}`, matching
-  `frame_store`'s existing "ad hoc frame, no run" convention for a capture outside any script
-  run.
-- **Base64 in, not a resource.** MCP tool-call arguments are JSON; there's no binary parameter
-  type, so the FITS bytes travel as a base64 string — the mirror image of `frame://{frameId}`
-  already returning frame bytes as a base64 blob resource content in the download direction.
+  can still retrieve it (without WCS headers) via `list_frames`'s returned `downloadUrl`
+  (INDIMCP-89), matching `frame_store`'s existing "ad hoc frame, no run" convention for a
+  capture outside any script run.
+- **Base64 in, streamed HTTP out.** MCP tool-call arguments are JSON; there's no binary
+  parameter type, so the FITS bytes travel as a base64 string on the way in — unlike the
+  download direction, which streams raw bytes over plain HTTP (INDIMCP-89) rather than
+  base64, since there's no equivalent JSON-argument constraint once the bytes are on their
+  way out of a tool call's return value instead of into one.
 
 ## Retrying toward a tolerance (INDIMCP-47)
 

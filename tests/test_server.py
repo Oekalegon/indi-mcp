@@ -3,7 +3,7 @@ import base64
 import inspect
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, MutableMapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -14,6 +14,8 @@ from mcp.server.lowlevel.server import NotificationOptions, request_ctx
 from mcp.shared.context import RequestContext
 from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
+from starlette.requests import Request
+from starlette.responses import FileResponse, Response
 
 from indi_mcp import (
     astrometry_index,
@@ -965,7 +967,7 @@ async def test_list_frames_delegates_to_frame_store_with_all_filters(
         run_id="run-1", device="cam", since="2026-07-19T00:00:00+00:00", transferred=False
     )
 
-    assert result == [_FRAME_METADATA]
+    assert result == [{**_FRAME_METADATA, "downloadUrl": None}]
     assert calls == [("run-1", "cam", "2026-07-19T00:00:00+00:00", False)]
 
 
@@ -982,8 +984,66 @@ async def test_get_frame_metadata_delegates_to_frame_store(
 
     result = await server.get_frame_metadata("frame-1")
 
-    assert result == _FRAME_METADATA
+    assert result == {**_FRAME_METADATA, "downloadUrl": None}
     assert calls == ["frame-1"]
+
+
+async def test_get_frame_metadata_includes_download_url_when_an_http_listener_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(frame_store, "get_frame_metadata", lambda frame_id: _FRAME_METADATA)
+    monkeypatch.setattr(server, "_current_transport", "streamable-http")
+    monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
+    monkeypatch.setattr(server.mcp.settings, "port", 8000)
+
+    result = await server.get_frame_metadata("frame-1")
+
+    assert result["downloadUrl"] == "http://indi-mcp-pi:8000/frames/frame-1"
+
+
+def test_frame_download_url_is_none_without_an_http_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`stdio` has no HTTP server at all to point a download URL at -- same for the state
+    before `run()` has ever set `_current_transport`."""
+    monkeypatch.setattr(server, "_current_transport", "stdio")
+    assert server._frame_download_url("frame-1") is None
+
+    monkeypatch.setattr(server, "_current_transport", None)
+    assert server._frame_download_url("frame-1") is None
+
+
+def test_frame_download_url_uses_hostname_and_port_under_streamable_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "_current_transport", "streamable-http")
+    monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
+    monkeypatch.setattr(server.mcp.settings, "port", 9000)
+
+    assert server._frame_download_url("frame-1") == "http://indi-mcp-pi:9000/frames/frame-1"
+
+
+def test_frame_download_url_percent_encodes_the_frame_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "_current_transport", "streamable-http")
+    monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
+    monkeypatch.setattr(server.mcp.settings, "port", 8000)
+
+    url = server._frame_download_url("frame/with slash")
+
+    assert url == "http://indi-mcp-pi:8000/frames/frame%2Fwith%20slash"
+
+
+async def test_list_frames_includes_download_url_when_an_http_listener_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(frame_store, "list_frames", lambda **_kwargs: [_FRAME_METADATA])
+    monkeypatch.setattr(server, "_current_transport", "streamable-http")
+    monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
+    monkeypatch.setattr(server.mcp.settings, "port", 8000)
+
+    result = await server.list_frames()
+
+    assert result == [{**_FRAME_METADATA, "downloadUrl": "http://indi-mcp-pi:8000/frames/frame-1"}]
 
 
 async def test_confirm_frame_transfer_delegates_to_frame_store(
@@ -1073,7 +1133,49 @@ async def test_get_events_delegates_to_event_log_with_all_filters(
     assert calls == [("messages", "CCD Simulator", None, "2026-07-20T00:00:00Z")]
 
 
-async def test_read_frame_returns_the_frames_bytes(
+def _frame_download_request(frame_id: str) -> Request:
+    """A minimal Starlette `Request` matching what routing would build for a real `GET
+    /frames/{frameId}` request — enough for `download_frame` to read `path_params` off, without
+    needing a full ASGI app/TestClient just to reach a handler that's plainly callable already
+    (`custom_route` returns the function unchanged, same as every other directly-tested handler
+    in this file, e.g. `_subscribe_to_event_stream`)."""
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/frames/{frame_id}",
+            "path_params": {"frameId": frame_id},
+            "headers": [],
+            "query_string": b"",
+        }
+    )
+
+
+async def _send_asgi_response(response: Response) -> tuple[int, bytes]:
+    """Drive `response` through its real ASGI `__call__`, returning `(status, body)`.
+
+    Checking a `FileResponse`'s `.path`/`.media_type` attributes only confirms the right
+    object was *constructed* -- it never exercises `FileResponse`'s own async stat/read path,
+    so a real wiring break (wrong file, corrupted stream) wouldn't be caught. This drives the
+    actual ASGI protocol instead, the same way a real HTTP server would, without needing a
+    TestClient/httpx dependency just for one handler.
+    """
+    sent: list[MutableMapping[str, Any]] = []
+
+    async def receive() -> MutableMapping[str, Any]:
+        return {"type": "http.request"}
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        sent.append(message)
+
+    await response({"type": "http", "method": "GET", "headers": []}, receive, send)
+
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m["body"] for m in sent if m["type"] == "http.response.body")
+    return status, body
+
+
+async def test_download_frame_streams_the_frames_bytes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     frame_path = tmp_path / "frame-1.fits"
@@ -1086,51 +1188,51 @@ async def test_read_frame_returns_the_frames_bytes(
 
     monkeypatch.setattr(frame_store, "get_frame_path", fake_get_frame_path)
 
-    result = await server.read_frame("frame-1")
+    response = await server.download_frame(_frame_download_request("frame-1"))
 
-    assert result == b"fits-bytes"
     assert calls == ["frame-1"]
+    assert isinstance(response, FileResponse)
+    assert response.path == frame_path
+    assert response.media_type == "application/octet-stream"
+
+    status, body = await _send_asgi_response(response)
+    assert status == 200
+    assert body == b"fits-bytes"
 
 
-async def test_read_frame_propagates_frame_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_download_frame_returns_404_for_an_unknown_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def fake_get_frame_path(frame_id: str) -> Path:
         raise frame_store.FrameNotFoundError(f"no frame found for frameId {frame_id!r}")
 
     monkeypatch.setattr(frame_store, "get_frame_path", fake_get_frame_path)
 
-    with pytest.raises(frame_store.FrameNotFoundError):
-        await server.read_frame("does-not-exist")
+    response = await server.download_frame(_frame_download_request("does-not-exist"))
+
+    assert response.status_code == 404
+
+    status, body = await _send_asgi_response(response)
+    assert status == 404
+    assert body == b"Frame not found"
 
 
-async def test_frame_resource_is_readable_through_the_real_mcp_protocol(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Exercises the actual `frame://{frameId}` URI-template registration and binary content
-    handling via `mcp.read_resource`, not just the bare `read_frame` function body — this is
-    what catches a broken `{frameId}`/`frameId` name match or an accidental non-`bytes` return
-    that a direct call to `server.read_frame(...)` wouldn't."""
-    frame_path = tmp_path / "frame-1.fits"
-    frame_path.write_bytes(b"fits-bytes")
+async def test_download_frame_route_is_registered() -> None:
+    """`frame://{frameId}` (INDIMCP-11) was removed in favor of this plain HTTP route
+    (INDIMCP-89) — confirms it's actually mounted on the MCP server's own Starlette app, not
+    just that the bare `download_frame` function exists."""
+    matching = [r for r in server.mcp._custom_starlette_routes if r.path == "/frames/{frameId}"]
 
-    def fake_get_frame_path(frame_id: str) -> Path:
-        assert frame_id == "frame-1"
-        return frame_path
-
-    monkeypatch.setattr(frame_store, "get_frame_path", fake_get_frame_path)
-
-    contents = list(await server.mcp.read_resource("frame://frame-1"))
-
-    assert len(contents) == 1
-    assert contents[0].content == b"fits-bytes"
-    assert contents[0].mime_type == "application/octet-stream"
+    assert len(matching) == 1
+    methods = matching[0].methods
+    assert methods is not None
+    assert "GET" in methods
 
 
-async def test_frame_resource_uri_template_is_registered() -> None:
+async def test_frame_resource_no_longer_registered() -> None:
     templates = await server.mcp.list_resource_templates()
 
-    matching = [t for t in templates if t.uriTemplate == "frame://{frameId}"]
-    assert len(matching) == 1
-    assert matching[0].mimeType == "application/octet-stream"
+    assert all(t.uriTemplate != "frame://{frameId}" for t in templates)
 
 
 class _FakeSession:
