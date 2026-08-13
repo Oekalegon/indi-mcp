@@ -30,6 +30,7 @@ from indi_mcp import (
     script_engine,
     script_runs,
     script_store,
+    server_info,
 )
 from indi_mcp.frame_store import FrameMetadata
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
@@ -51,6 +52,7 @@ from indi_mcp.script_runs import (
     ScriptRunStatus,
 )
 from indi_mcp.script_store import FrameType, Script, ScriptSummary
+from indi_mcp.server_info import ServerInfo
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +165,12 @@ async def _unsubscribe_from_event_stream(uri: AnyUrl) -> None:
     """Handle `resources/unsubscribe`, undoing a prior `_subscribe_to_event_stream` call."""
     session = mcp._mcp_server.request_context.session
     event_streams.unsubscribe(_require_subscribable_uri(uri), session)
+
+
+@mcp.tool()
+async def get_server_info() -> ServerInfo:
+    """Report this MCP server's package version and last-merge build timestamp."""
+    return server_info.get_server_info()
 
 
 @mcp.tool()

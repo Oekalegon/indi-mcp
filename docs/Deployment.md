@@ -122,3 +122,13 @@ sudo -u indi-mcp git pull
 sudo -u indi-mcp uv sync --no-dev
 sudo systemctl restart indi-mcp
 ```
+
+### Identifying a running instance
+
+The `get_server_info` MCP tool reports the package version (bumped by hand in
+`pyproject.toml` on releases) and a `buildTimestamp` — when `develop` was
+last merged, written automatically into `src/indi_mcp/_build_info.py` by
+`.github/workflows/build-timestamp.yml`. There's no reliable way to bake in
+the exact commit id (see that workflow file for why), so the timestamp is
+the closest cheap proxy for "which merge is this running": a `git pull` that
+picks up new commits will always also pick up a newer timestamp.

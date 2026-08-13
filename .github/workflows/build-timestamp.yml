@@ -1,0 +1,80 @@
+name: Update build timestamp
+
+# This workflow's own commit lands on develop without going through
+# python-ci.yml — the bot push below uses the default GITHUB_TOKEN, which
+# doesn't retrigger other push-based workflows, so it is never linted,
+# type-checked, or tested. This bypasses ruff/ty/pytest by design; keep the
+# generated content in _build_info.py to the trivial single-line literal it
+# is today so that gap stays low-risk.
+
+on:
+  push:
+    branches: [develop]
+
+concurrency:
+  # Two merges landing close together must not race to push _build_info.py —
+  # serialize runs so the second one always rebases onto the first's commit.
+  group: build-timestamp-develop
+
+jobs:
+  stamp:
+    # No explicit recursion guard needed: GitHub Actions natively skips any
+    # push-triggered workflow run whose commit message contains `[skip ci]`
+    # (see the commit message below), and pushes made with the default
+    # GITHUB_TOKEN don't trigger new workflow runs at all regardless of
+    # message. Either alone already prevents this job from retriggering
+    # itself.
+    runs-on: ubuntu-latest
+    # This job pushes straight to develop with the default GITHUB_TOKEN, bypassing
+    # PR review and status checks — verified as of 2026-08-13 that develop has no
+    # branch protection rule and the repo has no rulesets (`gh api
+    # repos/Oekalegon/indi-mcp/branches/develop/protection` → "Branch not protected";
+    # `gh api repos/Oekalegon/indi-mcp/rulesets` → `[]`). If that ever changes to
+    # require PRs/status checks on develop, this push will start failing with a 403
+    # on every run — either exempt this workflow's actor or switch this job to open
+    # a PR instead of pushing directly.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Write build timestamp
+        run: |
+          TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > src/indi_mcp/_build_info.py <<EOF
+          """Auto-generated on every merge to \`develop\` by \`.github/workflows/build-timestamp.yml\`.
+
+          Do not edit by hand — changes will be overwritten on the next merge. The
+          placeholder below is what a local checkout has until CI has run against it.
+          """
+
+          BUILD_TIMESTAMP: str | None = "${TIMESTAMP}"
+          EOF
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- src/indi_mcp/_build_info.py; then
+            echo "No change to build timestamp; skipping commit."
+            exit 0
+          fi
+          git add src/indi_mcp/_build_info.py
+          git commit -m "chore: update build timestamp [skip ci]"
+
+          # develop may have moved since checkout (e.g. another merge landed
+          # while this job ran) — rebase onto the latest and retry a couple
+          # of times before giving up, rather than failing on a stale push.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:develop; then
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt) — fetching and rebasing onto latest develop."
+            git fetch origin develop
+            git rebase origin/develop
+          done
+          echo "Push still rejected after retries; giving up." >&2
+          exit 1
