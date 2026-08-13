@@ -14,6 +14,14 @@ jobs:
     # Guard against the workflow re-triggering on its own commit.
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
+    # This job pushes straight to develop with the default GITHUB_TOKEN, bypassing
+    # PR review and status checks — verified as of 2026-08-13 that develop has no
+    # branch protection rule and the repo has no rulesets (`gh api
+    # repos/Oekalegon/indi-mcp/branches/develop/protection` → "Branch not protected";
+    # `gh api repos/Oekalegon/indi-mcp/rulesets` → `[]`). If that ever changes to
+    # require PRs/status checks on develop, this push will start failing with a 403
+    # on every run — either exempt this workflow's actor or switch this job to open
+    # a PR instead of pushing directly.
     permissions:
       contents: write
     steps:
