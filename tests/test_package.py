@@ -18,6 +18,12 @@ def test_server_has_expected_name() -> None:
     assert mcp.name == "indi-mcp"
 
 
+async def test_get_server_info_is_registered_as_a_tool() -> None:
+    tools = await mcp.list_tools()
+
+    assert "get_server_info" in [tool.name for tool in tools]
+
+
 def test_main_defaults_to_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
     monkeypatch.setattr(indi_mcp, "run", lambda **kwargs: calls.append(kwargs))

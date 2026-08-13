@@ -24,7 +24,12 @@ class ServerInfo(TypedDict):
 
 
 def get_server_info() -> ServerInfo:
-    """Report the running server's package version and last-merge build timestamp."""
+    """Report the running server's package version and last-merge build timestamp.
+
+    `importlib.metadata.version` does synchronous filesystem I/O, but it's a
+    cheap one-off dist-info read on a tool a client calls rarely, not a hot
+    path — not worth `asyncio.to_thread`'s overhead/complexity for this.
+    """
     try:
         package_version = version("indi-mcp")
     except PackageNotFoundError:
