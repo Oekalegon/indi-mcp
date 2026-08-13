@@ -363,18 +363,19 @@ Two separate concerns: finding out what frames exist (metadata, cheap, queried a
     "device": "ZWO CCD ASI2600MM Pro",
     "sizeBytes": 33554432,
     "capturedAt": "2026-07-14T22:04:11Z",
-    "transferredAt": null
+    "transferredAt": null,
+    "downloadUrl": "http://indi-mcp.local:8000/frames/frame-0001"
   }
 ]
 ```
 
 **`get_frame_metadata`** — the same shape for a single `frameId`, useful once a client already knows the id (e.g. from a `list_frames(runId=...)` call made after a `scriptCompleted` event).
 
-**Frame content is exposed as an MCP resource**, not embedded in a tool result: each frame gets a `frame://{frame_id}` URI, read via the standard `resources/read` request rather than a bespoke "download" tool — this reuses MCP's existing binary content handling (a base64 `blob` resource content) instead of inventing another transfer mechanism.
+**Frame content is downloaded over plain HTTP, not read as an MCP resource** (INDIMCP-89, superseding the original `frame://{frame_id}` resource design below). Each frame's `downloadUrl` above points at `GET /frames/{frameId}` — a plain Starlette route registered via FastMCP's `custom_route` (see `server.py`'s `download_frame`), living on the same host/port as the MCP endpoint itself but entirely outside the MCP session/protocol. The handler streams the file straight off disk (`FileResponse`); no base64 encoding, no full in-memory buffering, no single-message size ceiling. `downloadUrl` is `null` when the server has no HTTP listener to build one from (the `stdio` transport, e.g. local testing) — there's nothing to point at in that case.
+
+Originally, frame content was exposed as an MCP resource instead: each frame got a `frame://{frame_id}` URI, read via the standard `resources/read` request, reusing MCP's existing binary content handling (a base64 `blob` resource content) rather than inventing a separate transfer mechanism. This was deliberately left open at the time ("deferred until real frame sizes from actual hardware are known rather than solved speculatively now") — MCP's resource-read mechanism returns the whole content in one JSON-RPC response, with no native chunked/range read to fall back on for a large one. Real frame sizes turned out to matter: an 18MB raw (~23MB base64-encoded) dark frame disconnected a real MCP client reading it this way. Since that's a protocol-level ceiling (any MCP client hits it eventually, just at a different size threshold depending on its own timeout/memory limits, not something specific to one client implementation), the fix moves the bytes outside the MCP protocol entirely rather than inventing an offset/length chunking convention on top of it. `frame://{frame_id}` itself has been removed — there was no safe use case left for it once it broke on real frame sizes, and keeping two ways to fetch the same bytes would mean two code paths to maintain and test for one that's known to fail. The new endpoint is unauthenticated, same as every MCP tool/resource this server already exposes over `streamable-http` (see Deployment.md's Hardening notes) — this doesn't introduce a new class of exposure, just a new URL path with the same trust model. The URL's host comes from `socket.gethostname()`, not the server's own bind address (`--host`, typically the wildcard `0.0.0.0` in production per Deployment.md, not itself a reachable client-facing address).
 
 **Explicit transfer confirmation, not read-implies-received.** `transferred_at` is *not* set just because the server sent the bytes — a network drop mid-transfer shouldn't be recorded as a successful transfer. Instead, the client calls a `confirm_frame_transfer` tool with the `frameId` once it has verified the frame is safely saved locally; only that sets `transferred_at`. This follows the same "don't trust delivery, wait for acknowledgement" principle already applied to the event log and script status.
-
-**Open question, not resolved here:** MCP's base resource-read mechanism returns the whole content in one response — there's no native chunked/range read. For typical FITS frames this is likely fine, but if frame sizes turn out to be large enough to matter (very large sensors, or long-exposure stacks) we may need our own chunking convention (e.g. `offset`/`length` parameters) layered on top. Deferred until real frame sizes from actual hardware are known rather than solved speculatively now.
 
 ## Deleting frames
 

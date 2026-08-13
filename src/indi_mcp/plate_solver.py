@@ -378,10 +378,10 @@ async def solve_uploaded_frame(
     Saved via `frame_store.save_frame` with `device="uploaded"` and no `run_id` (an ad hoc
     capture, per that module's own "`run_id=None` for a frame captured outside any script
     run" convention) — this makes the uploaded frame a first-class citizen of the frame
-    store: it shows up in `list_frames`, is retrievable via `frame://{frameId}` once solved
-    (WCS included), and is subject to the same explicit-confirm-then-delete lifecycle as any
-    other frame. Kept even if the solve fails, so the caller can still retrieve/inspect
-    what they uploaded.
+    store: it shows up in `list_frames`, downloadable via its returned `downloadUrl`
+    (INDIMCP-89) once solved (WCS included), and is subject to the same
+    explicit-confirm-then-delete lifecycle as any other frame. Kept even if the solve fails,
+    so the caller can still retrieve/inspect what they uploaded.
 
     Raises `ValueError` if `data` exceeds `MAX_UPLOADED_FRAME_BYTES_ENV` (checked first,
     before any decode/validation work — unlike a `capture_frame`-sourced frame, bounded by a
@@ -422,7 +422,7 @@ async def solve_uploaded_frame(
     if result is None:
         raise ValueError(
             f"solve-field did not solve the uploaded frame (saved as frameId {frame_id!r}; "
-            "not deleted, retrievable via the frame:// resource without WCS headers)"
+            "not deleted, retrievable via list_frames's downloadUrl without WCS headers)"
         )
 
     await write_wcs_headers(frame_id, frame_path, result)
