@@ -82,6 +82,20 @@ async def test_publish_message_event_drops_exact_consecutive_duplicate() -> None
     assert event_streams._duplicate_message_event_count == 1
 
 
+async def test_publish_message_event_keeps_the_event_after_a_dropped_duplicate() -> None:
+    """A dropped duplicate must not leave `_last_message_event` unset or stale -- the next,
+    genuinely different event must still be compared against (and kept over) the original."""
+    event = {"kind": "propertyUpdate", "device": "CCD Simulator", "name": "CCD_EXPOSURE"}
+    other = {"kind": "propertyUpdate", "device": "Telescope Simulator", "name": "EQUATORIAL_EOD"}
+
+    event_streams.publish_message_event(event)
+    event_streams.publish_message_event(dict(event))
+    event_streams.publish_message_event(other)
+
+    assert event_streams.read_messages() == {"events": [other, event]}
+    assert event_streams._duplicate_message_event_count == 1
+
+
 async def test_publish_message_event_keeps_events_that_differ() -> None:
     """Only a field-for-field identical repeat is dropped -- e.g. a changed timestamp (a
     genuinely new update reporting the same state) must still be kept."""

@@ -111,13 +111,14 @@ _record_worker_task: asyncio.Task | None = None
 """The single persistent task draining `_record_queue` — see `_record_worker`."""
 
 _DROP_LOG_INTERVAL = 100
-"""Log only every Nth dropped event during a sustained overload, not every single one.
+"""Log only every Nth dropped/deduplicated event during a sustained run of them, not every one.
 
-Logging isn't free (formatting, handler I/O) — during the one scenario this drop path actually
-exists for (a sustained burst overwhelming the queue), unconditionally logging every drop would
-itself add a steady stream of small synchronous work back onto the event loop, working against
-the very goal (bounding how much work a burst can pile onto this process) `_RECORD_QUEUE_MAXSIZE`
-exists for.
+Logging isn't free (formatting, handler I/O) — during the scenarios these drop paths actually
+exist for (`_schedule_record`'s queue overwhelmed by a sustained burst; `publish_message_event`
+deduping a run of consecutive-duplicate events, INDIMCP-88), unconditionally logging every drop
+would itself add a steady stream of small synchronous work back onto the event loop, working
+against the very goal (bounding how much work a burst can pile onto this process) both paths
+exist for.
 """
 
 _dropped_event_count = 0
@@ -402,17 +403,24 @@ def publish_message_event(event: Mapping) -> None:
     published event (not a per-device history) matches how the duplicates were observed: as
     literal neighbors in the stream, not merely two events that happen to share the same value.
 
+    This also applies to the locally synthesized `propertyCommand` events `send_property`
+    publishes, not just events actually received from the wire — intentionally: a repeated
+    command is just as wasteful to buffer/persist twice as a repeated wire update, and
+    `send_property` stamps a fresh microsecond-precision timestamp on every call, so two
+    genuinely separate commands are never mistaken for one duplicate in practice.
+
     Also durably persisted to the event log — see `_schedule_record`.
     """
     global _last_message_event, _duplicate_message_event_count
     if event == _last_message_event:
         _duplicate_message_event_count += 1
-        logger.debug(
-            "Dropped a duplicate messaging event (device=%r, name=%r); %d dropped so far",
-            event.get("device"),
-            event.get("name"),
-            _duplicate_message_event_count,
-        )
+        if _duplicate_message_event_count % _DROP_LOG_INTERVAL == 1:
+            logger.debug(
+                "Dropped a duplicate messaging event (device=%r, name=%r); %d dropped so far",
+                event.get("device"),
+                event.get("name"),
+                _duplicate_message_event_count,
+            )
         return
     _last_message_event = dict(event)
     _messages.appendleft(event)
