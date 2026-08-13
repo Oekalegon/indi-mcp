@@ -6,6 +6,11 @@ description: >
   `run_script: cooler_off` instead of repeating the raw set_property/wait_for steps, see
   docs/Design.md's "Composing scripts" section (INDIMCP-84).
 
+  Waits on the COOLER_OFF element itself reaching "On", not CCD_COOLER's overall vector
+  state reaching Ok — matching cooler_on's own reasoning (INDIMCP-93): the vector state
+  can stay Busy well past the switch being accepted on some drivers, while the element
+  itself reflects the accepted command quickly and consistently.
+
   Not every camera has active cooling. This standalone script fails outright if
   CCD_COOLER is undefined on the device, matching cooler_on's own reasoning - a direct
   cooler_off call implies the operator expects the camera to actually have one.
@@ -19,6 +24,7 @@ steps:
     condition:
       role: camera
       property: CCD_COOLER
+      element: COOLER_OFF
       operator: equals
-      value: Ok
+      value: "On"
     timeoutSeconds: 30
