@@ -1,0 +1,61 @@
+name: Update build timestamp
+
+on:
+  push:
+    branches: [develop]
+
+concurrency:
+  # Two merges landing close together must not race to push _build_info.py —
+  # serialize runs so the second one always rebases onto the first's commit.
+  group: build-timestamp-develop
+
+jobs:
+  stamp:
+    # Guard against the workflow re-triggering on its own commit.
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Write build timestamp
+        run: |
+          TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > src/indi_mcp/_build_info.py <<EOF
+          """Auto-generated on every merge to \`develop\` by \`.github/workflows/build-timestamp.yml\`.
+
+          Do not edit by hand — changes will be overwritten on the next merge. The
+          placeholder below is what a local checkout has until CI has run against it.
+          """
+
+          BUILD_TIMESTAMP: str | None = "${TIMESTAMP}"
+          EOF
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- src/indi_mcp/_build_info.py; then
+            echo "No change to build timestamp; skipping commit."
+            exit 0
+          fi
+          git add src/indi_mcp/_build_info.py
+          git commit -m "chore: update build timestamp [skip ci]"
+
+          # develop may have moved since checkout (e.g. another merge landed
+          # while this job ran) — rebase onto the latest and retry a couple
+          # of times before giving up, rather than failing on a stale push.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:develop; then
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt) — fetching and rebasing onto latest develop."
+            git fetch origin develop
+            git rebase origin/develop
+          done
+          echo "Push still rejected after retries; giving up." >&2
+          exit 1
