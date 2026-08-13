@@ -3,7 +3,7 @@ import base64
 import inspect
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, MutableMapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -15,7 +15,7 @@ from mcp.shared.context import RequestContext
 from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 from starlette.requests import Request
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, Response
 
 from indi_mcp import (
     astrometry_index,
@@ -988,6 +988,19 @@ async def test_get_frame_metadata_delegates_to_frame_store(
     assert calls == ["frame-1"]
 
 
+async def test_get_frame_metadata_includes_download_url_when_an_http_listener_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(frame_store, "get_frame_metadata", lambda frame_id: _FRAME_METADATA)
+    monkeypatch.setattr(server, "_current_transport", "streamable-http")
+    monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
+    monkeypatch.setattr(server.mcp.settings, "port", 8000)
+
+    result = await server.get_frame_metadata("frame-1")
+
+    assert result["downloadUrl"] == "http://indi-mcp-pi:8000/frames/frame-1"
+
+
 def test_frame_download_url_is_none_without_an_http_listener(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1138,6 +1151,30 @@ def _frame_download_request(frame_id: str) -> Request:
     )
 
 
+async def _send_asgi_response(response: Response) -> tuple[int, bytes]:
+    """Drive `response` through its real ASGI `__call__`, returning `(status, body)`.
+
+    Checking a `FileResponse`'s `.path`/`.media_type` attributes only confirms the right
+    object was *constructed* -- it never exercises `FileResponse`'s own async stat/read path,
+    so a real wiring break (wrong file, corrupted stream) wouldn't be caught. This drives the
+    actual ASGI protocol instead, the same way a real HTTP server would, without needing a
+    TestClient/httpx dependency just for one handler.
+    """
+    sent: list[MutableMapping[str, Any]] = []
+
+    async def receive() -> MutableMapping[str, Any]:
+        return {"type": "http.request"}
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        sent.append(message)
+
+    await response({"type": "http", "method": "GET", "headers": []}, receive, send)
+
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m["body"] for m in sent if m["type"] == "http.response.body")
+    return status, body
+
+
 async def test_download_frame_streams_the_frames_bytes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1158,6 +1195,10 @@ async def test_download_frame_streams_the_frames_bytes(
     assert response.path == frame_path
     assert response.media_type == "application/octet-stream"
 
+    status, body = await _send_asgi_response(response)
+    assert status == 200
+    assert body == b"fits-bytes"
+
 
 async def test_download_frame_returns_404_for_an_unknown_frame(
     monkeypatch: pytest.MonkeyPatch,
@@ -1170,6 +1211,10 @@ async def test_download_frame_returns_404_for_an_unknown_frame(
     response = await server.download_frame(_frame_download_request("does-not-exist"))
 
     assert response.status_code == 404
+
+    status, body = await _send_asgi_response(response)
+    assert status == 404
+    assert body == b"Frame not found"
 
 
 async def test_download_frame_route_is_registered() -> None:
