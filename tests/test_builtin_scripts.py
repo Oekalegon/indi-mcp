@@ -270,8 +270,8 @@ def test_builtin_cooler_on_script_sets_cooler_on_and_waits() -> None:
     assert isinstance(wait_step, script_store.WaitForStep)
     assert wait_step.condition.role == "camera"
     assert wait_step.condition.property == "CCD_COOLER"
-    assert wait_step.condition.element is None
-    assert wait_step.condition.value == "Ok"
+    assert wait_step.condition.element == "COOLER_ON"
+    assert wait_step.condition.value == "On"
 
 
 def test_builtin_abort_exposure_script_sets_abort_and_waits() -> None:
@@ -310,8 +310,8 @@ def test_builtin_cooler_off_script_sets_cooler_off_and_waits() -> None:
     assert isinstance(wait_step, script_store.WaitForStep)
     assert wait_step.condition.role == "camera"
     assert wait_step.condition.property == "CCD_COOLER"
-    assert wait_step.condition.element is None
-    assert wait_step.condition.value == "Ok"
+    assert wait_step.condition.element == "COOLER_OFF"
+    assert wait_step.condition.value == "On"
 
 
 def test_builtin_select_filter_script_is_a_thin_wrapper_around_the_select_filter_step() -> None:

@@ -6,11 +6,20 @@ description: >
   `run_script: cooler_on` instead of repeating the raw set_property/wait_for steps, see
   docs/Design.md's "Composing scripts" section (INDIMCP-84).
 
-  Not every camera has active cooling. Unlike cool_camera's own internal cooler-on step
-  (script_engine.py's _ensure_cooler_on, best-effort inside a larger sequence that should
-  still work on an uncooled camera), this standalone script fails outright if CCD_COOLER
-  is undefined on the device — a direct cooler_on call implies the operator expects the
-  camera to actually have one.
+  Waits on the COOLER_ON element itself reaching "On", not CCD_COOLER's overall vector
+  state reaching Ok (INDIMCP-93) — on some drivers the vector stays Busy well past the
+  switch being accepted, for as long as the cooler's PID loop is still actively
+  regulating/settling, which can legitimately take well over the timeout below and scales
+  with how far off the current temperature is. That's cool_camera's job (it waits on
+  CCD_TEMPERATURE reaching a target, with a caller-configurable, much longer timeout,
+  INDIMCP-56) — cooler_on only needs to confirm the driver accepted the switch command,
+  which the element itself reflects quickly and consistently across drivers, matching
+  cool_camera's own internal cooler-on step (script_engine.py's _ensure_cooler_on, which
+  doesn't wait on CCD_COOLER's state at all for exactly this reason).
+
+  Not every camera has active cooling. Unlike cool_camera's own internal cooler-on step,
+  this standalone script fails outright if CCD_COOLER is undefined on the device — a
+  direct cooler_on call implies the operator expects the camera to actually have one.
 pausable: false
 steps:
   - step: set_property
@@ -21,6 +30,7 @@ steps:
     condition:
       role: camera
       property: CCD_COOLER
+      element: COOLER_ON
       operator: equals
-      value: Ok
+      value: "On"
     timeoutSeconds: 30
