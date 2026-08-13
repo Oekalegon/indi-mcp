@@ -70,6 +70,101 @@ async def test_read_messages_buffer_is_bounded() -> None:
     assert events[0]["i"] == event_streams._MAX_BUFFERED_EVENTS + 9
 
 
+async def test_publish_message_event_drops_exact_consecutive_duplicate() -> None:
+    """`indipyclient`/`indiserver` have been observed occasionally delivering the exact same
+    `set*Vector` twice in a row (INDIMCP-88) -- the second copy must not double up the buffer."""
+    event = {"kind": "propertyUpdate", "device": "CCD Simulator", "name": "CCD_EXPOSURE"}
+
+    event_streams.publish_message_event(event)
+    event_streams.publish_message_event(dict(event))
+
+    assert event_streams.read_messages() == {"events": [event]}
+    assert event_streams._duplicate_message_event_count == 1
+
+
+async def test_publish_message_event_keeps_the_event_after_a_dropped_duplicate() -> None:
+    """A dropped duplicate must not leave `_last_message_event` unset or stale -- the next,
+    genuinely different event must still be compared against (and kept over) the original."""
+    event = {"kind": "propertyUpdate", "device": "CCD Simulator", "name": "CCD_EXPOSURE"}
+    other = {"kind": "propertyUpdate", "device": "Telescope Simulator", "name": "EQUATORIAL_EOD"}
+
+    event_streams.publish_message_event(event)
+    event_streams.publish_message_event(dict(event))
+    event_streams.publish_message_event(other)
+
+    assert event_streams.read_messages() == {"events": [other, event]}
+    assert event_streams._duplicate_message_event_count == 1
+
+
+async def test_publish_message_event_keeps_events_that_differ() -> None:
+    """Only a field-for-field identical repeat is dropped -- e.g. a changed timestamp (a
+    genuinely new update reporting the same state) must still be kept."""
+    event_streams.publish_message_event(
+        {"kind": "propertyUpdate", "device": "CCD Simulator", "timestamp": "2026-08-12T17:59:28"}
+    )
+    event_streams.publish_message_event(
+        {"kind": "propertyUpdate", "device": "CCD Simulator", "timestamp": "2026-08-12T17:59:29"}
+    )
+
+    assert len(event_streams.read_messages()["events"]) == 2
+    assert event_streams._duplicate_message_event_count == 0
+
+
+async def test_publish_message_event_does_not_dedupe_non_consecutive_repeats() -> None:
+    """Only an *immediately preceding* repeat counts as a duplicate -- the same event
+    reappearing later, with a different event in between, is a legitimate new occurrence."""
+    event = {"kind": "propertyUpdate", "device": "CCD Simulator", "name": "CCD_EXPOSURE"}
+    other = {"kind": "propertyUpdate", "device": "Telescope Simulator", "name": "EQUATORIAL_EOD"}
+
+    event_streams.publish_message_event(event)
+    event_streams.publish_message_event(other)
+    event_streams.publish_message_event(dict(event))
+
+    assert len(event_streams.read_messages()["events"]) == 3
+    assert event_streams._duplicate_message_event_count == 0
+
+
+async def test_publish_message_event_duplicate_is_not_recorded_or_notified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped duplicate must not double the durable-write load or fire a spurious
+    notification -- both of which the original bug report flagged as real costs, not just a
+    cosmetic buffer issue."""
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        event_log,
+        "record_event",
+        lambda stream, payload, *, device, run_id, db_path=None: calls.append(
+            (stream, payload, device, run_id)
+        ),
+    )
+    session = _FakeSession()
+    event_streams.subscribe(event_streams.messages_uri(None), session)
+    event = {"kind": "message", "device": "CCD Simulator"}
+
+    event_streams.publish_message_event(event)
+    await asyncio.sleep(0.05)
+    session.updated.clear()
+    event_streams.publish_message_event(dict(event))
+    await asyncio.sleep(0.05)
+
+    assert calls == [("messages", event, "CCD Simulator", None)]
+    assert session.updated == []
+
+
+async def test_clear_messages_resets_duplicate_detection() -> None:
+    """A fresh connection's first event must not be dropped as a false "duplicate" of
+    whatever the previous session happened to send last."""
+    event = {"kind": "message", "device": "CCD Simulator"}
+    event_streams.publish_message_event(event)
+
+    event_streams.clear_messages()
+    event_streams.publish_message_event(dict(event))
+
+    assert event_streams.read_messages() == {"events": [event]}
+    assert event_streams._duplicate_message_event_count == 0
+
+
 async def test_publishing_a_message_notifies_the_unscoped_and_device_scoped_subscribers() -> None:
     session = _FakeSession()
     event_streams.subscribe(event_streams.messages_uri(None), session)

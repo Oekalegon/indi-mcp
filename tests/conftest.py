@@ -25,10 +25,15 @@ async def _reset_event_streams_record_worker():
     instead of pytest-asyncio warning about a pending task. `_dropped_event_count` is reset
     alongside them so a test asserting on drop counts/throttled logging (see
     `_DROP_LOG_INTERVAL`) starts from zero regardless of what an earlier test dropped.
+    `_last_message_event`/`_duplicate_message_event_count` (INDIMCP-88) are reset the same
+    way, so one test's last-published event is never mistaken for a duplicate by the next
+    test's first publish.
     """
     event_streams._record_queue = None
     event_streams._record_worker_task = None
     event_streams._dropped_event_count = 0
+    event_streams._last_message_event = None
+    event_streams._duplicate_message_event_count = 0
     yield
     if event_streams._record_worker_task is not None:
         event_streams._record_worker_task.cancel()
@@ -37,6 +42,8 @@ async def _reset_event_streams_record_worker():
     event_streams._record_queue = None
     event_streams._record_worker_task = None
     event_streams._dropped_event_count = 0
+    event_streams._last_message_event = None
+    event_streams._duplicate_message_event_count = 0
 
 
 @pytest.fixture(autouse=True)
