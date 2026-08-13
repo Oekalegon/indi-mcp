@@ -171,6 +171,8 @@ rather than `scriptCompleted` duplicating data that already lives in the `frames
 }
 ```
 
+Cancelling while a `capture_frame` step's exposure is still in flight also sends `CCD_ABORT_EXPOSURE` to the camera, best-effort, before returning `scriptCancelled` (INDIMCP-86) — otherwise the camera would keep physically exposing after the run itself has already stopped. This is the only step type cancellation reaches into like this; every other step still just stops promptly at the next safe point with no device-specific cleanup. `abort_exposure` (above) also exists as its own standalone tool, for aborting an exposure outside of any script run.
+
 **Pausing and resuming** — `pause_script` and `resume_script` tool calls, also taking just the `runId`. These only succeed if the run's `pausable` flag was `true`:
 
 ```json

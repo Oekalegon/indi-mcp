@@ -123,6 +123,15 @@ camera driver this project has been tested against uses it), hardcoded
 here the same way `slew` hardcodes `EQUATORIAL_EOD_COORD`.
 """
 
+_CCD_ABORT_EXPOSURE_VECTOR = "CCD_ABORT_EXPOSURE"
+_CCD_ABORT_EXPOSURE_ELEMENT = "ABORT"
+"""Standard INDI CCD property/element used to physically stop an in-progress exposure.
+
+Same convention `scripts/abort_exposure.yaml` (INDIMCP-86) sends as a standalone
+tool call; `_execute_capture_frame` also sends it itself when a script run is
+cancelled mid-exposure (INDIMCP-86) — see `_abort_exposure_on_cancel`.
+"""
+
 _FRAME_TYPE_ELEMENTS = {
     "Light": "FRAME_LIGHT",
     "Dark": "FRAME_DARK",
@@ -1374,6 +1383,36 @@ async def _wait_for_property_state(
         await asyncio.sleep(_WAIT_POLL_INTERVAL_SECONDS)
 
 
+async def _abort_exposure_on_cancel(device: str) -> None:
+    """Best-effort: tell `device`'s driver to physically stop exposing after a cancellation.
+
+    Called only from `_execute_capture_frame`, when a script run is cancelled while its
+    `CCD_EXPOSURE` wait is still in flight (INDIMCP-86) — `cancel_script`'s own
+    `ScriptCancelled` only ever stops the MCP-side script/polling on its own (raised inside
+    `_wait_for_property_state`'s poll loop, see `_check_cancelled`); nothing else tells the
+    driver to stop, so without this the camera would keep physically exposing regardless of
+    the cancellation.
+
+    Fire-and-forget rather than waiting for the driver to confirm (unlike
+    `scripts/abort_exposure.yaml`'s own standalone `wait_for`) — a cancellation should
+    return promptly, and a camera whose driver doesn't define `CCD_ABORT_EXPOSURE`
+    (`send_property` raises `ValueError`) or is slow/unresponsive to it must not turn a
+    clean cancellation into a stuck or failed one. Either case is logged and swallowed here,
+    not raised, so it never masks or delays the `ScriptCancelled` this is called to handle.
+    """
+    try:
+        await indi_messaging.send_property(
+            device, _CCD_ABORT_EXPOSURE_VECTOR, {_CCD_ABORT_EXPOSURE_ELEMENT: "On"}
+        )
+    except Exception:
+        logger.warning(
+            "Failed to send %s to %s after cancelling its in-progress exposure",
+            _CCD_ABORT_EXPOSURE_VECTOR,
+            device,
+            exc_info=True,
+        )
+
+
 async def _execute_run_script(
     step: RunScriptStep,
     ctx: _ExecutionContext,
@@ -1508,13 +1547,20 @@ async def _execute_capture_frame(
     await indi_messaging.send_property(
         device, "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": str(exposure)}
     )
-    await _wait_for_property_state(
-        ctx,
-        device,
-        "CCD_EXPOSURE",
-        indi_messaging.PropertyState.OK,
-        deadline - asyncio.get_running_loop().time(),
-    )
+    try:
+        await _wait_for_property_state(
+            ctx,
+            device,
+            "CCD_EXPOSURE",
+            indi_messaging.PropertyState.OK,
+            deadline - asyncio.get_running_loop().time(),
+        )
+    except ScriptCancelled:
+        # Only here, not around _wait_for_blob below: by the time CCD_EXPOSURE reaches Ok,
+        # the camera has already finished physically exposing, so a cancellation from that
+        # point on has nothing left to abort.
+        await _abort_exposure_on_cancel(device)
+        raise
     data, extension = await _wait_for_blob(
         ctx, device, _CCD_BLOB_VECTOR, since, deadline - asyncio.get_running_loop().time()
     )
