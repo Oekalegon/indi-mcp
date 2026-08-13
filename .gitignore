@@ -33,6 +33,9 @@ storage/
 # Operator rig definitions (save_rig/update_component_slots) — runtime data, not versioned
 /rigs/
 
+# Observatory location definitions (save_observatory) — runtime data, not versioned
+/observatories/
+
 # Editors / OS
 .vscode/
 .idea/
