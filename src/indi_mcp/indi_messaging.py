@@ -42,9 +42,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "BlobSnapshot",
+    "DeviceProperties",
+    "DeviceProperty",
     "IndiEvent",
     "MessagingStatus",
     "PropertyState",
+    "get_device_properties",
     "get_latest_blob",
     "get_property_range",
     "get_property_state",
@@ -59,6 +62,9 @@ __all__ = [
 
 _STARTUP_POLL_TIMEOUT = 2.0
 _STARTUP_POLL_INTERVAL = 0.1
+_PROPERTY_REFRESH_TIMEOUT = 1.0
+_PROPERTY_REFRESH_POLL_INTERVAL = 0.05
+_PROPERTY_REFRESH_QUIET_PERIOD = 0.15
 
 _DEF_VECTOR_TYPES: dict[type, str] = {
     defSwitchVector: "switch",
@@ -127,6 +133,30 @@ class MessagingStatus(TypedDict):
     running: bool
     host: str
     port: int
+
+
+class DeviceProperty(TypedDict):
+    """Snapshot of one property vector on a device, as returned by `get_device_properties`."""
+
+    type: str | None
+    state: PropertyState | str | None
+    elements: dict[str, str]
+
+
+class DeviceProperties(TypedDict):
+    """Result of `get_device_properties`: a device's properties plus whether they're confirmed live.
+
+    `refreshed` is `True` only if the messaging client actually observed a
+    `def*Vector`/`set*Vector` event for the device after the `getProperties`
+    request was sent (see `get_device_properties`). `False` means no such
+    event arrived within `timeout_seconds`, and `properties` has fallen back
+    to whatever the device's vectors held beforehand — still returned, since
+    a last-known reading is usually more useful to a caller than nothing, but
+    one that a caller needing certainty of a live reading must check for.
+    """
+
+    properties: dict[str, DeviceProperty]
+    refreshed: bool
 
 
 class BlobSnapshot(TypedDict):
@@ -205,6 +235,13 @@ class _MessagingClient(IPyClient):
         indi_event = _to_indi_event(event)
         if indi_event is not None:
             event_streams.publish_message_event(indi_event)
+            if indi_event["device"] is not None and indi_event["kind"] in (
+                "propertyDefinition",
+                "propertyUpdate",
+            ):
+                _device_last_property_event_at[indi_event["device"]] = (
+                    asyncio.get_running_loop().time()
+                )
         if isinstance(event, setBLOBVector):
             _latest_blobs[(event.devicename, event.vectorname)] = {
                 "values": dict(event.data),
@@ -214,6 +251,7 @@ class _MessagingClient(IPyClient):
 
 
 _latest_blobs: dict[tuple[str, str], BlobSnapshot] = {}
+_device_last_property_event_at: dict[str, float] = {}
 _client: _MessagingClient | None = None
 _task: asyncio.Task | None = None
 _host = "localhost"
@@ -234,6 +272,7 @@ async def start_messaging(host: str = "localhost", port: int = INDI_PORT) -> Mes
     logger.info("Starting INDI messaging client (%s:%d)", host, port)
     event_streams.clear_messages()
     _latest_blobs.clear()
+    _device_last_property_event_at.clear()
     _client = _MessagingClient(host, port)
     _host, _port = host, port
     _task = asyncio.create_task(_client.asyncrun())
@@ -278,6 +317,68 @@ def list_devices() -> list[str]:
     """List the INDI device names currently known to the messaging client."""
     client = _require_client()
     return list(client.data.keys())
+
+
+async def get_device_properties(
+    device: str, timeout_seconds: float = _PROPERTY_REFRESH_TIMEOUT
+) -> DeviceProperties:
+    """Query `indiserver` for the live state of every property on `device`.
+
+    Sends a `getProperties` request scoped to `device`, then polls — rather
+    than unconditionally sleeping out `timeout_seconds` — until either the
+    running messaging client's `rxevent` handler has recorded a fresh
+    `def*Vector`/`set*Vector` for `device` (updating `client.data` as it
+    goes) and stayed quiet for `_PROPERTY_REFRESH_QUIET_PERIOD` since, or
+    `timeout_seconds` elapses. INDI has no explicit "end of properties"
+    reply, so "the driver has settled" is a heuristic (a quiet period after
+    the most recent update), not something that can be detected exactly;
+    the quiet period bounds how long a burst of several `def*Vector`s for
+    the same device is given to finish arriving before this returns.
+
+    Returns whatever `client.data` holds for `device` regardless of whether
+    the driver actually responded in time, but sets `refreshed` accordingly
+    — `True` only if an update was actually observed after this request was
+    sent, `False` if the wait timed out and `properties` is a fallback to
+    whatever was cached beforehand (see `DeviceProperties`). Callers that
+    need to know whether they got a confirmed-live reading, as opposed to
+    silently getting stale data back, must check this flag rather than
+    assume a returned dict means the driver replied.
+
+    Raises `ValueError` if `device` is still unknown to the client once the
+    wait elapses (never connected, wrong name, or offline).
+    """
+    client = _require_client()
+    loop = asyncio.get_running_loop()
+    request_started_at = loop.time()
+    await client.send_getProperties(device)
+    deadline = request_started_at + timeout_seconds
+    while True:
+        last_event_at = _device_last_property_event_at.get(device)
+        if (
+            last_event_at is not None
+            and last_event_at >= request_started_at
+            and loop.time() - last_event_at >= _PROPERTY_REFRESH_QUIET_PERIOD
+        ):
+            break
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(_PROPERTY_REFRESH_POLL_INTERVAL)
+    device_obj = client.data.get(device)
+    if device_obj is None:
+        raise ValueError(f"Unknown INDI device: {device!r}")
+    last_event_at = _device_last_property_event_at.get(device)
+    refreshed = last_event_at is not None and last_event_at >= request_started_at
+    return {
+        "properties": {
+            vector_name: {
+                "type": _VECTORTYPE_TO_TYPE.get(vector.vectortype),
+                "state": _coerce_property_state(vector.state),
+                "elements": {member_name: vector[member_name] for member_name in vector.data},
+            }
+            for vector_name, vector in device_obj.data.items()
+        },
+        "refreshed": refreshed,
+    }
 
 
 def get_property_values(device: str, name: str) -> dict[str, str] | None:
