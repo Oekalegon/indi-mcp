@@ -79,8 +79,10 @@ async def stop_server() -> IndiServerStatus:
     logger.info("Stopping indiserver on port %d", _current_port)
     await asyncio.to_thread(_server.stop, _current_port)
     if _async_cmd is not None:
-        await asyncio.to_thread(_terminate, _async_cmd)
-        _async_cmd = None
+        try:
+            await asyncio.to_thread(_terminate, _async_cmd)
+        finally:
+            _async_cmd = None
     return await get_status()
 
 
@@ -101,8 +103,8 @@ def _terminate(async_cmd: AsyncSystemCommand) -> None:
     """
     try:
         async_cmd.terminate()
-    except ProcessLookupError:
-        logger.warning("indiserver process already exited before terminate() was called")
+    except ProcessLookupError as exc:
+        logger.warning("indiserver process already exited before terminate(): %s", exc)
 
 
 async def restart_server(port: int | None = None) -> IndiServerStatus:

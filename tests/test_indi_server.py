@@ -82,6 +82,8 @@ async def test_stop_server_does_not_swallow_other_terminate_errors(mocks: Mocks)
     with pytest.raises(RuntimeError, match="boom"):
         await indi_server.stop_server()
 
+    assert indi_server._async_cmd is None
+
 
 async def test_restart_server_keeps_current_port_by_default(mocks: Mocks) -> None:
     mocks.server.is_running.return_value = True
