@@ -11,8 +11,12 @@ concurrency:
 
 jobs:
   stamp:
-    # Guard against the workflow re-triggering on its own commit.
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    # No explicit recursion guard needed: GitHub Actions natively skips any
+    # push-triggered workflow run whose commit message contains `[skip ci]`
+    # (see the commit message below), and pushes made with the default
+    # GITHUB_TOKEN don't trigger new workflow runs at all regardless of
+    # message. Either alone already prevents this job from retriggering
+    # itself.
     runs-on: ubuntu-latest
     # This job pushes straight to develop with the default GITHUB_TOKEN, bypassing
     # PR review and status checks — verified as of 2026-08-13 that develop has no
