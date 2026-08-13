@@ -123,6 +123,16 @@ exists for.
 _dropped_event_count = 0
 """Total events dropped by `_schedule_record` since the process started (or the last test reset)."""
 
+_last_message_event: Mapping | None = None
+"""The most recently published messaging event, kept only to detect an exact repeat — see
+`publish_message_event` (INDIMCP-88). `None` right after startup or `clear_messages()`, so the
+first event of a fresh connection is never mistaken for a duplicate of one from a previous
+session."""
+
+_duplicate_message_event_count = 0
+"""Total consecutive-duplicate messaging events dropped since the process started (or the last
+test reset) — see `publish_message_event`."""
+
 
 async def drain() -> None:
     """Wait for every in-flight notification and queued durable write to finish.
@@ -381,8 +391,30 @@ def _schedule_record(
 def publish_message_event(event: Mapping) -> None:
     """Record a messaging-layer event and notify `indi://messages` (and per-device) subscribers.
 
+    Drops `event` if it is field-for-field identical to the immediately preceding one
+    (INDIMCP-88). `indipyclient`/`indiserver` have been observed occasionally delivering the
+    exact same `set*Vector` twice in a row — same device, property, elements, state, and
+    timestamp — even though `indi_messaging._MessagingClient.rxevent` calls this function
+    exactly once per event it receives, so the duplication isn't introduced on this side. Left
+    unfiltered, each duplicate wastes half the rolling buffer's retention window and doubles the
+    durable-write load for no new information, since a byte-for-byte repeat carries nothing a
+    client couldn't already see in the first copy. Comparing against the single most recently
+    published event (not a per-device history) matches how the duplicates were observed: as
+    literal neighbors in the stream, not merely two events that happen to share the same value.
+
     Also durably persisted to the event log — see `_schedule_record`.
     """
+    global _last_message_event, _duplicate_message_event_count
+    if event == _last_message_event:
+        _duplicate_message_event_count += 1
+        logger.debug(
+            "Dropped a duplicate messaging event (device=%r, name=%r); %d dropped so far",
+            event.get("device"),
+            event.get("name"),
+            _duplicate_message_event_count,
+        )
+        return
+    _last_message_event = dict(event)
     _messages.appendleft(event)
     device = event.get("device")
     _schedule_record("messages", event, device=device, run_id=None)
@@ -412,9 +444,13 @@ def clear_messages() -> None:
     separate buffer in `indi_messaging` itself), so starting a fresh session
     clears it here, the same way `_latest_blobs` is cleared alongside it.
     Subscriptions/notifications are untouched — only the rolling read
-    buffer is reset.
+    buffer is reset. Also resets `_last_message_event` (INDIMCP-88), so the
+    first event of the new session is never dropped as a false "duplicate"
+    of whatever the previous session's connection last happened to send.
     """
+    global _last_message_event
     _messages.clear()
+    _last_message_event = None
 
 
 def read_messages(device: str | None = None) -> dict[str, list[Mapping]]:
