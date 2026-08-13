@@ -1,0 +1,26 @@
+id: abort_exposure
+name: Abort the camera's in-progress exposure
+description: >
+  Aborts the rig's camera's current exposure (CCD_ABORT_EXPOSURE.ABORT=On) and waits
+  for the driver to confirm — a thin, reusable wrapper so composed sequences or a
+  standalone call can `run_script: abort_exposure` instead of repeating the raw
+  set_property/wait_for steps, see docs/Design.md's "Composing scripts" section
+  (INDIMCP-86).
+
+  This only tells the camera driver to stop physically exposing. cancel_script's own
+  cancellation (raising ScriptCancelled between steps/poll iterations) does not send
+  this itself, so cancelling a run with a capture_frame step in flight leaves the
+  camera exposing until abort_exposure is called separately.
+pausable: false
+steps:
+  - step: set_property
+    role: camera
+    property: CCD_ABORT_EXPOSURE
+    elements: { ABORT: "On" }
+  - step: wait_for
+    condition:
+      role: camera
+      property: CCD_ABORT_EXPOSURE
+      operator: equals
+      value: Ok
+    timeoutSeconds: 30

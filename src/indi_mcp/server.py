@@ -604,6 +604,13 @@ async def cooler_off(rig_id: str) -> ScriptRunStarted:
 
 
 @mcp.tool()
+async def abort_exposure(rig_id: str) -> ScriptRunStarted:
+    """Abort the rig's camera's in-progress exposure — see `scripts/abort_exposure.yaml`
+    (INDIMCP-86)."""
+    return await script_runs.start_script("abort_exposure", rig_id, {})
+
+
+@mcp.tool()
 async def select_filter(rig_id: str, filterName: str) -> ScriptRunStarted:
     """Select a filter on the rig's filter wheel by name — see `scripts/select_filter.yaml`
     (INDIMCP-61).
