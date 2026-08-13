@@ -79,9 +79,32 @@ async def stop_server() -> IndiServerStatus:
     logger.info("Stopping indiserver on port %d", _current_port)
     await asyncio.to_thread(_server.stop, _current_port)
     if _async_cmd is not None:
-        await asyncio.to_thread(_async_cmd.terminate)
-        _async_cmd = None
+        try:
+            await asyncio.to_thread(_terminate, _async_cmd)
+        finally:
+            _async_cmd = None
     return await get_status()
+
+
+def _terminate(async_cmd: AsyncSystemCommand) -> None:
+    """Terminate `async_cmd`, tolerating a process `_server.stop()` already reaped.
+
+    `_server.stop()` (called just above, in `stop_server`) kills the same
+    `indiserver` process via psutil and waits for it to exit. That races
+    `async_cmd`'s own background thread, which sets its `finished` flag only
+    after its `process.wait()` returns — so by the time this runs, the
+    process is usually already gone but `finished` hasn't been set yet.
+    `AsyncSystemCommand.terminate()` doesn't check for that: it calls
+    `os.killpg(os.getpgid(pid), SIGTERM)` unconditionally whenever `finished`
+    is still `False`, and `os.getpgid()` raises a bare `ProcessLookupError`
+    for a pid that's already gone. That's expected here, not a real failure,
+    so it's tolerated the same way indiweb's own `IndiServer.stop()` tolerates
+    it internally.
+    """
+    try:
+        async_cmd.terminate()
+    except ProcessLookupError as exc:
+        logger.warning("indiserver process already exited before terminate(): %s", exc)
 
 
 async def restart_server(port: int | None = None) -> IndiServerStatus:

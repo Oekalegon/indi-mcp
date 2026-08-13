@@ -59,6 +59,32 @@ async def test_stop_server_stops_current_port_and_terminates_async_cmd(mocks: Mo
     assert status == {"running": False, "port": 7625}
 
 
+async def test_stop_server_tolerates_async_cmd_already_reaped(mocks: Mocks) -> None:
+    """`_server.stop()` (psutil-based) frequently wins the race to reap the process
+    before `_async_cmd.terminate()` runs, which then raises a bare `ProcessLookupError`
+    from `os.getpgid()` -- that must not propagate out of `stop_server()`."""
+    mocks.server.is_running.return_value = True
+    await indi_server.start_server(port=7625)
+    mocks.launched_cmd.terminate.side_effect = ProcessLookupError
+    mocks.server.is_running.return_value = False
+
+    status = await indi_server.stop_server()
+
+    mocks.launched_cmd.terminate.assert_called_once()
+    assert status == {"running": False, "port": 7625}
+
+
+async def test_stop_server_does_not_swallow_other_terminate_errors(mocks: Mocks) -> None:
+    mocks.server.is_running.return_value = True
+    await indi_server.start_server(port=7625)
+    mocks.launched_cmd.terminate.side_effect = RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await indi_server.stop_server()
+
+    assert indi_server._async_cmd is None
+
+
 async def test_restart_server_keeps_current_port_by_default(mocks: Mocks) -> None:
     mocks.server.is_running.return_value = True
     await indi_server.start_server(port=7625)
