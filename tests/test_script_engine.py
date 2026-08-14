@@ -2,6 +2,7 @@ import asyncio
 import re
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -18,6 +19,7 @@ from indi_mcp import (
 )
 
 _known_devices: list[str] = []
+_BUILTIN_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 
 
 @pytest.fixture(autouse=True)
@@ -1636,6 +1638,40 @@ async def test_execute_script_capture_frame_substitutes_parameter_references_in_
 
     send_property.assert_any_call("CCD Simulator", "CCD_GAIN", {"GAIN": "200.0"})
     send_property.assert_any_call("CCD Simulator", "CCD_OFFSET", {"OFFSET": "20.0"})
+
+
+async def test_builtin_capture_sensor_calibration_set_skips_gain_and_offset_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end run of the actual shipped `capture_sensor_calibration_set.yaml` (not a
+    hand-built stand-in) with gain/offset omitted — the script always templates them
+    (matching capture_frame.yaml's own convention), so this exercises that the real file's
+    `"{{ gain }}"`/`"{{ offset }}"` references resolve to `None` and CCD_GAIN/CCD_OFFSET are
+    never sent, while every requested bias/flat/flat-dark exposure still fires."""
+    script_store.load_scripts(_BUILTIN_SCRIPTS_DIR)
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name in ("CCD_GAIN", "CCD_OFFSET"):
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property, _ = _mock_capture_frame_success(monkeypatch, exposure_states=["Ok"] * 8)
+
+    result = await script_engine.execute_script(
+        "capture_sensor_calibration_set",
+        "test-rig",
+        {"flatExposureSeconds": 2.0, "biasCount": 2, "flatCount": 1, "darkCount": 1},
+    )
+
+    assert result["framesCaptured"] == 4
+    gain_or_offset_calls = [
+        c for c in send_property.await_args_list if c.args[1] in ("CCD_GAIN", "CCD_OFFSET")
+    ]
+    assert gain_or_offset_calls == []
+    send_property.assert_any_call("CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "0.0"})
+    send_property.assert_any_call("CCD Simulator", "CCD_EXPOSURE", {"CCD_EXPOSURE_VALUE": "2.0"})
 
 
 async def test_execute_script_capture_frame_rejects_a_non_numeric_runtime_gain(
