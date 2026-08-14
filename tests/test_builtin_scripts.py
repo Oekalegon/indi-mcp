@@ -564,20 +564,28 @@ def test_builtin_capture_sensor_calibration_set_captures_bias_flat_and_flat_dark
         "offset",
         "biasExposureSeconds",
         "flatExposureSeconds",
-        "count",
+        "biasCount",
+        "flatCount",
+        "darkCount",
     }
     assert calibration_set.parameters["gain"].required is False
     assert calibration_set.parameters["offset"].required is False
     assert calibration_set.parameters["biasExposureSeconds"].required is False
     assert calibration_set.parameters["biasExposureSeconds"].default == 0.0
     assert calibration_set.parameters["flatExposureSeconds"].required is True
-    assert calibration_set.parameters["count"].required is True
+    assert calibration_set.parameters["biasCount"].required is True
+    assert calibration_set.parameters["flatCount"].required is True
+    assert calibration_set.parameters["darkCount"].required is True
     assert len(calibration_set.steps) == 3
 
     bias_repeat, flat_repeat, flat_dark_repeat = calibration_set.steps
-    for repeat_step in (bias_repeat, flat_repeat, flat_dark_repeat):
+    for repeat_step, count_param in (
+        (bias_repeat, "biasCount"),
+        (flat_repeat, "flatCount"),
+        (flat_dark_repeat, "darkCount"),
+    ):
         assert isinstance(repeat_step, script_store.RepeatStep)
-        assert repeat_step.count == "{{ count }}"
+        assert repeat_step.count == "{{ " + count_param + " }}"
         capture_step = repeat_step.steps[0]
         assert isinstance(capture_step, script_store.CaptureFrameStep)
         assert capture_step.role == "camera"

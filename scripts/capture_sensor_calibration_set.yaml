@@ -1,20 +1,22 @@
 id: capture_sensor_calibration_set
 name: Capture a sensor calibration set (bias, flat, flat-dark) at one gain/offset
 description: >
-  Captures count bias frames, count flat frames, and count flat-dark frames — a dark
-  frame at the same exposure as the flat, needed to separate read/dark-current noise
-  from photon shot noise — all at a single gain/offset setting (INDIMCP-81). This is
-  the per-setting building block for a sensor photon-transfer-curve analysis: sweeping
-  gain/offset is done by the caller invoking this script once per setting (there's no
-  list-valued script parameter or loop-index arithmetic available — see
-  docs/ScriptSchema.md's closed step vocabulary), not by this script looping over a
-  range itself. This script only captures and stores frames; computing a sensor
-  profile from them is a separate, later step outside the script engine. Deliberately
-  skips mount positioning, filter selection, and focus, like capture_bias_sequence and
-  capture_dark_sequence — a calibration frame's illumination/focus source is whatever
-  the rig is already pointed at when this runs. Pausable: capture_frame is the only
-  step inside each repeat loop, so a pause request only ever lands between frames,
-  never mid-exposure.
+  Captures biasCount bias frames, flatCount flat frames, and darkCount flat-dark
+  frames — a dark frame at the same exposure as the flat, needed to separate
+  read/dark-current noise from photon shot noise — all at a single gain/offset
+  setting (INDIMCP-81). Counts are declared per frame type, not shared, since bias
+  frames are cheap and typically captured in far larger numbers than flats/flat-darks
+  for a photon-transfer-curve analysis. This is the per-setting building block for
+  that analysis: sweeping gain/offset is done by the caller invoking this script once
+  per setting (there's no list-valued script parameter or loop-index arithmetic
+  available — see docs/ScriptSchema.md's closed step vocabulary), not by this script
+  looping over a range itself. This script only captures and stores frames; computing
+  a sensor profile from them is a separate, later step outside the script engine.
+  Deliberately skips mount positioning, filter selection, and focus, like
+  capture_bias_sequence and capture_dark_sequence — a calibration frame's
+  illumination/focus source is whatever the rig is already pointed at when this runs.
+  Pausable: capture_frame is the only step inside each repeat loop, so a pause request
+  only ever lands between frames, never mid-exposure.
 pausable: true
 parameters:
   gain:
@@ -34,13 +36,21 @@ parameters:
     type: number
     required: true
     description: Exposure length per flat frame and per matching flat-dark frame, in seconds.
-  count:
+  biasCount:
     type: integer
     required: true
-    description: Number of frames to capture per frame type (bias, flat, flat-dark).
+    description: Number of bias frames to capture.
+  flatCount:
+    type: integer
+    required: true
+    description: Number of flat frames to capture.
+  darkCount:
+    type: integer
+    required: true
+    description: Number of flat-dark frames to capture.
 steps:
   - step: repeat
-    count: "{{ count }}"
+    count: "{{ biasCount }}"
     steps:
       - step: capture_frame
         role: camera
@@ -49,7 +59,7 @@ steps:
         gain: "{{ gain }}"
         offset: "{{ offset }}"
   - step: repeat
-    count: "{{ count }}"
+    count: "{{ flatCount }}"
     steps:
       - step: capture_frame
         role: camera
@@ -58,7 +68,7 @@ steps:
         gain: "{{ gain }}"
         offset: "{{ offset }}"
   - step: repeat
-    count: "{{ count }}"
+    count: "{{ darkCount }}"
     steps:
       - step: capture_frame
         role: camera
