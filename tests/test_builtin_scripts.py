@@ -12,8 +12,9 @@ composed capture sequences — `capture_light_sequence`, `capture_flat_sequence`
 tracking control — `track_off`, `set_track_mode` (generic across
 sidereal/solar/lunar/custom via a parameterized `set_property` element key,
 INDIMCP-49), `set_custom_tracking_rate` — and `cooler_on`/`cooler_off`
-(INDIMCP-84) and `abort_exposure` (INDIMCP-86) ship so far; the remaining
-primitives are tracked separately (INDIMCP-45, INDIMCP-47). This just
+(INDIMCP-84), `abort_exposure` (INDIMCP-86), and `capture_sensor_calibration_set`
+(INDIMCP-81) ship so far; the remaining primitives are tracked separately
+(INDIMCP-45, INDIMCP-47). This just
 confirms whatever's here loads and validates cleanly, the way any script a
 client might upload would.
 """
@@ -550,3 +551,42 @@ def test_builtin_capture_bias_sequence_has_no_setup_steps() -> None:
     assert isinstance(capture_step, script_store.CaptureFrameStep)
     assert capture_step.role == "camera"
     assert capture_step.frameType == "Bias"
+
+
+def test_builtin_capture_sensor_calibration_set_captures_bias_flat_and_flat_dark() -> None:
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    calibration_set = script_store.get_script("capture_sensor_calibration_set")
+
+    assert calibration_set.pausable is True
+    assert set(calibration_set.parameters) == {
+        "gain",
+        "offset",
+        "biasExposureSeconds",
+        "flatExposureSeconds",
+        "count",
+    }
+    assert calibration_set.parameters["gain"].required is False
+    assert calibration_set.parameters["offset"].required is False
+    assert calibration_set.parameters["biasExposureSeconds"].required is False
+    assert calibration_set.parameters["biasExposureSeconds"].default == 0.0
+    assert calibration_set.parameters["flatExposureSeconds"].required is True
+    assert calibration_set.parameters["count"].required is True
+    assert len(calibration_set.steps) == 3
+
+    bias_repeat, flat_repeat, flat_dark_repeat = calibration_set.steps
+    for repeat_step in (bias_repeat, flat_repeat, flat_dark_repeat):
+        assert isinstance(repeat_step, script_store.RepeatStep)
+        assert repeat_step.count == "{{ count }}"
+        capture_step = repeat_step.steps[0]
+        assert isinstance(capture_step, script_store.CaptureFrameStep)
+        assert capture_step.role == "camera"
+        assert capture_step.gain == "{{ gain }}"
+        assert capture_step.offset == "{{ offset }}"
+
+    assert bias_repeat.steps[0].frameType == "Bias"
+    assert bias_repeat.steps[0].exposureSeconds == "{{ biasExposureSeconds }}"
+    assert flat_repeat.steps[0].frameType == "Flat"
+    assert flat_repeat.steps[0].exposureSeconds == "{{ flatExposureSeconds }}"
+    assert flat_dark_repeat.steps[0].frameType == "Dark"
+    assert flat_dark_repeat.steps[0].exposureSeconds == "{{ flatExposureSeconds }}"

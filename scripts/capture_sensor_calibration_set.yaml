@@ -1,0 +1,68 @@
+id: capture_sensor_calibration_set
+name: Capture a sensor calibration set (bias, flat, flat-dark) at one gain/offset
+description: >
+  Captures count bias frames, count flat frames, and count flat-dark frames — a dark
+  frame at the same exposure as the flat, needed to separate read/dark-current noise
+  from photon shot noise — all at a single gain/offset setting (INDIMCP-81). This is
+  the per-setting building block for a sensor photon-transfer-curve analysis: sweeping
+  gain/offset is done by the caller invoking this script once per setting (there's no
+  list-valued script parameter or loop-index arithmetic available — see
+  docs/ScriptSchema.md's closed step vocabulary), not by this script looping over a
+  range itself. This script only captures and stores frames; computing a sensor
+  profile from them is a separate, later step outside the script engine. Deliberately
+  skips mount positioning, filter selection, and focus, like capture_bias_sequence and
+  capture_dark_sequence — a calibration frame's illumination/focus source is whatever
+  the rig is already pointed at when this runs. Pausable: capture_frame is the only
+  step inside each repeat loop, so a pause request only ever lands between frames,
+  never mid-exposure.
+pausable: true
+parameters:
+  gain:
+    type: number
+    required: false
+    description: Sensor gain to hold for every frame in this set. Omit to leave the device's current setting alone.
+  offset:
+    type: number
+    required: false
+    description: Sensor offset to hold for every frame in this set. Omit to leave the device's current setting alone.
+  biasExposureSeconds:
+    type: number
+    required: false
+    default: 0.0
+    description: Exposure length per bias frame, in seconds — normally the camera's shortest supported exposure.
+  flatExposureSeconds:
+    type: number
+    required: true
+    description: Exposure length per flat frame and per matching flat-dark frame, in seconds.
+  count:
+    type: integer
+    required: true
+    description: Number of frames to capture per frame type (bias, flat, flat-dark).
+steps:
+  - step: repeat
+    count: "{{ count }}"
+    steps:
+      - step: capture_frame
+        role: camera
+        exposureSeconds: "{{ biasExposureSeconds }}"
+        frameType: Bias
+        gain: "{{ gain }}"
+        offset: "{{ offset }}"
+  - step: repeat
+    count: "{{ count }}"
+    steps:
+      - step: capture_frame
+        role: camera
+        exposureSeconds: "{{ flatExposureSeconds }}"
+        frameType: Flat
+        gain: "{{ gain }}"
+        offset: "{{ offset }}"
+  - step: repeat
+    count: "{{ count }}"
+    steps:
+      - step: capture_frame
+        role: camera
+        exposureSeconds: "{{ flatExposureSeconds }}"
+        frameType: Dark
+        gain: "{{ gain }}"
+        offset: "{{ offset }}"
