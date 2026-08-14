@@ -579,22 +579,33 @@ def test_builtin_capture_sensor_calibration_set_captures_bias_flat_and_flat_dark
     assert len(calibration_set.steps) == 3
 
     bias_repeat, flat_repeat, flat_dark_repeat = calibration_set.steps
-    for repeat_step, count_param in (
-        (bias_repeat, "biasCount"),
-        (flat_repeat, "flatCount"),
-        (flat_dark_repeat, "darkCount"),
-    ):
-        assert isinstance(repeat_step, script_store.RepeatStep)
-        assert repeat_step.count == "{{ " + count_param + " }}"
-        capture_step = repeat_step.steps[0]
-        assert isinstance(capture_step, script_store.CaptureFrameStep)
-        assert capture_step.role == "camera"
-        assert capture_step.gain == "{{ gain }}"
-        assert capture_step.offset == "{{ offset }}"
 
-    assert bias_repeat.steps[0].frameType == "Bias"
-    assert bias_repeat.steps[0].exposureSeconds == "{{ biasExposureSeconds }}"
-    assert flat_repeat.steps[0].frameType == "Flat"
-    assert flat_repeat.steps[0].exposureSeconds == "{{ flatExposureSeconds }}"
-    assert flat_dark_repeat.steps[0].frameType == "Dark"
-    assert flat_dark_repeat.steps[0].exposureSeconds == "{{ flatExposureSeconds }}"
+    assert isinstance(bias_repeat, script_store.RepeatStep)
+    assert bias_repeat.count == "{{ biasCount }}"
+    bias_capture = bias_repeat.steps[0]
+    assert isinstance(bias_capture, script_store.CaptureFrameStep)
+    assert bias_capture.role == "camera"
+    assert bias_capture.gain == "{{ gain }}"
+    assert bias_capture.offset == "{{ offset }}"
+    assert bias_capture.frameType == "Bias"
+    assert bias_capture.exposureSeconds == "{{ biasExposureSeconds }}"
+
+    assert isinstance(flat_repeat, script_store.RepeatStep)
+    assert flat_repeat.count == "{{ flatCount }}"
+    flat_capture = flat_repeat.steps[0]
+    assert isinstance(flat_capture, script_store.CaptureFrameStep)
+    assert flat_capture.role == "camera"
+    assert flat_capture.gain == "{{ gain }}"
+    assert flat_capture.offset == "{{ offset }}"
+    assert flat_capture.frameType == "Flat"
+    assert flat_capture.exposureSeconds == "{{ flatExposureSeconds }}"
+
+    assert isinstance(flat_dark_repeat, script_store.RepeatStep)
+    assert flat_dark_repeat.count == "{{ darkCount }}"
+    flat_dark_capture = flat_dark_repeat.steps[0]
+    assert isinstance(flat_dark_capture, script_store.CaptureFrameStep)
+    assert flat_dark_capture.role == "camera"
+    assert flat_dark_capture.gain == "{{ gain }}"
+    assert flat_dark_capture.offset == "{{ offset }}"
+    assert flat_dark_capture.frameType == "Dark"
+    assert flat_dark_capture.exposureSeconds == "{{ flatExposureSeconds }}"
