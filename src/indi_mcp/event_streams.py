@@ -66,6 +66,17 @@ __all__ = [
 
 _MAX_BUFFERED_EVENTS = 200
 
+_NOTIFY_TIMEOUT_SECONDS = 5.0
+"""Ceiling on how long `_notify` waits for one subscriber's `send_resource_updated`.
+
+Without this, a subscriber whose send never raises but also never returns (a half-open
+connection, a transport-level stall) would hang `_notify` forever. That used to only cost
+that one publish's notification task; since `_schedule_notify` now allows at most one
+`_notify` per URI in flight at a time (`_pending_notify_uris`), an unbounded hang here would
+starve *every* subscriber of that URI — including healthy ones — until the hang resolves.
+Timing out and dropping the offending subscriber, the same way a raised exception already
+is, keeps the coalescing gate from being held open indefinitely by one bad connection."""
+
 
 class _NotifiableSession(Protocol):
     """The one piece of `mcp.server.session.ServerSession` this module needs."""
@@ -264,7 +275,9 @@ async def _notify(uri: str) -> None:
     the per-subscriber loop: it's the same value for every subscriber, and
     parsing it inside the loop's `try` would misattribute a genuine
     URI-construction failure as every subscriber's connection having failed,
-    dropping them all rather than surfacing the real bug.
+    dropping them all rather than surfacing the real bug. Each send is bounded by
+    `_NOTIFY_TIMEOUT_SECONDS` — see that constant's docstring for why a hang here is now
+    worse than it used to be, now that `_schedule_notify` coalesces per URI.
     """
     subscribers = _subscribers.get(uri)
     if not subscribers:
@@ -272,7 +285,9 @@ async def _notify(uri: str) -> None:
     parsed_uri = AnyUrl(uri)
     for session in list(subscribers):
         try:
-            await session.send_resource_updated(parsed_uri)
+            await asyncio.wait_for(
+                session.send_resource_updated(parsed_uri), timeout=_NOTIFY_TIMEOUT_SECONDS
+            )
         except Exception:
             logger.exception("Failed to notify subscriber of %s; dropping it", uri)
             subscribers.discard(session)

@@ -29,6 +29,7 @@ def _reset_state() -> None:
     event_streams._scripts.clear()
     event_streams._subscribers.clear()
     event_streams._background_tasks.clear()
+    event_streams._pending_notify_uris.clear()
 
 
 async def test_read_messages_returns_newest_first_and_filters_by_device() -> None:
@@ -198,6 +199,53 @@ async def test_publishing_does_not_notify_subscribers_of_a_different_scope() -> 
     assert session.updated == []
 
 
+async def test_schedule_notify_coalesces_a_burst_for_the_same_uri() -> None:
+    """A second publish to the same URI while the first notify is still in flight must not
+    spawn a second notification — `_notify` only signals "go re-read", so a subscriber that
+    hasn't been delivered the first one yet will already see every publish so far once it
+    does re-read (see `_pending_notify_uris`'s docstring)."""
+    release = asyncio.Event()
+
+    class _SlowSession(_FakeSession):
+        async def send_resource_updated(self, uri) -> None:
+            await release.wait()
+            await super().send_resource_updated(uri)
+
+    session = _SlowSession()
+    event_streams.subscribe("indi://messages", session)
+
+    event_streams.publish_message_event({"kind": "message", "device": None})
+    await asyncio.sleep(0)
+    assert "indi://messages" in event_streams._pending_notify_uris
+
+    event_streams.publish_message_event({"kind": "message", "device": None, "extra": 1})
+    await asyncio.sleep(0)
+
+    assert session.updated == []  # still blocked on `release`, so nothing delivered yet
+
+    release.set()
+    await asyncio.sleep(0)
+
+    assert session.updated == ["indi://messages"]  # only one notify fired for the burst
+    assert "indi://messages" not in event_streams._pending_notify_uris
+
+
+async def test_schedule_notify_fires_again_after_the_in_flight_notify_completes() -> None:
+    """Once a coalesced notify finishes, the URI must be notifiable again — coalescing skips
+    redundant *concurrent* notifications, it doesn't permanently silence the URI."""
+    session = _FakeSession()
+    event_streams.subscribe("indi://messages", session)
+
+    event_streams.publish_message_event({"kind": "message", "device": None})
+    await asyncio.sleep(0)
+    assert session.updated == ["indi://messages"]
+
+    event_streams.publish_message_event({"kind": "message", "device": None, "extra": 1})
+    await asyncio.sleep(0)
+
+    assert session.updated == ["indi://messages", "indi://messages"]
+
+
 def test_messages_uri_percent_encodes_a_device_name_containing_reserved_characters() -> None:
     """A literal `/` in a device name must not add an extra path segment — the resource
     template `indi://messages/{device}` (see server.py) only matches a single segment, so an
@@ -277,6 +325,37 @@ async def test_a_subscriber_that_fails_to_notify_is_dropped() -> None:
 
     assert healthy.updated == ["indi://messages"]
     assert failing not in event_streams._subscribers.get("indi://messages", set())
+
+
+async def test_a_subscriber_that_hangs_forever_is_dropped_and_does_not_starve_the_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subscriber whose `send_resource_updated` never returns (and never raises) must be
+    timed out and dropped, not left to hold `_pending_notify_uris` open forever — since
+    coalescing now allows only one `_notify` per URI in flight, an unbounded hang here would
+    otherwise starve every other subscriber of the same URI too, not just the hung one."""
+    monkeypatch.setattr(event_streams, "_NOTIFY_TIMEOUT_SECONDS", 0.01)
+
+    class _HangingSession(_FakeSession):
+        async def send_resource_updated(self, uri) -> None:
+            await asyncio.sleep(3600)
+
+    hanging = _HangingSession()
+    healthy = _FakeSession()
+    event_streams.subscribe("indi://messages", hanging)
+    event_streams.subscribe("indi://messages", healthy)
+
+    event_streams.publish_message_event({"kind": "message", "device": None})
+    await asyncio.gather(*event_streams._background_tasks, return_exceptions=True)
+
+    assert healthy.updated == ["indi://messages"]
+    assert hanging not in event_streams._subscribers.get("indi://messages", set())
+    assert "indi://messages" not in event_streams._pending_notify_uris
+
+    # The URI must be notifiable again, proving the timed-out send didn't wedge it shut.
+    event_streams.publish_message_event({"kind": "message", "device": None, "extra": 1})
+    await asyncio.sleep(0)
+    assert healthy.updated == ["indi://messages", "indi://messages"]
 
 
 async def test_publish_message_event_durably_records_to_the_event_log(
