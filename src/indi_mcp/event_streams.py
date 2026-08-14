@@ -97,6 +97,24 @@ now go through the persistent `_record_worker`/`_record_queue` pair below
 instead (INDIMCP-59) — `drain()` waits on both this set and that queue.
 """
 
+_pending_notify_uris: set[str] = set()
+"""URIs with a `_notify` task currently in flight — see `_schedule_notify`'s coalescing.
+
+The MCP SDK's Streamable HTTP transport (`mcp.server.streamable_http`) routes every message
+for a session — every tool-call response *and* every notification — through one sequential,
+session-wide `message_router` task, delivering to a per-target stream bounded at 16
+unconsumed messages before `send()` blocks. A device's post-connect burst can easily publish
+dozens of `propertyDefinition` events in a few milliseconds; firing one `_notify` task per
+event (the old behavior) queues a notification per event too, and once a slow-to-drain
+client's queue exceeds that 16-message buffer, `message_router`'s blocked `send()` head-of-
+line-blocks *every other message on the session* — including unrelated tool-call responses
+like `get_script_status`, which is what made an already-succeeded `connect` script look stuck
+forever from the client's side. `_notify` doesn't carry event data anyway — it's just "this
+resource changed, go re-read it" — so a client always fetches the *current* window when it
+does re-read; collapsing a burst down to at most one in-flight notification per URI loses
+nothing observable while keeping the queue nowhere near that 16-message ceiling.
+"""
+
 _RECORD_QUEUE_MAXSIZE = 1000
 """Bounds memory if durable writes fall behind a sustained event burst — see module docstring."""
 
@@ -263,7 +281,7 @@ async def _notify(uri: str) -> None:
 
 
 def _schedule_notify(uri: str) -> None:
-    """Fire-and-forget `_notify(uri)` from a synchronous call site.
+    """Fire-and-forget `_notify(uri)` from a synchronous call site, coalescing bursts.
 
     Publishing happens from both async contexts (`indi_messaging.rxevent`)
     and sync ones (`script_runs`'s `on_progress` callback, `pause_script`),
@@ -271,12 +289,30 @@ def _schedule_notify(uri: str) -> None:
     currently running, which is always the case at every real call site
     (an MCP tool/notification handler, or a task already running under one).
     Skipped entirely when nobody is subscribed to `uri`, the common case.
+
+    Also skipped if a `_notify` for this exact `uri` is already in flight
+    (`_pending_notify_uris`) — seeing `uri` again before that one has even
+    been delivered means a subscriber will re-read the current window
+    (which already reflects every publish so far) as soon as it lands, so a
+    second notification would only tell it something it's about to find out
+    anyway. See `_pending_notify_uris`'s own docstring for why this matters
+    well beyond just saving redundant work.
     """
-    if uri not in _subscribers:
+    if uri not in _subscribers or uri in _pending_notify_uris:
         return
-    task = asyncio.create_task(_notify(uri))
+    _pending_notify_uris.add(uri)
+    task = asyncio.create_task(_notify_and_clear_pending(uri))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+async def _notify_and_clear_pending(uri: str) -> None:
+    """Runs `_notify(uri)`, then clears `uri` from `_pending_notify_uris` so a later publish
+    can schedule a fresh notification — see `_schedule_notify`'s coalescing."""
+    try:
+        await _notify(uri)
+    finally:
+        _pending_notify_uris.discard(uri)
 
 
 async def _record_worker(queue: "asyncio.Queue[_QueuedEvent]") -> None:
