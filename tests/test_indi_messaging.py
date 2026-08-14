@@ -28,6 +28,17 @@ class _FakeMember:
         self.max = max_
 
 
+class _FakeBLOBMember:
+    """A minimal stand-in for indipyclient's `BLOBMember`."""
+
+    def __init__(
+        self, membervalue: bytes | None = None, blobsize: int = 0, blobformat: str = ""
+    ) -> None:
+        self.membervalue = membervalue
+        self.blobsize = blobsize
+        self.blobformat = blobformat
+
+
 class _FakeVector:
     """A minimal stand-in for indipyclient's `Vector`.
 
@@ -415,6 +426,31 @@ async def test_get_device_properties_falls_back_to_cache_when_driver_never_repli
             }
         },
         "refreshed": False,
+    }
+
+
+async def test_get_device_properties_reports_blob_elements_as_size_and_format(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(indi_messaging, "_PROPERTY_REFRESH_POLL_INTERVAL", 0.001)
+    ccd1 = _FakeVector(
+        {
+            "CCD1": _FakeBLOBMember(membervalue=b"\x00\x01", blobsize=23, blobformat=".fits"),
+            "CCD1_UNRECEIVED": _FakeBLOBMember(),
+        },
+        state="Ok",
+        vectortype="BLOBVector",
+    )
+    device = MagicMock()
+    device.data = {"CCD1": ccd1}
+    mocks.client.data = {"CCD Simulator": device}
+    await indi_messaging.start_messaging()
+
+    result = await indi_messaging.get_device_properties("CCD Simulator", timeout_seconds=0.02)
+
+    assert result["properties"]["CCD1"]["elements"] == {
+        "CCD1": "23 bytes (.fits)",
+        "CCD1_UNRECEIVED": "no data received",
     }
 
 
