@@ -47,13 +47,16 @@ class _FakeVector:
     """
 
     def __init__(
-        self, members: dict[str, _FakeMember], state: str = "Ok", vectortype: str = ""
+        self,
+        members: dict[str, _FakeMember | _FakeBLOBMember],
+        state: str = "Ok",
+        vectortype: str = "",
     ) -> None:
         self.data = members
         self.state = state
         self.vectortype = vectortype
 
-    def __getitem__(self, membername: str) -> str:
+    def __getitem__(self, membername: str) -> str | bytes | None:
         return self.data[membername].membervalue
 
 
