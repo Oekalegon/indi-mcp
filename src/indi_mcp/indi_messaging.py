@@ -181,6 +181,28 @@ def _elements(event: Any) -> dict[str, str] | None:
     return dict(event.data)
 
 
+def _vector_elements(vector: Any) -> dict[str, str]:
+    """Human-readable element values for a `client.data` vector.
+
+    Mirrors `_elements()`'s BLOB handling, but for the client's cached
+    `Vector` objects rather than incoming events: a BLOB member's raw value
+    is either `None` (nothing transferred yet) or the decoded binary itself,
+    neither of which is the `str` that `DeviceProperty.elements` requires -
+    a BLOB vector's `member.membervalue` is described that way in
+    `indipyclient`'s `BLOBVector` docstring. Report size/format instead, as
+    `_elements()` already does for `setBLOBVector` events.
+    """
+    if getattr(vector, "vectortype", None) == "BLOBVector":
+        elements: dict[str, str] = {}
+        for member_name, member in vector.data.items():
+            if member.membervalue is None:
+                elements[member_name] = "no data received"
+            else:
+                elements[member_name] = f"{member.blobsize} bytes ({member.blobformat})"
+        return elements
+    return {member_name: vector[member_name] for member_name in vector.data}
+
+
 def _to_indi_event(event: Any) -> IndiEvent | None:
     if isinstance(event, Message):
         kind, type_name, elements = "message", None, None
@@ -373,7 +395,7 @@ async def get_device_properties(
             vector_name: {
                 "type": _VECTORTYPE_TO_TYPE.get(vector.vectortype),
                 "state": _coerce_property_state(vector.state),
-                "elements": {member_name: vector[member_name] for member_name in vector.data},
+                "elements": _vector_elements(vector),
             }
             for vector_name, vector in device_obj.data.items()
         },
