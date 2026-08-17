@@ -21,6 +21,7 @@ it against connected INDI devices (see `suggest_rig`/`check_rig`).
 
 import logging
 import os
+import threading
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -223,6 +224,19 @@ _FAMILY_TO_ROLE: dict[str, Role] = {
 """Driver catalog family names (`DeviceDriver.family`) recognized by `draft_rig`."""
 
 _rigs: dict[str, Rig] = {}
+_save_lock = threading.Lock()
+"""Serializes `save_rig`'s write-then-reload against concurrent `save_rig` calls.
+
+`save_rig` runs off the asyncio event loop via `asyncio.to_thread`
+(`server.save_rig`), so two saves triggered close together genuinely run in
+different OS threads rather than merely interleaved coroutines. Without this
+lock, two concurrent calls each do their own full directory glob+parse and
+then wholesale-replace the shared `_rigs` dict (`load_rigs`); whichever
+reload happens to finish last wins and silently discards the other call's
+just-written rig from memory even though its file is on disk, and that
+call's own trailing `get_rig` can then raise `Unknown rig` despite having
+successfully written it.
+"""
 
 
 def _rigs_dir() -> Path:
@@ -292,30 +306,33 @@ def save_rig(rig: Rig, *, overwrite: bool = False, directory: Path | None = None
     `overwrite`), so two concurrent saves of the same new `id` can't both
     slip past the check. Reloads every rig in `directory` afterwards (see
     `load_rigs`) so the saved rig is immediately available by `id` to
-    `get_rig`/`suggest_rig`/`check_rig`.
+    `get_rig`/`suggest_rig`/`check_rig`; the write and that reload are
+    serialized against other `save_rig` calls by `_save_lock`, since two
+    unlocked concurrent reloads could otherwise race (see `_save_lock`).
     """
     if not rig.id or rig.id in (".", "..") or "/" in rig.id or "\\" in rig.id:
         raise ValueError(f"Invalid rig id for a filename: {rig.id!r}")
     directory = directory if directory is not None else _rigs_dir()
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-    except NotADirectoryError as exc:
-        raise ValueError(f"Cannot create rigs directory {directory}: {exc}") from exc
-    path = directory / f"{rig.id}.yaml"
-    if path.is_dir():
-        raise ValueError(f"Cannot save rig {rig.id!r}: {path} is a directory, not a file")
-    content = yaml.safe_dump(rig.model_dump(exclude_none=True), sort_keys=False)
-    try:
-        with path.open("w" if overwrite else "x", encoding="utf-8") as f:
-            f.write(content)
-    except FileExistsError as exc:
-        raise ValueError(
-            f"A rig file already exists for id {rig.id!r} ({path}); "
-            "pass overwrite=True to replace it."
-        ) from exc
-    logger.info("Saved rig %r to %s", rig.id, path)
-    load_rigs(directory)
-    return get_rig(rig.id)
+    with _save_lock:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except NotADirectoryError as exc:
+            raise ValueError(f"Cannot create rigs directory {directory}: {exc}") from exc
+        path = directory / f"{rig.id}.yaml"
+        if path.is_dir():
+            raise ValueError(f"Cannot save rig {rig.id!r}: {path} is a directory, not a file")
+        content = yaml.safe_dump(rig.model_dump(exclude_none=True), sort_keys=False)
+        try:
+            with path.open("w" if overwrite else "x", encoding="utf-8") as f:
+                f.write(content)
+        except FileExistsError as exc:
+            raise ValueError(
+                f"A rig file already exists for id {rig.id!r} ({path}); "
+                "pass overwrite=True to replace it."
+            ) from exc
+        logger.info("Saved rig %r to %s", rig.id, path)
+        load_rigs(directory)
+        return get_rig(rig.id)
 
 
 def update_component_slots(rig_id: str, role: str, slots: dict[int, str]) -> Rig:

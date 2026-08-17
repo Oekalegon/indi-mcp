@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pytest
@@ -698,6 +699,30 @@ def test_save_rig_rejects_an_id_whose_file_path_is_already_a_directory(tmp_path:
 
     with pytest.raises(ValueError, match="is a directory"):
         rig_store.save_rig(_minimal_rig(), directory=tmp_path)
+
+
+def test_concurrent_save_rig_calls_do_not_lose_each_others_reload(tmp_path: Path) -> None:
+    """Regression test for INDIMCP-100: unlocked concurrent reloads could
+    discard a just-saved rig from the shared `_rigs` dict even though its
+    file was written to disk, and the losing call's own `get_rig` at the end
+    of `save_rig` would then raise `Unknown rig` despite having succeeded."""
+    rigs = [rig_store.Rig(id=f"rig-{i}", name=f"Rig {i}", components=[]) for i in range(20)]
+    results: list[rig_store.Rig | Exception] = [None] * len(rigs)  # type: ignore[list-item]
+
+    def _save(index: int) -> None:
+        try:
+            results[index] = rig_store.save_rig(rigs[index], directory=tmp_path)
+        except Exception as exc:  # noqa: BLE001 - captured for the assertions below
+            results[index] = exc
+
+    threads = [threading.Thread(target=_save, args=(i,)) for i in range(len(rigs))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results == rigs
+    assert {summary["id"] for summary in rig_store.list_rigs()} == {rig.id for rig in rigs}
 
 
 def test_update_component_slots_writes_slots_and_reloads(
