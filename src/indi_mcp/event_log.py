@@ -1,14 +1,15 @@
-"""The durable SQLite event log backing `indi://messages`/`indi://scripts` catch-up.
+"""The durable SQLite event log backing `indi://messages`/`indi://mcp-server` catch-up.
 
 Per `docs/Design.md#event-log`: every `kind`-tagged event `event_streams`
-publishes (messaging-layer and scripting-layer alike) is also written to an
-`events` table in the shared local database (`db.connect`) — this is what
-actually lets a client that was offline catch up, rather than the live
-`resources/subscribe` channel alone (that one is best-effort/live-only, see
-`event_streams`). Retention is short: events older than **1 day** are
-purged (`purge_old_events`), since this table exists to bridge reconnects
-and short-term history, not as permanent storage — captured frames have
-their own, separate, much-longer-retention storage (`frame_store`).
+publishes (messaging-layer, scripting-layer, and connection-lifecycle alike,
+the latter added by INDIMCP-57) is also written to an `events` table in the
+shared local database (`db.connect`) — this is what actually lets a client
+that was offline catch up, rather than the live `resources/subscribe`
+channel alone (that one is best-effort/live-only, see `event_streams`).
+Retention is short: events older than **1 day** are purged
+(`purge_old_events`), since this table exists to bridge reconnects and
+short-term history, not as permanent storage — captured frames have their
+own, separate, much-longer-retention storage (`frame_store`).
 
 **Every function here is synchronous and blocking** — a plain `sqlite3`
 connect/execute/commit — matching `frame_store`'s own contract exactly (see
@@ -45,7 +46,7 @@ __all__ = [
     "run_purge_loop",
 ]
 
-Stream = Literal["messages", "scripts"]
+Stream = Literal["messages", "scripts", "connection"]
 
 DEFAULT_RETENTION = timedelta(days=1)
 """How long a durable event is kept before `purge_old_events` deletes it, per Design.md."""
@@ -58,20 +59,31 @@ class EventRecord(TypedDict):
     """One `events` row, as returned by `get_events` — the original event plus its log metadata.
 
     `payload` is the same `kind`-tagged dict `event_streams.publish_message_event`/
-    `publish_script_event` received (an `indi_messaging.IndiEvent` or a
-    `script_runs.ScriptRunStatus`), decoded back from the stored JSON text.
+    `publish_script_event`/`publish_connection_event` received (an
+    `indi_messaging.IndiEvent`, a `script_runs.ScriptRunStatus`, or an
+    `event_streams.ConnectionEvent`), decoded back from the stored JSON text.
     """
 
     id: int
     stream: Stream
     device: str | None
     runId: str | None
+    target: str | None
     occurredAt: str
     payload: Mapping
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the `events` table/indexes if they don't already exist, per Design.md's sketch."""
+    """Create the `events` table/indexes if they don't already exist, per Design.md's sketch.
+
+    `target` (INDIMCP-57) was added after `events` itself first shipped, so on a database that
+    already has an `events` table from before then, `CREATE TABLE IF NOT EXISTS` alone is a
+    no-op — it does not add columns to an existing table. The `ALTER TABLE` below covers that
+    already-deployed case (e.g. the Raspberry Pi's persistent database), the same pattern
+    `frame_store._ensure_schema` already uses for `checksum_sha256` (INDIMCP-95); existing rows
+    get `target = NULL`, which `get_events`'s `target` filter (unset by any pre-INDIMCP-57
+    stream) never needs to match anyway.
+    """
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS events (
@@ -79,13 +91,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             stream TEXT NOT NULL,
             device TEXT,
             run_id TEXT,
+            target TEXT,
             occurred_at TEXT NOT NULL,
             payload TEXT NOT NULL
         )
         """
     )
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "target" not in existing_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN target TEXT")
     # `idx_events_occurred_at` serves `purge_old_events`'s `DELETE ... WHERE occurred_at < ?`
-    # (no `stream` filter there — it purges across both streams at once). `get_events` always
+    # (no `stream` filter there — it purges across every stream at once). `get_events` always
     # filters `stream` (a required parameter), so it's served by the composite index below
     # instead, which covers both that filter and the `ORDER BY occurred_at` in one index.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON events (occurred_at)")
@@ -93,6 +109,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_events_stream_occurred_at ON events (stream, occurred_at)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_id ON events (run_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_target ON events (target)")
 
 
 def _now() -> str:
@@ -114,6 +131,7 @@ def _row_to_record(row: sqlite3.Row) -> EventRecord:
         "stream": row["stream"],
         "device": row["device"],
         "runId": row["run_id"],
+        "target": row["target"],
         "occurredAt": row["occurred_at"],
         "payload": json.loads(row["payload"]),
     }
@@ -125,6 +143,7 @@ def record_event(
     *,
     device: str | None = None,
     run_id: str | None = None,
+    target: str | None = None,
     db_path: Path | None = None,
 ) -> None:
     """Durably record one `kind`-tagged event to the `events` table.
@@ -136,9 +155,9 @@ def record_event(
     with db.connect(db_path) as conn:
         _ensure_schema(conn)
         conn.execute(
-            "INSERT INTO events (stream, device, run_id, occurred_at, payload) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (stream, device, run_id, _now(), json.dumps(payload)),
+            "INSERT INTO events (stream, device, run_id, target, occurred_at, payload) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (stream, device, run_id, target, _now(), json.dumps(payload)),
         )
         conn.commit()
 
@@ -148,6 +167,7 @@ def get_events(
     *,
     device: str | None = None,
     run_id: str | None = None,
+    target: str | None = None,
     since: str | None = None,
     db_path: Path | None = None,
 ) -> list[EventRecord]:
@@ -156,7 +176,7 @@ def get_events(
     This is the reconnect story from `docs/Design.md#event-log`: a client
     that was offline calls this with `since` set to the last `occurredAt`
     it actually saw (from a prior `get_events` call, or from before it
-    dropped off `indi://messages`/`indi://scripts`) to fetch what it
+    dropped off `indi://messages`/`indi://mcp-server`) to fetch what it
     missed, rather than assuming the live subscription caught everything.
     `since` is inclusive (`occurred_at >= since`): the event at exactly
     `since` is returned again if one exists, rather than being excluded —
@@ -167,7 +187,8 @@ def get_events(
     from `list_messages`/`list_frames`'s newest-first) since catching up
     is naturally about replaying events in the order they happened, not
     about "what just happened" — a client folding these into its own view
-    processes them front-to-back.
+    processes them front-to-back. `target` (INDIMCP-57) filters the
+    `connection` stream the same way `device`/`run_id` filter the other two.
     """
     clauses = ["stream = ?"]
     params: list[str] = [stream]
@@ -177,6 +198,9 @@ def get_events(
     if run_id is not None:
         clauses.append("run_id = ?")
         params.append(run_id)
+    if target is not None:
+        clauses.append("target = ?")
+        params.append(target)
     if since is not None:
         clauses.append("occurred_at >= ?")
         params.append(since)

@@ -47,7 +47,7 @@ more severe by default than you would in a typical CRUD app.
 2. **Protocol / JSON Envelope Correctness** — MCP-facing JSON uses the `kind`/`type` convention
    from `docs/Design.md`, never raw INDI XML tag names (`defNumberVector`, `setSwitchVector`,
    etc.) or `indipyclient` class names leaking into responses; resource subscriptions
-   (`indi://messages`, `indi://scripts`) implemented correctly given real SDK limitations (below)
+   (`indi://messages`, `indi://mcp-server/scripts`) implemented correctly given real SDK limitations (below)
 3. **Asyncio & Resource-Efficiency Correctness** — no blocking calls inside async handlers on a
    single-core-constrained Pi; large binary data (FITS frames/BLOBs) streamed rather than fully
    buffered in memory
@@ -133,14 +133,19 @@ One of: **Merge** / **Merge with fixes** (list blockers) / **Needs rework** (exp
   minimum, `[BLOCKER]` if it ships as the actual wire format
 
 ### Event Streams & Subscriptions
-- `indi://messages` and `indi://scripts` are separate subscribable resources (optionally scoped
-  `indi://messages/{device}` / `indi://scripts/{runId}`) sharing the `kind`/`type` envelope —
-  flag a design that merges them into one undifferentiated channel
+- `indi://messages`, `indi://mcp-server/scripts`, and `indi://mcp-server/connection` are separate
+  subscribable resources (optionally scoped `indi://messages/{device}` /
+  `indi://mcp-server/scripts/{runId}` / `indi://mcp-server/connection/{target}`) sharing the
+  `kind`-tagged envelope — flag a design that merges them into one undifferentiated channel.
+  `indi://messages` is raw INDI protocol traffic only; `indi://mcp-server/*` is everything about
+  the MCP server's own operation (script runs, connection lifecycle) — flag INDI protocol data
+  (property/message events) published under `indi://mcp-server`, or server-operational events
+  published under `indi://messages`
 - **Known SDK gap**: the official `mcp` Python SDK's high-level `FastMCP` API has **no resource
   subscription support at all**. Resource subscriptions (`resources/subscribe`,
   `resources/unsubscribe`, `session.send_resource_updated(...)`) only exist on the low-level
   `mcp.server.lowlevel.server.Server` class. Flag any attempt to implement `indi://messages` or
-  `indi://scripts` subscriptions using `@mcp.resource(...)`-style `FastMCP` decorators as
+  `indi://mcp-server/scripts` subscriptions using `@mcp.resource(...)`-style `FastMCP` decorators as
   `[BLOCKER]` — it will silently not support subscription.
 - **Known SDK gap**: `Server.get_capabilities()` hardcodes `ResourcesCapability(subscribe=False,
   ...)` regardless of whether `subscribe_resource`/`unsubscribe_resource` handlers are

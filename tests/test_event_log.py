@@ -23,6 +23,26 @@ def _last_id(db_path: Path) -> int:
         return conn.execute("SELECT max(id) FROM events").fetchone()[0]
 
 
+def _create_legacy_events_table(db_path: Path) -> None:
+    """Create an `events` table shaped as it was before `target` existed (INDIMCP-57),
+    simulating an already-deployed database that predates this column — see `_ensure_schema`.
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY,
+                stream TEXT NOT NULL,
+                device TEXT,
+                run_id TEXT,
+                occurred_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
 def test_record_event_and_get_events_round_trip(tmp_path: Path) -> None:
     db_path = tmp_path / "events.sqlite3"
     payload = {"kind": "message", "device": "CCD Simulator", "message": "hello"}
@@ -35,6 +55,7 @@ def test_record_event_and_get_events_round_trip(tmp_path: Path) -> None:
     assert record["stream"] == "messages"
     assert record["device"] == "CCD Simulator"
     assert record["runId"] is None
+    assert record["target"] is None
     assert record["payload"] == payload
     assert record["occurredAt"]
 
@@ -66,6 +87,34 @@ def test_get_events_filters_by_run_id(tmp_path: Path) -> None:
     filtered = event_log.get_events("scripts", run_id="run-1", db_path=db_path)
 
     assert [e["runId"] for e in filtered] == ["run-1"]
+
+
+def test_get_events_filters_by_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "events.sqlite3"
+    event_log.record_event(
+        "connection", {"kind": "connectionMade"}, target="indiserver", db_path=db_path
+    )
+    event_log.record_event(
+        "connection", {"kind": "connectionMade"}, target="server", db_path=db_path
+    )
+
+    filtered = event_log.get_events("connection", target="indiserver", db_path=db_path)
+
+    assert [e["target"] for e in filtered] == ["indiserver"]
+
+
+def test_record_event_migrates_a_pre_target_database(tmp_path: Path) -> None:
+    """A database created before `target` existed (INDIMCP-57) must gain the column on next
+    write rather than fail, the same way `frame_store`'s `checksum_sha256` migration works."""
+    db_path = tmp_path / "events.sqlite3"
+    _create_legacy_events_table(db_path)
+
+    event_log.record_event(
+        "connection", {"kind": "connectionMade"}, target="indiserver", db_path=db_path
+    )
+
+    events = event_log.get_events("connection", db_path=db_path)
+    assert [e["target"] for e in events] == ["indiserver"]
 
 
 def test_get_events_filters_by_since_and_returns_oldest_first(tmp_path: Path) -> None:

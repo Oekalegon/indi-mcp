@@ -31,6 +31,7 @@ def _reset_stores() -> None:
     script_runs._runs = {}
     flat_calibration_sweep._sweeps = {}
     event_streams._scripts.clear()
+    event_streams._connections.clear()
     event_streams._subscribers.clear()
     event_streams._background_tasks.clear()
     _known_devices.clear()

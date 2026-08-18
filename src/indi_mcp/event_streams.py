@@ -1,13 +1,19 @@
-"""Subscribable `indi://messages` and `indi://scripts` event stream resources.
+"""Subscribable `indi://messages` and `indi://mcp-server` event stream resources.
 
-Per `docs/Design.md#event-streams`: two separate streams that share the same
-`kind`/`type` envelope already used by `indi_messaging.IndiEvent` (the
-messaging layer) and `script_runs.ScriptRunStatus` (the scripting layer).
-This module is the broker connecting new events raised by those two modules
-to MCP's `resources/subscribe` / `notifications/resources/updated` /
-`resources/read` mechanism: a small rolling in-memory buffer per stream
-(read by `resources/read`), plus a subscriber registry notified whenever a
-new event is published.
+Per `docs/Design.md#event-streams`: `indi://messages` carries raw INDI
+protocol traffic (`indi_messaging.IndiEvent`); `indi://mcp-server` carries
+everything about this server's own operation instead — script-run progress
+(`indi_mcp.event_streams`'s `scripts_uri`, historically its own top-level
+`indi://scripts` stream, moved under here by INDIMCP-57) and connection
+lifecycle (`connectionMade`/`connectionLost`, INDIMCP-57) for the MCP
+server's own link to `indiserver`, the `indiserver` process, and individual
+driver processes. All three share the same `kind`-tagged envelope
+convention. This module is the broker connecting new events raised by the
+messaging/scripting/process-management layers to MCP's
+`resources/subscribe` / `notifications/resources/updated` / `resources/read`
+mechanism: a small rolling in-memory buffer per stream (read by
+`resources/read`), plus a subscriber registry notified whenever a new event
+is published.
 
 **The live `resources/subscribe` channel itself is best-effort, live-only**
 — matching Design.md exactly: a client that was disconnected when an event
@@ -41,7 +47,7 @@ import asyncio
 import logging
 from collections import deque
 from collections.abc import Mapping
-from typing import NamedTuple, Protocol
+from typing import Literal, NamedTuple, Protocol, TypedDict
 from urllib.parse import quote
 
 from pydantic import AnyUrl
@@ -51,18 +57,33 @@ from indi_mcp import event_log
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ConnectionEvent",
     "clear_messages",
+    "connection_uri",
     "drain",
     "is_subscribable_uri",
     "messages_uri",
+    "publish_connection_event",
     "publish_message_event",
     "publish_script_event",
+    "read_connection",
     "read_messages",
     "read_scripts",
     "scripts_uri",
     "subscribe",
     "unsubscribe",
 ]
+
+
+class ConnectionEvent(TypedDict):
+    """One connection-lifecycle event, in the same `kind`-tagged envelope convention as
+    `indi_messaging.IndiEvent`/`script_runs.ScriptRunStatus` — see `publish_connection_event`
+    (INDIMCP-57)."""
+
+    kind: Literal["connectionMade", "connectionLost"]
+    target: Literal["server", "indiserver"] | str
+    message: str | None
+    timestamp: str
 
 _MAX_BUFFERED_EVENTS = 200
 
@@ -91,10 +112,12 @@ class _QueuedEvent(NamedTuple):
     payload: Mapping
     device: str | None
     run_id: str | None
+    target: str | None
 
 
 _messages: deque[Mapping] = deque(maxlen=_MAX_BUFFERED_EVENTS)
 _scripts: deque[Mapping] = deque(maxlen=_MAX_BUFFERED_EVENTS)
+_connections: deque[Mapping] = deque(maxlen=_MAX_BUFFERED_EVENTS)
 
 _subscribers: dict[str, set[_NotifiableSession]] = {}
 
@@ -236,24 +259,47 @@ def messages_uri(device: str | None) -> str:
 
 
 def scripts_uri(run_id: str | None) -> str:
-    """The `indi://scripts` resource URI, scoped to `run_id` if given (see `messages_uri`)."""
-    return f"indi://scripts/{quote(run_id, safe='')}" if run_id else "indi://scripts"
+    """The `indi://mcp-server/scripts` resource URI, scoped to `run_id` if given (see
+    `messages_uri`). Renamed from the top-level `indi://scripts` by INDIMCP-57 — see this
+    module's docstring."""
+    return (
+        f"indi://mcp-server/scripts/{quote(run_id, safe='')}"
+        if run_id
+        else "indi://mcp-server/scripts"
+    )
 
 
-_UNSCOPED_URIS = ("indi://messages", "indi://scripts")
-_SCOPED_PREFIXES = ("indi://messages/", "indi://scripts/")
+def connection_uri(target: str | None) -> str:
+    """The `indi://mcp-server/connection` resource URI, scoped to `target` if given (see
+    `messages_uri`). `target` is one of `"server"` (this server's own link to `indiserver`),
+    `"indiserver"` (the `indiserver` process), or a driver's catalog label (an individual
+    driver process) — see `publish_connection_event`."""
+    return (
+        f"indi://mcp-server/connection/{quote(target, safe='')}"
+        if target
+        else "indi://mcp-server/connection"
+    )
+
+
+_UNSCOPED_URIS = ("indi://messages", "indi://mcp-server/scripts", "indi://mcp-server/connection")
+_SCOPED_PREFIXES = (
+    "indi://messages/",
+    "indi://mcp-server/scripts/",
+    "indi://mcp-server/connection/",
+)
 
 
 def is_subscribable_uri(uri: str) -> bool:
     """Whether `uri` is one of the resources this module actually publishes to.
 
     Checks the *shape* advertised by the `indi://messages`/`indi://messages/{device}`/
-    `indi://scripts`/`indi://scripts/{runId}` resources (see `server.py`) — a single
-    non-empty scope segment with no further `/` — not whether that particular device/run
-    currently exists. Subscribing ahead of a device connecting or a run starting is expected
-    and should still succeed; this only rejects URIs this module can never publish an update
-    to at all (a typo like `indi://message`, or an unrelated resource like `foo://bar`),
-    which would otherwise register a subscription that silently never fires.
+    `indi://mcp-server/scripts`/`indi://mcp-server/scripts/{runId}`/
+    `indi://mcp-server/connection`/`indi://mcp-server/connection/{target}` resources (see
+    `server.py`) — a single non-empty scope segment with no further `/` — not whether that
+    particular device/run/target currently exists. Subscribing ahead of a device connecting or
+    a run starting is expected and should still succeed; this only rejects URIs this module can
+    never publish an update to at all (a typo like `indi://message`, or an unrelated resource
+    like `foo://bar`), which would otherwise register a subscription that silently never fires.
     """
     if uri in _UNSCOPED_URIS:
         return True
@@ -355,6 +401,7 @@ async def _record_worker(queue: "asyncio.Queue[_QueuedEvent]") -> None:
                 item.payload,
                 device=item.device,
                 run_id=item.run_id,
+                target=item.target,
             )
         except Exception:
             logger.exception("Failed to durably record a %s event to the event log", item.stream)
@@ -381,7 +428,12 @@ def _ensure_record_worker() -> "asyncio.Queue[_QueuedEvent]":
 
 
 def _schedule_record(
-    stream: event_log.Stream, payload: Mapping, *, device: str | None, run_id: str | None
+    stream: event_log.Stream,
+    payload: Mapping,
+    *,
+    device: str | None,
+    run_id: str | None,
+    target: str | None = None,
 ) -> None:
     """Enqueue `event_log.record_event(...)` for the durable-write worker, applying backpressure.
 
@@ -400,7 +452,7 @@ def _schedule_record(
     """
     global _dropped_event_count
     queue = _ensure_record_worker()
-    item = _QueuedEvent(stream, payload, device, run_id)
+    item = _QueuedEvent(stream, payload, device, run_id, target)
     try:
         queue.put_nowait(item)
         return
@@ -483,7 +535,8 @@ def publish_message_event(event: Mapping) -> None:
 
 
 def publish_script_event(event: Mapping) -> None:
-    """Record a scripting-layer event and notify `indi://scripts` (and per-run) subscribers.
+    """Record a scripting-layer event and notify `indi://mcp-server/scripts` (and per-run)
+    subscribers.
 
     Also durably persisted to the event log — see `_schedule_record`.
     """
@@ -493,6 +546,30 @@ def publish_script_event(event: Mapping) -> None:
     _schedule_notify(scripts_uri(None))
     if run_id:
         _schedule_notify(scripts_uri(run_id))
+
+
+def publish_connection_event(event: Mapping) -> None:
+    """Record a connection-lifecycle event and notify `indi://mcp-server/connection` (and
+    per-target) subscribers (INDIMCP-57).
+
+    `event["target"]` is one of `"server"` (this server's own TCP link to `indiserver`, sourced
+    from `indipyclient`'s local `ConnectionMade`/`ConnectionLost` events —
+    `indi_messaging._MessagingClient.rxevent`), `"indiserver"` (the `indiserver` process itself
+    — `indi_server.start_server`/`stop_server`), or a driver's catalog label (an individual
+    driver process — `indi_driver.start_driver`/`stop_driver`). Unlike `publish_message_event`,
+    no duplicate-suppression is applied here: a repeated `connectionLost` for the same target
+    (e.g. `indiserver` retrying a failed reconnect every few seconds) is itself meaningful
+    information, not noise to collapse away, the same way a chatty device's raw wire traffic
+    is not what this stream carries.
+
+    Also durably persisted to the event log — see `_schedule_record`.
+    """
+    _connections.appendleft(event)
+    target = event.get("target")
+    _schedule_record("connection", event, device=None, run_id=None, target=target)
+    _schedule_notify(connection_uri(None))
+    if target:
+        _schedule_notify(connection_uri(target))
 
 
 def clear_messages() -> None:
@@ -526,6 +603,13 @@ def read_messages(device: str | None = None) -> dict[str, list[Mapping]]:
 def read_scripts(run_id: str | None = None) -> dict[str, list[Mapping]]:
     """The rolling window of recent scripting-layer events, newest first (see `read_messages`)."""
     events = [e for e in _scripts if run_id is None or e.get("runId") == run_id]
+    return {"events": events}
+
+
+def read_connection(target: str | None = None) -> dict[str, list[Mapping]]:
+    """The rolling window of recent connection-lifecycle events, newest first (see
+    `read_messages`). INDIMCP-57."""
+    events = [e for e in _connections if target is None or e.get("target") == target]
     return {"events": events}
 
 

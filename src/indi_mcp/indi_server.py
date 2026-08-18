@@ -7,18 +7,25 @@ support: it fails argument parsing and exits immediately, regardless of
 whether any driver is given. Stopping and status-checking still delegate to
 indiweb's `IndiServer`, since those paths are psutil-based and don't depend
 on `-u`.
+
+`start_server`/`stop_server` also publish `connectionMade`/`connectionLost` events
+(`target="indiserver"`) to `event_streams`'s `indi://mcp-server/connection` stream when they
+actually change the process's running state (INDIMCP-57) — see `_connection_event`.
 """
 
 import asyncio
 import logging
 import threading
+from datetime import UTC, datetime
 from subprocess import call
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import psutil
 from indiweb.async_system_command import AsyncSystemCommand
 from indiweb.indi_server import INDI_FIFO, INDI_PORT
 from indiweb.indi_server import IndiServer as _IndiServer
+
+from indi_mcp import event_streams
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +54,20 @@ class IndiServerStatus(TypedDict):
     port: int
 
 
+def _connection_event(
+    kind: Literal["connectionMade", "connectionLost"], message: str
+) -> event_streams.ConnectionEvent:
+    """Build a `ConnectionEvent` for the `indiserver` process itself (`target="indiserver"`,
+    INDIMCP-57) — distinct from `indi_messaging`'s `target="server"` events, which track this
+    server's own TCP link to `indiserver` rather than the process's own start/stop."""
+    return {
+        "kind": kind,
+        "target": "indiserver",
+        "message": message,
+        "timestamp": datetime.now(tz=UTC).isoformat(),
+    }
+
+
 def _clear_fifo(fifo: str = INDI_FIFO) -> None:
     call(["rm", "-f", fifo])
     call(["mkfifo", fifo])
@@ -70,12 +91,18 @@ async def start_server(port: int = INDI_PORT) -> IndiServerStatus:
     await asyncio.to_thread(_clear_fifo)
     _async_cmd = await asyncio.to_thread(_launch, port)
     _current_port = port
-    return await _wait_until_running()
+    status = await _wait_until_running()
+    if status["running"]:
+        event_streams.publish_connection_event(
+            _connection_event("connectionMade", f"indiserver started on port {port}")
+        )
+    return status
 
 
 async def stop_server() -> IndiServerStatus:
     """Stop `indiserver`."""
     global _async_cmd
+    was_running = (await get_status())["running"]
     logger.info("Stopping indiserver on port %d", _current_port)
     await asyncio.to_thread(_server.stop, _current_port)
     if _async_cmd is not None:
@@ -83,7 +110,14 @@ async def stop_server() -> IndiServerStatus:
             await asyncio.to_thread(_terminate, _async_cmd)
         finally:
             _async_cmd = None
-    return await get_status()
+    status = await get_status()
+    if was_running and not status["running"]:
+        event_streams.publish_connection_event(
+            _connection_event(
+                "connectionLost", f"indiserver stopped on port {_current_port}"
+            )
+        )
+    return status
 
 
 def _terminate(async_cmd: AsyncSystemCommand) -> None:

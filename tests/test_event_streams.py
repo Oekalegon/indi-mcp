@@ -27,6 +27,7 @@ def _reset_state() -> None:
     # one specifically needs to be async (it awaits cancelling the worker task).
     event_streams._messages.clear()
     event_streams._scripts.clear()
+    event_streams._connections.clear()
     event_streams._subscribers.clear()
     event_streams._background_tasks.clear()
     event_streams._pending_notify_uris.clear()
@@ -59,6 +60,27 @@ async def test_read_scripts_returns_newest_first_and_filters_by_run_id() -> None
     }
     assert event_streams.read_scripts("run-1") == {
         "events": [{"kind": "scriptStarted", "runId": "run-1"}]
+    }
+
+
+async def test_read_connection_returns_newest_first_and_filters_by_target() -> None:
+    event_streams.publish_connection_event(
+        {"kind": "connectionMade", "target": "server", "message": None, "timestamp": "t1"}
+    )
+    event_streams.publish_connection_event(
+        {"kind": "connectionMade", "target": "indiserver", "message": None, "timestamp": "t2"}
+    )
+
+    assert event_streams.read_connection() == {
+        "events": [
+            {"kind": "connectionMade", "target": "indiserver", "message": None, "timestamp": "t2"},
+            {"kind": "connectionMade", "target": "server", "message": None, "timestamp": "t1"},
+        ]
+    }
+    assert event_streams.read_connection("server") == {
+        "events": [
+            {"kind": "connectionMade", "target": "server", "message": None, "timestamp": "t1"}
+        ]
     }
 
 
@@ -135,7 +157,7 @@ async def test_publish_message_event_duplicate_is_not_recorded_or_notified(
     monkeypatch.setattr(
         event_log,
         "record_event",
-        lambda stream, payload, *, device, run_id, db_path=None: calls.append(
+        lambda stream, payload, *, device, run_id, target=None, db_path=None: calls.append(
             (stream, payload, device, run_id)
         ),
     )
@@ -186,7 +208,24 @@ async def test_publishing_a_script_event_notifies_the_unscoped_and_run_scoped_su
     event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-1"})
     await asyncio.sleep(0)
 
-    assert sorted(session.updated) == sorted(["indi://scripts", "indi://scripts/run-1"])
+    assert sorted(session.updated) == sorted(
+        ["indi://mcp-server/scripts", "indi://mcp-server/scripts/run-1"]
+    )
+
+
+async def test_publishing_a_connection_event_notifies_unscoped_and_target_subscribers() -> None:
+    session = _FakeSession()
+    event_streams.subscribe(event_streams.connection_uri(None), session)
+    event_streams.subscribe(event_streams.connection_uri("indiserver"), session)
+
+    event_streams.publish_connection_event(
+        {"kind": "connectionMade", "target": "indiserver", "message": None, "timestamp": "t1"}
+    )
+    await asyncio.sleep(0)
+
+    assert sorted(session.updated) == sorted(
+        ["indi://mcp-server/connection", "indi://mcp-server/connection/indiserver"]
+    )
 
 
 async def test_publishing_does_not_notify_subscribers_of_a_different_scope() -> None:
@@ -254,18 +293,25 @@ def test_messages_uri_percent_encodes_a_device_name_containing_reserved_characte
 
 
 def test_scripts_uri_percent_encodes_a_run_id_containing_reserved_characters() -> None:
-    assert event_streams.scripts_uri("run/1") == "indi://scripts/run%2F1"
+    assert event_streams.scripts_uri("run/1") == "indi://mcp-server/scripts/run%2F1"
+
+
+def test_connection_uri_percent_encodes_a_target_containing_reserved_characters() -> None:
+    assert event_streams.connection_uri("CCD/Sub") == "indi://mcp-server/connection/CCD%2FSub"
 
 
 @pytest.mark.parametrize(
     "uri",
     [
         "indi://messages",
-        "indi://scripts",
+        "indi://mcp-server/scripts",
+        "indi://mcp-server/connection",
         "indi://messages/CCD%20Simulator",
-        "indi://scripts/run-1",
+        "indi://mcp-server/scripts/run-1",
+        "indi://mcp-server/connection/indiserver",
         event_streams.messages_uri("CCD/Sub"),
         event_streams.scripts_uri("run/1"),
+        event_streams.connection_uri("CCD/Sub"),
     ],
 )
 def test_is_subscribable_uri_accepts_every_shape_this_module_publishes_to(uri: str) -> None:
@@ -277,11 +323,14 @@ def test_is_subscribable_uri_accepts_every_shape_this_module_publishes_to(uri: s
     [
         "indi://message",  # typo: missing the trailing 's'
         "indi://script",
+        "indi://mcp-server/connections",  # typo: extra trailing 's'
         "frame://foo",
         "indi://messages/",
-        "indi://scripts/",
+        "indi://mcp-server/scripts/",
+        "indi://mcp-server/connection/",
         "indi://messages/CCD/Sub",  # unencoded '/' splits into two segments
-        "indi://scripts/run/1",
+        "indi://mcp-server/scripts/run/1",
+        "indi://mcp-server/connection/CCD/Sub",
         "",
     ],
 )
@@ -365,7 +414,7 @@ async def test_publish_message_event_durably_records_to_the_event_log(
     this is what actually lets a reconnecting client catch up, per `docs/Design.md#event-log`."""
     calls: list[tuple] = []
 
-    def fake_record_event(stream, payload, *, device, run_id, db_path=None) -> None:
+    def fake_record_event(stream, payload, *, device, run_id, target=None, db_path=None) -> None:
         calls.append((stream, payload, device, run_id))
 
     monkeypatch.setattr(event_log, "record_event", fake_record_event)
@@ -382,7 +431,7 @@ async def test_publish_script_event_durably_records_to_the_event_log(
 ) -> None:
     calls: list[tuple] = []
 
-    def fake_record_event(stream, payload, *, device, run_id, db_path=None) -> None:
+    def fake_record_event(stream, payload, *, device, run_id, target=None, db_path=None) -> None:
         calls.append((stream, payload, device, run_id))
 
     monkeypatch.setattr(event_log, "record_event", fake_record_event)
@@ -392,6 +441,28 @@ async def test_publish_script_event_durably_records_to_the_event_log(
     await asyncio.sleep(0.05)
 
     assert calls == [("scripts", event, None, "run-1")]
+
+
+async def test_publish_connection_event_durably_records_to_the_event_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    def fake_record_event(stream, payload, *, device, run_id, target=None, db_path=None) -> None:
+        calls.append((stream, payload, device, run_id, target))
+
+    monkeypatch.setattr(event_log, "record_event", fake_record_event)
+
+    event = {
+        "kind": "connectionMade",
+        "target": "indiserver",
+        "message": None,
+        "timestamp": "t1",
+    }
+    event_streams.publish_connection_event(event)
+    await asyncio.sleep(0.05)
+
+    assert calls == [("connection", event, None, None, "indiserver")]
 
 
 async def test_publish_message_event_records_durably_even_with_no_subscribers() -> None:
@@ -520,7 +591,7 @@ async def test_schedule_record_drops_the_oldest_queued_event_once_the_queue_is_f
     instead of letting the queue grow without limit under a sustained burst — and log it."""
     recorded: list[int] = []
 
-    def fake_record_event(stream, payload, *, device, run_id, db_path=None) -> None:
+    def fake_record_event(stream, payload, *, device, run_id, target=None, db_path=None) -> None:
         recorded.append(payload["i"])
 
     monkeypatch.setattr(event_log, "record_event", fake_record_event)

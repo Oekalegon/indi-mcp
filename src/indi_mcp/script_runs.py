@@ -22,7 +22,7 @@ own `runId`/`parentRunId` — a composed script's `run_script` sub-calls stay
 inside `execute_script`'s single flat step count, so `scriptProgress.step`
 already walks across nested calls, just without a separate per-sub-script
 identity. Every `kind`-tagged status this module produces is also published
-to `event_streams` (backing the `indi://scripts` subscribable resource,
+to `event_streams` (backing the `indi://mcp-server/scripts` subscribable resource,
 INDIMCP-14, and the durable SQLite event log behind it, INDIMCP-15).
 """
 
@@ -103,10 +103,10 @@ class ScriptRunMessage(TypedDict):
     run's current state, just a point-in-time note a step handler chose to report (e.g.
     `capture_frame` reporting the frame it just saved) — surfacing it through
     `get_script_status`'s "current state" polling story would risk clobbering whatever real
-    progress/terminal status a reconnecting client actually needs to see there. Still
-    published live (`indi://scripts`) and durably logged, same as every other `kind` here —
-    a client that cares about it subscribes or replays the event log, it just isn't part of
-    "the currently recorded status for this run."
+    progress/terminal status a reconnecting client actually needs to see there. Still published
+    live (`indi://mcp-server/scripts`) and durably logged, same as every other `kind` here — a
+    client that cares about it subscribes or replays the event log, it just isn't part of "the
+    currently recorded status for this run."
     """
 
     kind: str

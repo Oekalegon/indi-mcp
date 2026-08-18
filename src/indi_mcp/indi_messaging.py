@@ -10,6 +10,12 @@ resulting rolling window of recent events — both `list_messages` (this
 module's own polling tool) and the `indi://messages` subscribable resource
 (INDIMCP-14) read from the same buffer there, rather than each maintaining
 an independent copy that could silently drift out of sync.
+
+`_MessagingClient.rxevent` also handles `indipyclient`'s own local
+`ConnectionMade`/`ConnectionLost` events — generated when this server's TCP
+link to `indiserver` itself comes up or drops, not from anything received
+over that link — publishing them to the `indi://mcp-server/connection`
+stream instead (`target="server"`, INDIMCP-57). See `_connection_event`.
 """
 
 import asyncio
@@ -17,9 +23,11 @@ import contextlib
 import logging
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 from indipyclient import (
+    ConnectionLost,
+    ConnectionMade,
     IPyClient,
     Message,
     defBLOBVector,
@@ -234,6 +242,29 @@ def _to_indi_event(event: Any) -> IndiEvent | None:
     }
 
 
+def _connection_event(
+    kind: Literal["connectionMade", "connectionLost"], event: "ConnectionMade | ConnectionLost"
+) -> event_streams.ConnectionEvent:
+    """Build a `ConnectionEvent` for this server's own link to `indiserver` (`target="server"`).
+
+    `indipyclient` fires `ConnectionMade` on every successful (re)connect and `ConnectionLost`
+    whenever the TCP connection drops or fails — including on a deliberate `stop_messaging`
+    (see `IPyClient._comms`'s `finally`-block call to `_clear_connection`, which is what emits
+    `ConnectionLost` even when the underlying task was cancelled rather than the connection
+    actually failing), and again on every retry attempt of `IPyClient`'s own internal 5-second
+    reconnect loop — so a sustained outage on `indiserver`'s side surfaces as a
+    `connectionLost`/`connectionMade` pair roughly every 5 seconds until it recovers, not just
+    once. See `event_streams.publish_connection_event` for why that repetition is intentionally
+    not deduplicated here.
+    """
+    return {
+        "kind": kind,
+        "target": "server",
+        "message": None,
+        "timestamp": event.timestamp.isoformat(),
+    }
+
+
 class _MessagingClient(IPyClient):
     """An `IPyClient` that publishes every received event as an `IndiEvent` to `event_streams`.
 
@@ -254,6 +285,12 @@ class _MessagingClient(IPyClient):
         self.enableBLOBdefault = "Also"
 
     async def rxevent(self, event: Any) -> None:
+        if isinstance(event, ConnectionMade):
+            event_streams.publish_connection_event(_connection_event("connectionMade", event))
+            return
+        if isinstance(event, ConnectionLost):
+            event_streams.publish_connection_event(_connection_event("connectionLost", event))
+            return
         indi_event = _to_indi_event(event)
         if indi_event is not None:
             event_streams.publish_message_event(indi_event)

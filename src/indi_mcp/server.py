@@ -37,6 +37,7 @@ from indi_mcp import (
     sensor_calibration_sweep,
     server_info,
 )
+from indi_mcp.event_streams import ConnectionEvent
 from indi_mcp.flat_calibration_sweep import FlatCalibrationSweepStarted, FlatCalibrationSweepStatus
 from indi_mcp.frame_store import FrameMetadata
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
@@ -110,7 +111,7 @@ _original_get_capabilities = mcp._mcp_server.get_capabilities
 
 
 def _get_capabilities_with_resource_subscriptions(*args: Any, **kwargs: Any) -> Any:
-    """Advertise resource subscription support for `indi://messages`/`indi://scripts`.
+    """Advertise resource subscription support for `indi://messages`/`indi://mcp-server`.
 
     The installed MCP SDK hardcodes `ResourcesCapability(subscribe=False,
     ...)` in `Server.get_capabilities` regardless of whether a
@@ -150,7 +151,8 @@ def _require_subscribable_uri(uri: AnyUrl) -> str:
                 code=INVALID_PARAMS,
                 message=(
                     f"{uri_str!r} is not a subscribable resource; expected "
-                    "indi://messages(/{device}) or indi://scripts(/{runId})"
+                    "indi://messages(/{device}), indi://mcp-server/scripts(/{runId}), or "
+                    "indi://mcp-server/connection(/{target})"
                 ),
             )
         )
@@ -159,7 +161,8 @@ def _require_subscribable_uri(uri: AnyUrl) -> str:
 
 @mcp._mcp_server.subscribe_resource()
 async def _subscribe_to_event_stream(uri: AnyUrl) -> None:
-    """Handle `resources/subscribe` for `indi://messages`/`indi://scripts` (and their scoped forms).
+    """Handle `resources/subscribe` for `indi://messages`/`indi://mcp-server` (and their scoped
+    forms).
 
     FastMCP itself has no subscription mechanism, so this is registered
     directly on the underlying low-level `Server` rather than via
@@ -1085,17 +1088,18 @@ async def cancel_flat_calibration_sweep(sweep_id: str) -> FlatCalibrationSweepSt
     return await flat_calibration_sweep.cancel_sweep(sweep_id)
 
 
-@mcp.resource("indi://scripts", mime_type="application/json")
+@mcp.resource("indi://mcp-server/scripts", mime_type="application/json")
 def read_script_event_stream() -> dict[str, list[ScriptRunStatus]]:
     """The rolling window of recent scripting-layer events, newest first.
 
     Same subscription mechanism and best-effort caveat as
-    `read_indi_message_stream` — see `docs/Design.md#event-streams`.
+    `read_indi_message_stream` — see `docs/Design.md#event-streams`. Renamed from the
+    top-level `indi://scripts` by INDIMCP-57 — see `event_streams`'s module docstring.
     """
     return cast(dict[str, list[ScriptRunStatus]], event_streams.read_scripts())
 
 
-@mcp.resource("indi://scripts/{runId}", mime_type="application/json")
+@mcp.resource("indi://mcp-server/scripts/{runId}", mime_type="application/json")
 def read_script_event_stream_for_run(runId: str) -> dict[str, list[ScriptRunStatus]]:
     """Same as `read_script_event_stream`, scoped to events from one `runId`.
 
@@ -1104,14 +1108,38 @@ def read_script_event_stream_for_run(runId: str) -> dict[str, list[ScriptRunStat
     return cast(dict[str, list[ScriptRunStatus]], event_streams.read_scripts(unquote(runId)))
 
 
+@mcp.resource("indi://mcp-server/connection", mime_type="application/json")
+def read_connection_event_stream() -> dict[str, list[ConnectionEvent]]:
+    """The rolling window of recent connection-lifecycle events, newest first (INDIMCP-57).
+
+    Covers three kinds of connection: this server's own TCP link to `indiserver`
+    (`target="server"`), the `indiserver` process itself (`target="indiserver"`), and
+    individual driver processes (`target=<driver label>`). Same subscription mechanism and
+    best-effort caveat as `read_indi_message_stream` — see `docs/Design.md#event-streams`.
+    """
+    return cast(dict[str, list[ConnectionEvent]], event_streams.read_connection())
+
+
+@mcp.resource("indi://mcp-server/connection/{target}", mime_type="application/json")
+def read_connection_event_stream_for_target(target: str) -> dict[str, list[ConnectionEvent]]:
+    """Same as `read_connection_event_stream`, scoped to events for one `target`.
+
+    `target` is unquoted before filtering — see `read_indi_message_stream_for_device`.
+    """
+    return cast(
+        dict[str, list[ConnectionEvent]], event_streams.read_connection(unquote(target))
+    )
+
+
 @mcp.tool()
 async def get_events(
     stream: event_log.Stream,
     device: str | None = None,
     run_id: str | None = None,
+    target: str | None = None,
     since: str | None = None,
 ) -> list[event_log.EventRecord]:
-    """Catch up on missed `indi://messages`/`indi://scripts` events from the durable event log.
+    """Catch up on missed `indi://messages`/`indi://mcp-server` events from the durable event log.
 
     Unlike the live `resources/subscribe` channel (best-effort, live-only —
     see `docs/Design.md#event-streams`), this queries the durable SQLite
@@ -1123,10 +1151,12 @@ async def get_events(
     `event_log.get_events` for why); dedupe by `id` if polling repeatedly.
     Events older than a day are purged (see `event_log.purge_old_events`),
     so this isn't a substitute for permanent history. Returned oldest
-    first — the natural order for replaying missed events.
+    first — the natural order for replaying missed events. `target` filters
+    the `connection` stream (INDIMCP-57) the same way `device`/`run_id`
+    filter `messages`/`scripts`.
     """
     return await asyncio.to_thread(
-        event_log.get_events, stream, device=device, run_id=run_id, since=since
+        event_log.get_events, stream, device=device, run_id=run_id, target=target, since=since
     )
 
 

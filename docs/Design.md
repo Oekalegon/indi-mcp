@@ -123,7 +123,7 @@ regardless of whether there's anything to say):
 
 Not every primitive emits these — only ones with per-invocation activity worth surfacing
 live (`capture_frame` reporting the frame it just saved is the first case). Published to
-`indi://scripts` and the durable event log like every other status here, but **not** part of
+`indi://mcp-server/scripts` and the durable event log like every other status here, but **not** part of
 `get_script_status`'s "current status" reconnect story — it's a point-in-time note, not a
 change to the run's state, so it never overwrites what `get_script_status` returns for a
 `runId` (a reconnecting client polling for "what's the run doing right now" still gets the
@@ -256,16 +256,21 @@ Composability raises a few things the schema and execution engine (INDIMCP-6/IND
 
 The `kind`-tagged JSON events above (both the INDI messaging-layer events and the scripting-layer events) aren't only returned as direct tool-call results — long-running scripts and ongoing device activity need a push channel too. This raises the question of whether the INDI messaging layer and the scripting layer should share one event stream or use separate ones.
 
-**Decision: two separate, subscribable streams that share the same `kind`/`type` envelope.**
+**Decision: two families of subscribable stream that share the same `kind`/`type` envelope —
+`indi://messages` for raw INDI protocol traffic, `indi://mcp-server` for everything about this
+server's own operation.**
 
 * `indi://messages` — the INDI messaging layer stream: `propertyDefinition`, `propertyUpdate`, `propertyCommand`, `propertyDeleted`, `message` events. Can optionally be scoped per device, e.g. `indi://messages/{device}`, for clients only interested in one instrument.
-* `indi://scripts` — the scripting layer stream: `scriptStarted`, `scriptProgress`, `scriptCompleted`, `scriptFailed`, `scriptCancelled`, `scriptPaused`, `scriptResumed`, `scriptPauseRejected` events. Can optionally be scoped per run, e.g. `indi://scripts/{runId}`.
+* `indi://mcp-server/scripts` — the scripting layer stream: `scriptStarted`, `scriptProgress`, `scriptCompleted`, `scriptFailed`, `scriptCancelled`, `scriptPaused`, `scriptResumed`, `scriptPauseRejected` events. Can optionally be scoped per run, e.g. `indi://mcp-server/scripts/{runId}`. Originally shipped as its own top-level `indi://scripts` stream (INDIMCP-14); moved under `indi://mcp-server` by INDIMCP-57 once a second server-operational stream (below) needed the same non-protocol home.
+* `indi://mcp-server/connection` — connection-lifecycle events (INDIMCP-57): `connectionMade`/`connectionLost`, each carrying a `target` of `"server"` (this server's own TCP link to `indiserver`, sourced from `indipyclient`'s local `ConnectionMade`/`ConnectionLost` events), `"indiserver"` (the `indiserver` process itself), or a driver's catalog label (an individual driver process). Can optionally be scoped per target, e.g. `indi://mcp-server/connection/indiserver`.
 
-They're kept separate rather than merged because:
+They're kept as separate streams rather than merged with `indi://messages` because:
 
-* **Different volume and audience.** INDI property updates can be chatty across many devices; script events are comparatively rare, high-level milestones. A client that only cares whether a capture sequence finished shouldn't have to filter a firehose of property updates, and a device-control UI shouldn't have script bookkeeping mixed into its property feed.
-* **Mirrors the layering.** The messaging layer and scripting layer are already separate layers in this design; separate streams keep that boundary intact and let each schema evolve independently.
-* **Selective subscription.** A client subscribes only to the stream(s) — and, optionally, the device/run scope — it actually needs.
+* **Different volume and audience.** INDI property updates can be chatty across many devices; script/connection events are comparatively rare, high-level milestones. A client that only cares whether a capture sequence finished (or the server lost its link to `indiserver`) shouldn't have to filter a firehose of property updates, and a device-control UI shouldn't have that bookkeeping mixed into its property feed.
+* **Mirrors the layering.** The messaging layer is a distinct layer in this design from everything about the MCP server's own operation (script runs, connection lifecycle); separate streams keep that boundary intact and let each schema evolve independently.
+* **Selective subscription.** A client subscribes only to the stream(s) — and, optionally, the device/run/target scope — it actually needs.
+
+`indi://mcp-server/scripts` and `indi://mcp-server/connection` are themselves two separate sub-streams (each independently subscribable/scoped), not one combined feed — script-run progress and connection lifecycle are unrelated in cause and cadence, and merging them would force every subscriber to filter the other one out client-side. What they share is that neither is raw INDI wire protocol, which is the one thing `indi://messages` is reserved for.
 
 They share the same envelope convention (not the same channel) so client-side parsing code is uniform across both, and so a `scriptProgress` event can reference the specific `propertyUpdate` that triggered it, e.g.:
 
@@ -286,13 +291,13 @@ They share the same envelope convention (not the same channel) so client-side pa
 }
 ```
 
-**Mechanism:** these are implemented as standard MCP subscribable resources. A client calls `resources/subscribe` on a URI (e.g. `indi://scripts` or `indi://scripts/{runId}`); the server sends `notifications/resources/updated` whenever a new event occurs; the client calls `resources/read` to fetch it. Resource content is a small JSON envelope with a rolling window of recent events, e.g. `{ "events": [ ... ] }`.
+**Mechanism:** these are implemented as standard MCP subscribable resources. A client calls `resources/subscribe` on a URI (e.g. `indi://mcp-server/scripts` or `indi://mcp-server/scripts/{runId}`); the server sends `notifications/resources/updated` whenever a new event occurs; the client calls `resources/read` to fetch it. Resource content is a small JSON envelope with a rolling window of recent events, e.g. `{ "events": [ ... ] }`.
 
 **These subscriptions are a best-effort, live-only channel, not the resilience mechanism.** A client that was offline (e.g. the Wi-Fi drop scenario from the intro) should not assume it received every event it missed — it should treat the subscription as "notify me while I'm connected" and use the `runId`-based polling tools (`get_script_status`, etc.) and the event log (below) as the source of truth to catch up after reconnecting.
 
 ## Event log
 
-Both streams are backed by a durable **event log**: every `kind`-tagged event (messaging-layer and scripting-layer alike) is written to a local **SQLite** database on the INDI Device before (or as) it's published to subscribers. This is what actually lets a reconnecting client catch up, rather than the live subscription alone.
+All these streams are backed by a durable **event log**: every `kind`-tagged event (messaging-layer, scripting-layer, and connection-lifecycle alike, the latter added by INDIMCP-57) is written to a local **SQLite** database on the INDI Device before (or as) it's published to subscribers. This is what actually lets a reconnecting client catch up, rather than the live subscription alone.
 
 **Why SQLite, not Postgres:** the INDI Device is a single Raspberry Pi running one MCP server process, and this is a short-retention, single-writer, mostly-local workload. Postgres would mean running a whole separate database service on the Pi — another systemd unit alongside `indiserver` and the MCP server, `initdb` setup, meaningful idle memory overhead, and a system package to install and maintain — for capabilities (concurrent multi-writer access, remote querying, replication) this workload doesn't need. SQLite is embedded (no server process), ships in the Python standard library, and handles our single-writer/occasional-reader access pattern fine in WAL mode.
 
@@ -301,19 +306,21 @@ Both streams are backed by a durable **event log**: every `kind`-tagged event (m
 ```sql
 CREATE TABLE events (
   id INTEGER PRIMARY KEY,
-  stream TEXT NOT NULL,       -- 'messages' | 'scripts'
+  stream TEXT NOT NULL,       -- 'messages' | 'scripts' | 'connection'
   device TEXT,                -- set for messaging-layer events, else NULL
   run_id TEXT,                -- set for scripting-layer events, else NULL
+  target TEXT,                -- set for connection-lifecycle events, else NULL
   occurred_at TEXT NOT NULL,  -- ISO 8601 UTC
   payload TEXT NOT NULL       -- the full kind-tagged JSON event
 );
 CREATE INDEX idx_events_occurred_at ON events (occurred_at);
 CREATE INDEX idx_events_run_id ON events (run_id);
+CREATE INDEX idx_events_target ON events (target);
 ```
 
 **Retention:** events older than **1 day** are purged, since this log exists to bridge reconnects and short-term history — not as permanent storage (captured frames have their own, separate storage; see the scripting layer above). Purging runs periodically (e.g. hourly) as a `DELETE FROM events WHERE occurred_at < ?` against the indexed column, followed by an incremental `VACUUM` to reclaim space and limit SD-card write wear.
 
-**Catch-up query:** a client that reconnects can fetch what it missed with a query against this log — e.g. a `get_events` tool taking `stream`, optional `device`/`run_id` filters, and a `since` timestamp — rather than relying only on `get_script_status` for scripts and having no equivalent history for INDI messages.
+**Catch-up query:** a client that reconnects can fetch what it missed with a query against this log — e.g. a `get_events` tool taking `stream`, optional `device`/`run_id`/`target` filters, and a `since` timestamp — rather than relying only on `get_script_status` for scripts and having no equivalent history for INDI messages or connection state.
 
 **Backpressure on the write path (INDIMCP-59):** durable writes are serialized through a single bounded in-process queue and one persistent worker task, not a fresh task per event. A "chatty" device's `propertyUpdate`s can arrive many times a second, and spawning an unbounded `asyncio.to_thread` write per event would let arbitrarily many threads pile up all contending for the same SQLite write lock — on a resource-constrained Pi, that risks exhausting the process's thread pool entirely, starving every other blocking call sharing it (frame storage, the retention purge). If the queue fills faster than the worker can drain it, the *oldest* queued event is dropped to make room for the newest, matching the same bounded, newest-biased policy the in-memory live-view buffers already use, rather than letting the queue grow without limit.
 
