@@ -269,7 +269,7 @@ Consequences:
    attempt count, and final separation if `toleranceArcsec` was set — this is the only place
    the result becomes visible to a client, consistent with the "no step returns a value the
    YAML layer can consume" constraint above; a client wanting the numeric result reads it off
-   `indi://scripts`, or off the frame's own FITS headers, downloadable via `list_frames`'s
+   `indi://mcp-server/scripts`, or off the frame's own FITS headers, downloadable via `list_frames`'s
    returned `downloadUrl` (INDIMCP-89), once written.
 
 ## Plate-solving a client-uploaded frame (INDIMCP-76)

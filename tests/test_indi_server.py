@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import psutil
 import pytest
 
-from indi_mcp import indi_server
+from indi_mcp import event_streams, indi_server
 
 
 @dataclass
@@ -16,6 +16,7 @@ class Mocks:
 
 @pytest.fixture(autouse=True)
 def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
+    event_streams._connections.clear()
     server = MagicMock()
     server.is_running.return_value = False
     monkeypatch.setattr(indi_server, "_server", server)
@@ -39,6 +40,35 @@ async def test_start_server_launches_indiserver_on_given_port(mocks: Mocks) -> N
     assert status == {"running": True, "port": 7625}
 
 
+async def test_start_server_publishes_connection_made_when_it_becomes_running(
+    mocks: Mocks,
+) -> None:
+    """INDIMCP-57: a successful start should surface as a connection-lifecycle event, not
+    just a `running: True` status only visible to whoever happens to poll `get_status`."""
+    mocks.server.is_running.return_value = True
+
+    await indi_server.start_server(port=7625)
+
+    events = event_streams.read_connection("indiserver")["events"]
+    assert len(events) == 1
+    assert events[0]["kind"] == "connectionMade"
+    assert events[0]["target"] == "indiserver"
+
+
+async def test_start_server_does_not_publish_when_the_poll_times_out(
+    mocks: Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start attempt that never actually becomes visible to psutil shouldn't claim a
+    connection was made — see `test_start_server_returns_not_running_if_poll_times_out`."""
+    monkeypatch.setattr(indi_server, "_STARTUP_POLL_TIMEOUT", 0.05)
+    monkeypatch.setattr(indi_server, "_STARTUP_POLL_INTERVAL", 0.01)
+    mocks.server.is_running.return_value = False
+
+    await indi_server.start_server(port=7625)
+
+    assert event_streams.read_connection("indiserver")["events"] == []
+
+
 async def test_start_server_stops_existing_server_first(mocks: Mocks) -> None:
     mocks.server.is_running.return_value = True
 
@@ -57,6 +87,35 @@ async def test_stop_server_stops_current_port_and_terminates_async_cmd(mocks: Mo
     mocks.server.stop.assert_called_with(7625)
     mocks.launched_cmd.terminate.assert_called_once()
     assert status == {"running": False, "port": 7625}
+
+
+async def test_stop_server_publishes_connection_lost_when_it_actually_stops(
+    mocks: Mocks,
+) -> None:
+    mocks.server.is_running.return_value = True
+    await indi_server.start_server(port=7625)
+    event_streams._connections.clear()  # only interested in what stop_server itself publishes
+    # `stop_server` checks `is_running` twice: once before stopping (still running: True) and
+    # once after (confirms it actually stopped: False) — a plain `return_value = False` would
+    # make *both* calls report already-stopped, never observing the transition it publishes on.
+    mocks.server.is_running.side_effect = [True, False]
+
+    await indi_server.stop_server()
+
+    events = event_streams.read_connection("indiserver")["events"]
+    assert len(events) == 1
+    assert events[0]["kind"] == "connectionLost"
+    assert events[0]["target"] == "indiserver"
+
+
+async def test_stop_server_does_not_publish_when_it_was_not_running(mocks: Mocks) -> None:
+    """Stopping an already-stopped server is a routine no-op call, not a real disconnect —
+    see `_connection_event`'s `was_running` guard in `stop_server`."""
+    mocks.server.is_running.return_value = False
+
+    await indi_server.stop_server()
+
+    assert event_streams.read_connection("indiserver")["events"] == []
 
 
 async def test_stop_server_tolerates_async_cmd_already_reaped(mocks: Mocks) -> None:

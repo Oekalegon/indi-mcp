@@ -157,7 +157,7 @@ is the only shape that works at all, not merely the more convenient one. Impleme
 (`_Sweep`/`_sweeps`, a `cancel_event`, a `latest_status` polled by `get_sweep_status`). This
 module doesn't publish its own `sensorCalibrationSweep*` events to `event_streams` — a caller
 polls `get_sensor_calibration_sweep_status` instead of subscribing — but see "Retrieving a
-sweep's frames" below for how the *existing* `indi://scripts/{runId}` stream ends up scoped to a
+sweep's frames" below for how the *existing* `indi://mcp-server/scripts/{runId}` stream ends up scoped to a
 sweep for free anyway.
 
 ## Retrieving a sweep's frames
@@ -184,9 +184,9 @@ combination produced it, so `run_id` was never the only way to recover that.
 
 Two consequences worth knowing, both accepted rather than mitigated:
 
-* **The `indi://scripts/{runId}`-scoped event stream doubles as a per-sweep feed for free** —
+* **The `indi://mcp-server/scripts/{runId}`-scoped event stream doubles as a per-sweep feed for free** —
   every combination's `scriptStarted`/`scriptProgress`/`scriptCompleted` events publish under
-  the same id, so a client subscribing to `indi://scripts/{sweepId}` sees the whole sweep's
+  the same id, so a client subscribing to `indi://mcp-server/scripts/{sweepId}` sees the whole sweep's
   blow-by-blow without this module needing its own event-publishing story.
 * **`get_script_status`/`cancel_script`/`pause_script` also resolve against a `sweepId`** — it's
   a real key in `script_runs`'s own `_runs` dict for as long as a combination is in flight under

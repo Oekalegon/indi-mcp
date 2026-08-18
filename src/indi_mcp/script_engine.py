@@ -3,7 +3,7 @@
 This is the internal "given a script, a rig, and parameters, run it" engine
 (INDIMCP-7) — it sits below the MCP-facing layer. `run_script`/
 `get_script_status`/`cancel_script`/etc. as `@mcp.tool()`s, `runId`
-bookkeeping, and the `indi://scripts` event stream are INDIMCP-13/14,
+bookkeeping, and the `indi://mcp-server/scripts` event stream are INDIMCP-13/14/57,
 separate tickets that wrap `execute_script` below.
 
 One thing is deliberately incomplete here, noted inline where it matters:

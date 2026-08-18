@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from indi_mcp import indi_driver, indi_server
+from indi_mcp import event_streams, indi_driver, indi_server
 
 
 def _make_driver(
@@ -27,6 +27,7 @@ class Mocks:
 
 @pytest.fixture(autouse=True)
 def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
+    event_streams._connections.clear()
     server = MagicMock()
     server.get_running_drivers.return_value = {}
     monkeypatch.setattr(indi_server, "_server", server)
@@ -118,6 +119,20 @@ async def test_start_driver_starts_known_driver(mocks: Mocks) -> None:
     assert status == {"label": "CCD Simulator", "running": True}
 
 
+async def test_start_driver_publishes_connection_made_for_the_driver(mocks: Mocks) -> None:
+    """INDIMCP-57: a successful driver start should surface as a connection-lifecycle event,
+    scoped to that driver's own catalog label rather than `indiserver`/`server`."""
+    driver = _make_driver("CCD Simulator")
+    mocks.catalog.by_label.return_value = driver
+
+    await indi_driver.start_driver("CCD Simulator")
+
+    events = event_streams.read_connection("CCD Simulator")["events"]
+    assert len(events) == 1
+    assert events[0]["kind"] == "connectionMade"
+    assert events[0]["target"] == "CCD Simulator"
+
+
 async def test_start_driver_rejects_unknown_label(mocks: Mocks) -> None:
     mocks.catalog.by_label.return_value = None
 
@@ -125,6 +140,7 @@ async def test_start_driver_rejects_unknown_label(mocks: Mocks) -> None:
         await indi_driver.start_driver("Nonexistent Driver")
 
     mocks.server.start_driver.assert_not_called()
+    assert event_streams.read_connection()["events"] == []
 
 
 async def test_stop_driver_stops_running_driver(
@@ -141,6 +157,11 @@ async def test_stop_driver_stops_running_driver(
 
     mocks.server.stop_driver.assert_called_once_with(driver)
     assert status == {"label": "CCD Simulator", "running": False}
+
+    events = event_streams.read_connection("CCD Simulator")["events"]
+    assert len(events) == 1
+    assert events[0]["kind"] == "connectionLost"
+    assert events[0]["target"] == "CCD Simulator"
 
 
 async def test_stop_driver_rejects_driver_that_is_not_running(mocks: Mocks) -> None:

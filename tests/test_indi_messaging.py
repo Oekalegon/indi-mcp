@@ -9,6 +9,8 @@ import pytest
 
 from indi_mcp import event_streams, indi_messaging
 from indi_mcp.indi_messaging import (
+    ConnectionLost,
+    ConnectionMade,
     Message,
     _MessagingClient,
     _to_indi_event,
@@ -79,6 +81,7 @@ class Mocks:
 @pytest.fixture(autouse=True)
 def mocks(monkeypatch: pytest.MonkeyPatch) -> Mocks:
     event_streams._messages.clear()
+    event_streams._connections.clear()
     event_streams._subscribers.clear()
     event_streams._background_tasks.clear()
     monkeypatch.setattr(indi_messaging, "_client", None)
@@ -552,6 +555,33 @@ async def test_messaging_client_ignores_unrecognised_events_in_the_stream_too() 
 
     await client.rxevent(object())
 
+    assert event_streams.read_messages()["events"] == []
+
+
+async def test_messaging_client_publishes_connection_made_to_the_connection_stream() -> None:
+    """`ConnectionMade` (INDIMCP-57) is handled ahead of `_to_indi_event`'s fallthrough,
+    publishing to `indi://mcp-server/connection` (`target="server"`) instead of the
+    property-shaped `indi://messages` stream."""
+    client = _MessagingClient.__new__(_MessagingClient)
+
+    await client.rxevent(ConnectionMade())
+
+    events = event_streams.read_connection()["events"]
+    assert len(events) == 1
+    assert events[0]["kind"] == "connectionMade"
+    assert events[0]["target"] == "server"
+    assert event_streams.read_messages()["events"] == []
+
+
+async def test_messaging_client_publishes_connection_lost_to_the_connection_stream() -> None:
+    client = _MessagingClient.__new__(_MessagingClient)
+
+    await client.rxevent(ConnectionLost())
+
+    events = event_streams.read_connection()["events"]
+    assert len(events) == 1
+    assert events[0]["kind"] == "connectionLost"
+    assert events[0]["target"] == "server"
     assert event_streams.read_messages()["events"] == []
 
 

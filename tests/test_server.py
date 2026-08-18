@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import inspect
+import json
 import threading
 import time
 from collections.abc import Iterator, MutableMapping
@@ -42,6 +43,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 def _reset_event_streams() -> None:
     event_streams._messages.clear()
     event_streams._scripts.clear()
+    event_streams._connections.clear()
     event_streams._subscribers.clear()
     event_streams._background_tasks.clear()
 
@@ -1330,6 +1332,7 @@ async def test_get_events_delegates_to_event_log_with_all_filters(
         "stream": "messages",
         "device": "CCD Simulator",
         "runId": None,
+        "target": None,
         "occurredAt": "2026-07-21T00:00:00.000000+00:00",
         "payload": {"kind": "message"},
     }
@@ -1339,10 +1342,11 @@ async def test_get_events_delegates_to_event_log_with_all_filters(
         *,
         device: str | None,
         run_id: str | None,
+        target: str | None,
         since: str | None,
         db_path: Path | None = None,
     ) -> list[event_log.EventRecord]:
-        calls.append((stream, device, run_id, since))
+        calls.append((stream, device, run_id, target, since))
         return [record]
 
     monkeypatch.setattr(event_log, "get_events", fake_get_events)
@@ -1352,7 +1356,7 @@ async def test_get_events_delegates_to_event_log_with_all_filters(
     )
 
     assert result == [record]
-    assert calls == [("messages", "CCD Simulator", None, "2026-07-20T00:00:00Z")]
+    assert calls == [("messages", "CCD Simulator", None, None, "2026-07-20T00:00:00Z")]
 
 
 def _frame_download_request(frame_id: str) -> Request:
@@ -1502,7 +1506,7 @@ async def test_indi_message_stream_resource_is_reachable_for_a_device_name_with_
 async def test_script_event_stream_resource_is_readable_through_the_real_mcp_protocol() -> None:
     event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-1"})
 
-    contents = list(await server.mcp.read_resource("indi://scripts"))
+    contents = list(await server.mcp.read_resource("indi://mcp-server/scripts"))
 
     assert "run-1" in cast(str, contents[0].content)
 
@@ -1511,11 +1515,35 @@ async def test_script_event_stream_resource_is_scoped_to_one_run() -> None:
     event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-1"})
     event_streams.publish_script_event({"kind": "scriptStarted", "runId": "run-2"})
 
-    contents = list(await server.mcp.read_resource("indi://scripts/run-1"))
+    contents = list(await server.mcp.read_resource("indi://mcp-server/scripts/run-1"))
     content = cast(str, contents[0].content)
 
     assert "run-1" in content
     assert "run-2" not in content
+
+
+async def test_connection_event_stream_resource_is_readable_through_the_real_mcp_protocol() -> None:
+    event_streams.publish_connection_event(
+        {"kind": "connectionMade", "target": "indiserver", "message": None, "timestamp": "t1"}
+    )
+
+    contents = list(await server.mcp.read_resource("indi://mcp-server/connection"))
+
+    assert "indiserver" in cast(str, contents[0].content)
+
+
+async def test_connection_event_stream_resource_is_scoped_to_one_target() -> None:
+    event_streams.publish_connection_event(
+        {"kind": "connectionMade", "target": "indiserver", "message": None, "timestamp": "t1"}
+    )
+    event_streams.publish_connection_event(
+        {"kind": "connectionMade", "target": "server", "message": None, "timestamp": "t2"}
+    )
+
+    contents = list(await server.mcp.read_resource("indi://mcp-server/connection/indiserver"))
+    events = json.loads(cast(str, contents[0].content))["events"]
+
+    assert [e["target"] for e in events] == ["indiserver"]
 
 
 async def test_event_stream_resources_are_registered() -> None:
@@ -1525,9 +1553,11 @@ async def test_event_stream_resources_are_registered() -> None:
     static_uris = {str(r.uri) for r in resources}
     template_uris = {t.uriTemplate for t in templates}
     assert "indi://messages" in static_uris
-    assert "indi://scripts" in static_uris
+    assert "indi://mcp-server/scripts" in static_uris
+    assert "indi://mcp-server/connection" in static_uris
     assert "indi://messages/{device}" in template_uris
-    assert "indi://scripts/{runId}" in template_uris
+    assert "indi://mcp-server/scripts/{runId}" in template_uris
+    assert "indi://mcp-server/connection/{target}" in template_uris
 
 
 async def test_resource_subscription_capability_is_advertised() -> None:

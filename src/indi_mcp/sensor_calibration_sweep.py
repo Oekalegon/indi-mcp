@@ -37,10 +37,10 @@ finishes, nothing needs to distinguish which specific combination captured a giv
 carry that — so sharing one id across every combination in the sweep means every frame the sweep
 captures, anywhere, is tagged with the same `run_id`, and `list_frames(run_id=sweepId)` retrieves
 all of them in a single call with no `frame_store` schema changes. It also means the existing
-`indi://scripts/{runId}`-scoped event stream doubles as a per-sweep event feed for free, since
-every combination's `scriptStarted`/`scriptProgress`/`scriptCompleted` events publish under that
-same id. Safe only because combinations run strictly sequentially — see `start_script`'s own
-docstring for the collision caveat this relies on.
+`indi://mcp-server/scripts/{runId}`-scoped event stream doubles as a per-sweep event feed for
+free, since every combination's `scriptStarted`/`scriptProgress`/`scriptCompleted` events
+publish under that same id. Safe only because combinations run strictly sequentially — see
+`start_script`'s own docstring for the collision caveat this relies on.
 
 One consequence worth knowing: `get_script_status`/`cancel_script`/`pause_script` (the
 individual-run tools in `script_runs.py`) also resolve against a `sweepId`, since it's a real key

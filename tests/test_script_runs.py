@@ -22,6 +22,7 @@ def _reset_stores() -> None:
     script_store._scripts = {}
     script_runs._runs = {}
     event_streams._scripts.clear()
+    event_streams._connections.clear()
     event_streams._subscribers.clear()
     event_streams._background_tasks.clear()
     _known_devices.clear()
@@ -235,7 +236,7 @@ async def test_run_completes_and_get_script_status_reports_scriptCompleted(
 async def test_run_publishes_scriptStarted_scriptProgress_and_scriptCompleted_to_the_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every `kind`-tagged status this module produces also feeds `indi://scripts`
+    """Every `kind`-tagged status this module produces also feeds `indi://mcp-server/scripts`
     (INDIMCP-14), not just `get_script_status`'s polling path — including the per-step
     `on_progress` callback, not just the start/terminal statuses."""
     _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
@@ -263,7 +264,7 @@ async def test_run_on_status_publishes_scriptMessage_without_touching_latest_sta
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`on_status` (INDIMCP-58) bridges `script_engine.ScriptStatusMessage` into a
-    `scriptMessage`-kind envelope on `indi://scripts` — but, unlike `on_progress`, must
+    `scriptMessage`-kind envelope on `indi://mcp-server/scripts` — but, unlike `on_progress`, must
     never become `run.latest_status`: `get_script_status`'s reconnect story depends on that
     slot holding real progress/terminal state, not a point-in-time message (see
     `script_runs.ScriptRunMessage`'s docstring)."""

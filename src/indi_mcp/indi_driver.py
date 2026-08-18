@@ -4,19 +4,29 @@ Driver start/stop delegates to the shared `IndiServer` instance in
 `indi_server` (`indi_server._server`), since running drivers are tracked on
 that instance and commands are written to the same `indiserver` FIFO used to
 start/stop the server itself.
+
+`start_driver`/`stop_driver` also publish `connectionMade`/`connectionLost` events
+(`target=<catalog label>`) to `event_streams`'s `indi://mcp-server/connection` stream
+(INDIMCP-57) — see `_connection_event`. Unlike `indi_server.start_server`/`stop_server`, these
+publish unconditionally on success rather than only on an observed state transition: a driver's
+running state isn't independently re-checked here the way `indi_server`'s `get_status` is,
+and `start_driver`/`stop_driver` already raise before this point if the requested transition
+wasn't actually possible (`_find_driver`'s `ValueError` for an unknown label,
+`stop_driver`'s own `ValueError` for one that isn't running).
 """
 
 import asyncio
 import logging
 import os
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import NamedTuple, TypedDict
+from typing import Literal, NamedTuple, TypedDict
 
 import psutil
 from indiweb.driver import DeviceDriver, DriverCollection
 
-from indi_mcp import indi_server
+from indi_mcp import event_streams, indi_server
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +59,18 @@ class DriverStatus(TypedDict):
 
     label: str
     running: bool
+
+
+def _connection_event(
+    kind: Literal["connectionMade", "connectionLost"], label: str, message: str
+) -> event_streams.ConnectionEvent:
+    """Build a `ConnectionEvent` for one driver process (`target=<catalog label>`, INDIMCP-57)."""
+    return {
+        "kind": kind,
+        "target": label,
+        "message": message,
+        "timestamp": datetime.now(tz=UTC).isoformat(),
+    }
 
 
 def _get_catalog() -> DriverCollection:
@@ -231,6 +253,9 @@ async def start_driver(label: str) -> DriverStatus:
     driver = await asyncio.to_thread(_find_driver, label)
     logger.info("Starting driver: %s", label)
     await asyncio.to_thread(indi_server._server.start_driver, driver)
+    event_streams.publish_connection_event(
+        _connection_event("connectionMade", label, f"driver {label!r} started")
+    )
     return {"label": label, "running": True}
 
 
@@ -242,6 +267,9 @@ async def stop_driver(label: str) -> DriverStatus:
     driver = await asyncio.to_thread(_find_driver, label)
     logger.info("Stopping driver: %s", label)
     await asyncio.to_thread(indi_server._server.stop_driver, driver)
+    event_streams.publish_connection_event(
+        _connection_event("connectionLost", label, f"driver {label!r} stopped")
+    )
     return {"label": label, "running": False}
 
 
