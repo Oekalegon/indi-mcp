@@ -987,9 +987,7 @@ async def test_run_sensor_calibration_sweep_delegates_to_sensor_calibration_swee
     assert result == {"kind": "sensorCalibrationSweepStarted", "sweepId": "sweep-1"}
     # Positional args land in the right slots — biasCount/darkCount are both plain ints, so a
     # swapped argument order here would silently pass every type check.
-    assert calls == [
-        ("test-rig", [50, 100], [10, 20], [1.0, 2.0], 3, 2, 0.5, "home-backyard")
-    ]
+    assert calls == [("test-rig", [50, 100], [10, 20], [1.0, 2.0], 3, 2, 0.5, "home-backyard")]
 
 
 def test_get_sensor_calibration_sweep_status_delegates_to_sensor_calibration_sweep(
