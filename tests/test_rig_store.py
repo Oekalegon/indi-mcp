@@ -707,7 +707,7 @@ def test_concurrent_save_rig_calls_do_not_lose_each_others_reload(tmp_path: Path
     file was written to disk, and the losing call's own `get_rig` at the end
     of `save_rig` would then raise `Unknown rig` despite having succeeded."""
     rigs = [rig_store.Rig(id=f"rig-{i}", name=f"Rig {i}", components=[]) for i in range(20)]
-    results: list[rig_store.Rig | Exception] = [None] * len(rigs)  # type: ignore[list-item]
+    results: list[rig_store.Rig | Exception | None] = [None] * len(rigs)
 
     def _save(index: int) -> None:
         try:
