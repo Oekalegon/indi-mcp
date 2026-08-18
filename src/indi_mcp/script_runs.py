@@ -54,6 +54,7 @@ __all__ = [
     "pause_script",
     "resume_script",
     "start_script",
+    "wait_for_completion",
 ]
 
 
@@ -445,6 +446,23 @@ def get_script_status(run_id: str) -> ScriptRunStatus:
     can still fetch its outcome.
     """
     return _get_run(run_id).latest_status
+
+
+async def wait_for_completion(run_id: str) -> ScriptRunStatus:
+    """Block until `run_id` reaches a terminal state, then return its final status.
+
+    For server-side orchestration that needs to sequence several script runs one
+    after another (e.g. `sensor_calibration_sweep`'s per-combination loop, INDIMCP-102)
+    without re-implementing "wait for this run to finish" as its own poll loop —
+    awaits the run's own background task directly, the same pattern `cancel_script`
+    already uses to return a real terminal status rather than a merely-requested one.
+    Safe to call on an already-finished run: `run.task` is already done, so this
+    returns immediately.
+    """
+    run = _get_run(run_id)
+    if run.task is not None:
+        await run.task
+    return run.latest_status
 
 
 async def cancel_script(run_id: str) -> ScriptRunStatus:

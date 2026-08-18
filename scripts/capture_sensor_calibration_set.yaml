@@ -1,17 +1,32 @@
 id: capture_sensor_calibration_set
-name: Capture a sensor calibration set (bias, flat, flat-dark) at one gain/offset
+name: Capture the bias + flat-dark portion of a sensor calibration set at one gain/offset
 description: >
-  Captures biasCount bias frames, flatCount flat frames, and darkCount flat-dark
-  frames — a dark frame at the same exposure as the flat, needed to separate
-  read/dark-current noise from photon shot noise — all at a single gain/offset
-  setting (INDIMCP-81). Counts are declared per frame type, not shared, since bias
-  frames are cheap and typically captured in far larger numbers than flats/flat-darks
-  for a photon-transfer-curve analysis. This is the per-setting building block for
-  that analysis: sweeping gain/offset is done by the caller invoking this script once
-  per setting (there's no list-valued script parameter or loop-index arithmetic
-  available — see docs/ScriptSchema.md's closed step vocabulary), not by this script
-  looping over a range itself. This script only captures and stores frames; computing
-  a sensor profile from them is a separate, later step outside the script engine.
+  Captures biasCount bias frames and darkCount flat-dark frames — a dark frame at the
+  same exposure as a flat, needed to separate read/dark-current noise from photon shot
+  noise in a photon-transfer-curve analysis — at a single gain/offset setting
+  (INDIMCP-81/102). Deliberately excludes flat frames themselves: unlike bias/dark,
+  a flat needs a light source physically staged in front of the optics, which this
+  script engine has no way to do or verify (see docs/SensorCalibration.md's
+  "Decision: split capture into a bias/flat-dark script and a separate flat script").
+  Flats are captured separately, once the operator has staged that light source, by
+  capture_flat_sequence — this script is the half of the calibration set that can run
+  fully unattended, with no manual precondition. This is the per-setting building
+  block for a full sweep: sweeping gain/offset/exposure across settings is done by a
+  caller (or the run_sensor_calibration_sweep MCP tool, INDIMCP-102) invoking this
+  script once per setting (there's no list-valued script parameter or loop-index
+  arithmetic available — see docs/ScriptSchema.md's closed step vocabulary), not by
+  this script looping over a range itself. This script only captures and stores
+  frames; computing a sensor profile from them is a separate, later step outside the
+  script engine — see docs/SensorAnalysis.md for the theory.
+
+  Flat-dark exposure ordering: flat-dark frames must be captured before the flat
+  panel this setting's flats will use is ever staged — a panel that's on, or merely
+  leaking light nearby, contaminates a "dark" frame. This script never verifies that
+  (most rigs have no queryable flat-panel device to check against; see
+  docs/SensorCalibration.md's "Flat-dark" section) — it is the caller's
+  responsibility to run this script before staging that panel for the matching flat
+  capture.
+
   Deliberately skips mount positioning, filter selection, and focus, like
   capture_bias_sequence and capture_dark_sequence — a calibration frame's
   illumination/focus source is whatever the rig is already pointed at when this runs.
@@ -35,15 +50,14 @@ parameters:
   flatExposureSeconds:
     type: number
     required: true
-    description: Exposure length per flat frame and per matching flat-dark frame, in seconds.
+    description: >
+      Exposure length per flat-dark frame, in seconds — matching the exposure length
+      of the flat frames (captured separately, by capture_flat_sequence) this
+      calibration set's flat-darks are paired with.
   biasCount:
     type: integer
     required: true
     description: Number of bias frames to capture.
-  flatCount:
-    type: integer
-    required: true
-    description: Number of flat frames to capture.
   darkCount:
     type: integer
     required: true
@@ -56,15 +70,6 @@ steps:
         role: camera
         exposureSeconds: "{{ biasExposureSeconds }}"
         frameType: Bias
-        gain: "{{ gain }}"
-        offset: "{{ offset }}"
-  - step: repeat
-    count: "{{ flatCount }}"
-    steps:
-      - step: capture_frame
-        role: camera
-        exposureSeconds: "{{ flatExposureSeconds }}"
-        frameType: Flat
         gain: "{{ gain }}"
         offset: "{{ offset }}"
   - step: repeat

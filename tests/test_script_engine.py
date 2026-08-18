@@ -1647,7 +1647,9 @@ async def test_builtin_capture_sensor_calibration_set_skips_gain_and_offset_when
     hand-built stand-in) with gain/offset omitted — the script always templates them
     (matching capture_frame.yaml's own convention), so this exercises that the real file's
     `"{{ gain }}"`/`"{{ offset }}"` references resolve to `None` and CCD_GAIN/CCD_OFFSET are
-    never sent, while every requested bias/flat/flat-dark exposure still fires."""
+    never sent, while every requested bias/flat-dark exposure still fires. Trimmed to
+    bias + flat-dark only (INDIMCP-102) — flats are captured separately, by
+    capture_flat_sequence."""
     script_store.load_scripts(_BUILTIN_SCRIPTS_DIR)
     _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
 
@@ -1662,10 +1664,10 @@ async def test_builtin_capture_sensor_calibration_set_skips_gain_and_offset_when
     result = await script_engine.execute_script(
         "capture_sensor_calibration_set",
         "test-rig",
-        {"flatExposureSeconds": 2.0, "biasCount": 2, "flatCount": 1, "darkCount": 1},
+        {"flatExposureSeconds": 2.0, "biasCount": 2, "darkCount": 1},
     )
 
-    assert result["framesCaptured"] == 4
+    assert result["framesCaptured"] == 3
     gain_or_offset_calls = [
         c for c in send_property.await_args_list if c.args[1] in ("CCD_GAIN", "CCD_OFFSET")
     ]

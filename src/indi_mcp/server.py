@@ -33,6 +33,7 @@ from indi_mcp import (
     script_engine,
     script_runs,
     script_store,
+    sensor_calibration_sweep,
     server_info,
 )
 from indi_mcp.frame_store import FrameMetadata
@@ -55,6 +56,10 @@ from indi_mcp.script_runs import (
     ScriptRunStatus,
 )
 from indi_mcp.script_store import FrameType, Script, ScriptSummary
+from indi_mcp.sensor_calibration_sweep import (
+    SensorCalibrationSweepStarted,
+    SensorCalibrationSweepStatus,
+)
 from indi_mcp.server_info import ServerInfo
 
 logger = logging.getLogger(__name__)
@@ -962,6 +967,64 @@ def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
 def resume_script(run_id: str) -> ScriptRunResumed | ScriptRunPauseRejected:
     """Resume a run previously paused with `pause_script`."""
     return script_runs.resume_script(run_id)
+
+
+@mcp.tool()
+async def run_sensor_calibration_sweep(
+    rig_id: str,
+    gains: list[float],
+    offsets: list[float],
+    flatExposureSecondsList: list[float],
+    biasCount: int,
+    darkCount: int,
+    biasExposureSeconds: float = 0.0,
+    location_id: str | None = None,
+) -> SensorCalibrationSweepStarted:
+    """Run `capture_sensor_calibration_set` (bias + flat-dark) once per (gain, offset,
+    flatExposureSeconds) combination, returning immediately with a `sweepId`.
+
+    Needed because a script's own `parameters` can't carry list-valued inputs — see
+    `docs/SensorCalibration.md` and `sensor_calibration_sweep`'s own module docstring for why
+    this is a dedicated tool rather than a new script step. Combinations are the cartesian
+    product of `gains`, `offsets`, and `flatExposureSecondsList` (in that nesting order); every
+    argument list must be non-empty. `biasCount`/`darkCount`/`biasExposureSeconds` are shared
+    across every combination in the sweep, matching what a single `capture_sensor_calibration_set`
+    invocation already takes.
+
+    Never blocks until the sweep finishes — a full sweep can run far longer than any single
+    script (many combinations, each a real capture sequence) — poll
+    `get_sensor_calibration_sweep_status(sweepId)` for progress and the eventual terminal
+    outcome, or use `cancel_sensor_calibration_sweep` to stop it early. Does not stage a flat
+    panel or capture flats itself — this is the bias/flat-dark half of a calibration set only
+    (INDIMCP-102); the flat side is a separate sweep (INDIMCP-103).
+    """
+    return await sensor_calibration_sweep.start_sweep(
+        rig_id,
+        gains,
+        offsets,
+        flatExposureSecondsList,
+        biasCount,
+        darkCount,
+        bias_exposure_seconds=biasExposureSeconds,
+        location_id=location_id,
+    )
+
+
+@mcp.tool()
+def get_sensor_calibration_sweep_status(sweep_id: str) -> SensorCalibrationSweepStatus:
+    """Return the most recently known status for a sweep started by
+    `run_sensor_calibration_sweep`."""
+    return sensor_calibration_sweep.get_sweep_status(sweep_id)
+
+
+@mcp.tool()
+async def cancel_sensor_calibration_sweep(sweep_id: str) -> SensorCalibrationSweepStatus:
+    """Cancel a sweep started by `run_sensor_calibration_sweep`, waiting for it to actually stop.
+
+    Cancels whichever combination's capture run is currently in flight (if any) rather than
+    letting it finish before stopping the sweep.
+    """
+    return await sensor_calibration_sweep.cancel_sweep(sweep_id)
 
 
 @mcp.resource("indi://scripts", mime_type="application/json")

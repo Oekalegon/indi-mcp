@@ -100,7 +100,8 @@ letting the caller choose the gain/offset/exposure range per invocation.
 
 **Decision:** implement the sweep as a plain MCP tool (like `list_frames` or
 `purge_transferred_frames` — see [server.py](../src/indi_mcp/server.py)), not as a new script
-step or a new script. Sketch:
+step or a new script. Implemented for the bias/flat-dark side as
+`run_sensor_calibration_sweep` (INDIMCP-102; `server.py` + `sensor_calibration_sweep.py`):
 
 ```python
 @mcp.tool()
@@ -108,13 +109,20 @@ async def run_sensor_calibration_sweep(
     rig_id: str,
     gains: list[float],
     offsets: list[float],
+    flatExposureSecondsList: list[float],
     biasCount: int,
     darkCount: int,
-    flatExposureSecondsList: list[float],  # only for the flat-side tool, see below
-    flatCount: int,
-) -> SweepRunStarted:
+    biasExposureSeconds: float = 0.0,
+    location_id: str | None = None,
+) -> SensorCalibrationSweepStarted:
     ...
 ```
+
+Paired with `get_sensor_calibration_sweep_status(sweep_id)` and
+`cancel_sensor_calibration_sweep(sweep_id)`, mirroring `run_script`/`get_script_status`/
+`cancel_script`'s own three-tool shape. The flat side (INDIMCP-103) gets its own equivalent
+tool once the flat script split and panel-staging design below are settled — two tools, not one
+with a branch, per the "Open items" resolution below.
 
 MCP tool parameters are ordinary typed Python/pydantic inputs, not bound by
 `ScriptSchema.md`'s closed step vocabulary — that vocabulary exists specifically to keep
@@ -137,15 +145,25 @@ the sweep tool's own job is purely sequencing those calls (awaiting each run's t
 before starting the next — `start_script` itself returns immediately) and aggregating an overall
 status, not reimplementing capture logic.
 
-**Open question for INDIMCP-102/103 to resolve during implementation:** whether the sweep
-tool's own progress is tracked under a new top-level identifier (a `sweepId`, separate from the
-per-combination `runId`s, so a client can poll one thing for the whole sweep) or whether it just
-returns the ordered list of `runId`s it started and leaves the caller to poll each — the former
-is more convenient for a client but is new surface area (a second kind of "run" alongside
-script runs); the latter reuses 100% of existing polling/cancel/pause plumbing. Leaning toward a
-`sweepId` wrapper for a coherent single cancel/status story across the whole sweep, but this
-needs to be decided against `script_runs.py`'s existing `_Run`/event-stream shape before
-implementation starts.
+**Resolved (INDIMCP-102): `sweepId`, not a bare `runId` list — and not just for a nicer client
+API.** It turns out the bare-list option was never actually viable: `run_script` never blocks
+its caller, and a full sweep can run far longer than any single script, so the sweep tool can't
+block either — but unlike a caller looping `run_script` itself, the tool can't hand back every
+combination's `runId` up front, because combinations are deliberately sequenced one at a time
+(concurrent captures would race commands against the same camera), so a later combination's
+`runId` doesn't exist until every earlier one has finished. A `sweepId`-tracked background task
+is the only shape that works at all, not merely the more convenient one. Implemented in
+`sensor_calibration_sweep.py`, mirroring `script_runs.py`'s own `_Run`/`_runs` pattern
+(`_Sweep`/`_sweeps`, a `cancel_event`, a `latest_status` polled by `get_sweep_status`) but
+without its own `event_streams`/`indi://scripts` publishing — deliberately out of scope for this
+pass; a caller polls `get_sensor_calibration_sweep_status` instead of subscribing.
+
+**Also resolved: fail-fast, not best-effort.** If one combination's run doesn't end in
+`scriptCompleted`, the sweep stops rather than continuing to later combinations — a failure
+partway through usually means something about the rig/settings needs attention before spending
+more capture time on likely-bad data. `results` still reports every combination that reached an
+outcome before the stop (including the one that failed, or — if stopped via `cancel_sweep` — the
+in-flight combination's own `scriptCancelled` outcome), not just the successful ones.
 
 ## Manual flat-panel staging within a flat sweep
 
@@ -205,18 +223,23 @@ layer (see INDIMCPKit's own device-type abstractions for `Mount`/`Camera`/`Filte
 `Focuser`). Out of scope for this doc; tracked as their own todos once the server-side tool
 shapes above are finalized, since the Swift signatures follow directly from them.
 
-## Open items for INDIMCP-102/103/104
+## Open items for INDIMCP-103
 
-* Exact sweep tool name(s) and whether bias/dark and flat sweeps are two tools (matching the
-  script split) or one tool with an optional flat-side branch — leaning toward two tools,
-  mirroring the two-script split and letting the bias/dark tool ship without the flat panel's
-  staging-confirmation design being finished.
-* Cartesian product of `gains × offsets` (and `× exposures` for flats) vs. paired lists (caller
-  supplies matched tuples) — cartesian is simpler to specify but can blow up combinatorially;
-  needs a decision once real-world sweep sizes are known.
-* The `sweepId` vs. bare-`runId`-list question above.
-* Flat-panel staging mechanism (pause/resume vs. documented precondition) for the *flat* side
-  above — resolved as document-only for flat-*dark* (see "Flat-dark" section above); the flat
-  side's own staging mechanism is still open.
+INDIMCP-102 (bias/flat-dark side) is implemented; everything below is specific to the remaining
+flat-side work:
+
+* Exact flat sweep tool name — a second tool alongside `run_sensor_calibration_sweep`
+  (`run_flat_calibration_sweep`, or similar), not a branch on the same tool, matching the
+  two-script split and letting the bias/dark tool exist independently of the flat panel's
+  staging-confirmation design.
+* Cartesian product of `gains × offsets × exposures`, matching INDIMCP-102's own resolution
+  (`itertools.product`, gains outermost) — likely the same choice for consistency, but worth
+  confirming once real-world flat-sweep sizes are known (a flat sweep multiplies exposure levels
+  in too, so combinatorial blow-up is a bigger risk here than on the bias/flat-dark side).
+* Flat-panel staging mechanism (pause/resume vs. documented precondition) for the *flat* side —
+  resolved as document-only for flat-*dark* (see "Flat-dark" section above); the flat side's own
+  staging mechanism is still open, and INDIMCP-102's `_Sweep`/background-task shape is the
+  natural place to hang a pause-for-confirmation step if that's the direction chosen.
 * Whether `flatCount`/`biasCount`/`darkCount` are fixed per sweep or themselves swept — no known
-  need for this yet, so not currently planned.
+  need for this yet, so not currently planned (INDIMCP-102 keeps `biasCount`/`darkCount` fixed
+  per sweep, shared across every combination).
