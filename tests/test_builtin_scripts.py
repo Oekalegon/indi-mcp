@@ -498,9 +498,18 @@ def test_builtin_capture_flat_sequence_skips_mount_and_cooling() -> None:
     flats = script_store.get_script("capture_flat_sequence")
 
     assert flats.pausable is True
-    assert set(flats.parameters) == {"filterName", "focusPosition", "exposureSeconds", "count"}
+    assert set(flats.parameters) == {
+        "filterName",
+        "focusPosition",
+        "exposureSeconds",
+        "count",
+        "gain",
+        "offset",
+    }
     assert flats.parameters["exposureSeconds"].required is True
     assert flats.parameters["count"].required is True
+    assert flats.parameters["gain"].required is False
+    assert flats.parameters["offset"].required is False
     assert len(flats.steps) == 3
     filter_step, focus_step, repeat_step = flats.steps
     assert isinstance(filter_step, script_store.SelectFilterStep)
@@ -510,6 +519,8 @@ def test_builtin_capture_flat_sequence_skips_mount_and_cooling() -> None:
     capture_step = repeat_step.steps[0]
     assert isinstance(capture_step, script_store.CaptureFrameStep)
     assert capture_step.frameType == "Flat"
+    assert capture_step.gain == "{{ gain }}"
+    assert capture_step.offset == "{{ offset }}"
 
 
 def test_builtin_capture_dark_sequence_skips_mount_filter_and_focus() -> None:

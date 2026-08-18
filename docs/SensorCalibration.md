@@ -212,22 +212,25 @@ in-flight combination's own `scriptCancelled` outcome), not just the successful 
 
 ## Manual flat-panel staging within a flat sweep
 
-The flat-side sweep tool still can't stage the panel itself. Two options, to be settled during
-INDIMCP-103:
+**Resolved (INDIMCP-103): documented precondition, not in-band pause/confirmation** — option 2
+from the two originally sketched here, not the pause-for-confirmation option this section
+initially leaned toward. The actual deciding factor wasn't sweep length after all: this server
+has no visibility into who or what is actually driving `run_flat_calibration_sweep` — it could be
+a client app with a human operator in the loop (the expected case, and the one this decision is
+made for) or a fully autonomous agent, and either way the server can't tell the difference or
+verify a panel is genuinely staged. Given that, an in-band
+`flatCalibrationSweepAwaitingConfirmation`-style pause would only add protocol surface (a new
+status kind, a new confirm tool) without adding real safety — the client app is expected to
+confirm panel placement with its human
+operator *before* ever calling the tool, the same precondition `capture_flat_sequence` already
+carries today. `flat_calibration_sweep.py`'s shape is consequently identical to
+`sensor_calibration_sweep.py`'s (no pause/resume, `start_sweep`/`get_sweep_status`/`cancel_sweep`
+only) rather than diverging for a confirmation step.
 
-1. The tool starts, then blocks (as an async background task, not blocking the MCP call) at a
-   confirmation point before the first flat-illuminated capture, surfaced via the sweep's status
-   the same way `scriptPaused`/`pause_script` already communicate "waiting on something" —
-   requiring an explicit `resume`-style call once the operator has staged the panel.
-2. The tool documents the precondition ("flat panel must already be in place before calling
-   this") and does no in-band staging/confirmation at all, mirroring how
-   `capture_flat_sequence` already behaves today — simplest, but repeats the same "the caller
-   has to know" gap this whole design started from.
-
-Leaning toward (1) for the flat sweep specifically, since a sweep is long-running and
-multi-combination — an operator who steps away expecting bias/dark automation to run unattended
-should not have flats silently fail or produce garbage because the panel was never placed. This
-still needs to be scoped in INDIMCP-103 alongside the flat script split itself.
+If a rig has a queryable/controllable INDI flat-panel device (e.g. an Alnitak Flip-Flat), driving
+it automatically — turning it on before flats and off before flat-darks, verifying its state
+rather than trusting the operator — is real future work, but deliberately not part of this pass;
+tracked separately as INDIMCP-106.
 
 ## Flat-dark: no new manual action, but an ordering assumption to document
 
@@ -268,23 +271,24 @@ layer (see INDIMCPKit's own device-type abstractions for `Mount`/`Camera`/`Filte
 `Focuser`). Out of scope for this doc; tracked as their own todos once the server-side tool
 shapes above are finalized, since the Swift signatures follow directly from them.
 
-## Open items for INDIMCP-103
+## INDIMCP-103: implemented
 
-INDIMCP-102 (bias/flat-dark side) is implemented; everything below is specific to the remaining
-flat-side work:
-
-* Exact flat sweep tool name — a second tool alongside `run_sensor_calibration_sweep`
-  (`run_flat_calibration_sweep`, or similar), not a branch on the same tool, matching the
-  two-script split and letting the bias/dark tool exist independently of the flat panel's
-  staging-confirmation design.
-* Cartesian product of `gains × offsets × exposures`, matching INDIMCP-102's own resolution
-  (`itertools.product`, gains outermost) — likely the same choice for consistency, but worth
-  confirming once real-world flat-sweep sizes are known (a flat sweep multiplies exposure levels
-  in too, so combinatorial blow-up is a bigger risk here than on the bias/flat-dark side).
-* Flat-panel staging mechanism (pause/resume vs. documented precondition) for the *flat* side —
-  resolved as document-only for flat-*dark* (see "Flat-dark" section above); the flat side's own
-  staging mechanism is still open, and INDIMCP-102's `_Sweep`/background-task shape is the
-  natural place to hang a pause-for-confirmation step if that's the direction chosen.
-* Whether `flatCount`/`biasCount`/`darkCount` are fixed per sweep or themselves swept — no known
-  need for this yet, so not currently planned (INDIMCP-102 keeps `biasCount`/`darkCount` fixed
-  per sweep, shared across every combination).
+* **Script**: `capture_flat_sequence.yaml` extended with optional `gain`/`offset` parameters
+  (same "omit to leave the device's current setting alone" convention as
+  `capture_sensor_calibration_set`) — ordinary flat-field calibration callers leave them unset,
+  a sweep always supplies both.
+* **Sweep tool**: `run_flat_calibration_sweep`/`get_flat_calibration_sweep_status`/
+  `cancel_flat_calibration_sweep` (`flat_calibration_sweep.py`) — a second, separate tool
+  alongside `run_sensor_calibration_sweep`, not a branch on the same one, matching the
+  two-script split.
+* **Combination order**: cartesian product of `gains × offsets × exposureSecondsList`
+  (`itertools.product`, gains outermost), matching INDIMCP-102's own resolution — kept
+  consistent rather than reconsidered, since nothing about real-world flat-sweep sizes turned
+  out to demand a different shape.
+* **Flat-panel staging**: resolved as documented precondition only, not pause/resume — see
+  "Manual flat-panel staging within a flat sweep" above for the reasoning (the server can't tell
+  who/what is driving the tool or verify a panel is staged either way, so an in-band
+  confirmation step would add surface without adding real safety). INDI-panel auto-control is
+  tracked separately as INDIMCP-106.
+* **Counts**: `filterName`/`focusPosition`/`count` are fixed per sweep, shared across every
+  combination — same "not itself swept" treatment as INDIMCP-102's `biasCount`/`darkCount`.

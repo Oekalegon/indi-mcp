@@ -23,6 +23,7 @@ from indi_mcp import (
     astrometry_index,
     event_log,
     event_streams,
+    flat_calibration_sweep,
     frame_store,
     indi_driver,
     indi_messaging,
@@ -36,6 +37,7 @@ from indi_mcp import (
     sensor_calibration_sweep,
     server_info,
 )
+from indi_mcp.flat_calibration_sweep import FlatCalibrationSweepStarted, FlatCalibrationSweepStatus
 from indi_mcp.frame_store import FrameMetadata
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import DeviceProperties, IndiEvent, MessagingStatus
@@ -1025,6 +1027,61 @@ async def cancel_sensor_calibration_sweep(sweep_id: str) -> SensorCalibrationSwe
     letting it finish before stopping the sweep.
     """
     return await sensor_calibration_sweep.cancel_sweep(sweep_id)
+
+
+@mcp.tool()
+async def run_flat_calibration_sweep(
+    rig_id: str,
+    gains: list[float],
+    offsets: list[float],
+    exposureSecondsList: list[float],
+    filterName: str,
+    focusPosition: int,
+    count: int,
+    location_id: str | None = None,
+) -> FlatCalibrationSweepStarted:
+    """Run `capture_flat_sequence` once per (gain, offset, exposureSeconds) combination,
+    returning immediately with a `sweepId` — the flat-side counterpart to
+    `run_sensor_calibration_sweep` (INDIMCP-103).
+
+    `filterName`/`focusPosition`/`count` are shared across every combination in the sweep,
+    matching what a single `capture_flat_sequence` invocation already takes. Assumes the flat
+    panel is already staged before this is called — this tool has no way to prompt for or verify
+    that (see `flat_calibration_sweep`'s own module docstring and `docs/SensorCalibration.md`);
+    the caller (typically a client app, having confirmed with its human operator) is responsible
+    for staging it first.
+
+    Never blocks until the sweep finishes — poll `get_flat_calibration_sweep_status(sweepId)`
+    for progress and the eventual terminal outcome, or use `cancel_flat_calibration_sweep` to
+    stop it early.
+    """
+    return await flat_calibration_sweep.start_sweep(
+        rig_id,
+        gains,
+        offsets,
+        exposureSecondsList,
+        filterName,
+        focusPosition,
+        count,
+        location_id=location_id,
+    )
+
+
+@mcp.tool()
+def get_flat_calibration_sweep_status(sweep_id: str) -> FlatCalibrationSweepStatus:
+    """Return the most recently known status for a sweep started by
+    `run_flat_calibration_sweep`."""
+    return flat_calibration_sweep.get_sweep_status(sweep_id)
+
+
+@mcp.tool()
+async def cancel_flat_calibration_sweep(sweep_id: str) -> FlatCalibrationSweepStatus:
+    """Cancel a sweep started by `run_flat_calibration_sweep`, waiting for it to actually stop.
+
+    Cancels whichever combination's capture run is currently in flight (if any) rather than
+    letting it finish before stopping the sweep.
+    """
+    return await flat_calibration_sweep.cancel_sweep(sweep_id)
 
 
 @mcp.resource("indi://scripts", mime_type="application/json")
