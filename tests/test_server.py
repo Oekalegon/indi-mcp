@@ -1138,7 +1138,7 @@ async def test_list_frames_delegates_to_frame_store_with_all_filters(
         run_id="run-1", device="cam", since="2026-07-19T00:00:00+00:00", transferred=False
     )
 
-    assert result == [{**_FRAME_METADATA, "downloadUrl": None}]
+    assert result == [{**_FRAME_METADATA, "downloadUrl": None, "issues": []}]
     assert calls == [("run-1", "cam", "2026-07-19T00:00:00+00:00", False)]
 
 
@@ -1155,8 +1155,57 @@ async def test_get_frame_metadata_delegates_to_frame_store(
 
     result = await server.get_frame_metadata("frame-1")
 
-    assert result == {**_FRAME_METADATA, "downloadUrl": None}
+    assert result == {**_FRAME_METADATA, "downloadUrl": None, "issues": []}
     assert calls == ["frame-1"]
+
+
+async def test_get_frame_metadata_warns_when_checksum_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `None` `checksumSha256` (INDIMCP-95 predates the frame) isn't an error — the frame
+    itself is fine — but a client should still be told it can't be integrity-checked."""
+    legacy_frame = {**_FRAME_METADATA, "checksumSha256": None}
+    monkeypatch.setattr(frame_store, "get_frame_metadata", lambda frame_id: legacy_frame)
+
+    result = await server.get_frame_metadata("frame-1")
+
+    assert result["issues"] == [
+        {
+            "kind": "issue",
+            "severity": server.Severity.WARNING,
+            "code": "frameChecksumMissing",
+            "message": (
+                "frame 'frame-1' has no checksumSha256 — it was captured before checksum "
+                "support existed and cannot be integrity-checked"
+            ),
+            "role": None,
+            "device": "cam",
+        }
+    ]
+
+
+async def test_list_frames_does_not_warn_when_checksum_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(frame_store, "list_frames", lambda **_kwargs: [_FRAME_METADATA])
+
+    result = await server.list_frames()
+
+    assert result[0]["issues"] == []
+
+
+async def test_list_frames_warns_per_frame_independently(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A directory spanning the INDIMCP-95 migration boundary has both kinds of frame at once —
+    `issues` must be computed per frame, not decided once for the whole batch."""
+    legacy_frame = {**_FRAME_METADATA, "frameId": "frame-legacy", "checksumSha256": None}
+    monkeypatch.setattr(
+        frame_store, "list_frames", lambda **_kwargs: [_FRAME_METADATA, legacy_frame]
+    )
+
+    result = await server.list_frames()
+
+    assert result[0]["issues"] == []
+    assert [issue["code"] for issue in result[1]["issues"]] == ["frameChecksumMissing"]
 
 
 async def test_get_frame_metadata_includes_download_url_when_an_http_listener_exists(
@@ -1214,7 +1263,9 @@ async def test_list_frames_includes_download_url_when_an_http_listener_exists(
 
     result = await server.list_frames()
 
-    assert result == [{**_FRAME_METADATA, "downloadUrl": "http://indi-mcp-pi:8000/frames/frame-1"}]
+    assert result == [
+        {**_FRAME_METADATA, "downloadUrl": "http://indi-mcp-pi:8000/frames/frame-1", "issues": []}
+    ]
 
 
 async def test_confirm_frame_transfer_delegates_to_frame_store(
