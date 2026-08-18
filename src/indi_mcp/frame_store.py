@@ -48,6 +48,7 @@ write takes. Callers in async code MUST wrap every call here in
     )
 """
 
+import hashlib
 import logging
 import os
 import sqlite3
@@ -90,6 +91,7 @@ class FrameMetadata(TypedDict):
     runId: str | None
     device: str
     sizeBytes: int
+    checksumSha256: str
     capturedAt: str
     transferredAt: str | None
 
@@ -120,6 +122,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             device TEXT NOT NULL,
             path TEXT NOT NULL,
             size_bytes INTEGER,
+            checksum_sha256 TEXT,
             captured_at TEXT NOT NULL,
             transferred_at TEXT
         )
@@ -150,6 +153,7 @@ def _row_to_metadata(row: sqlite3.Row) -> FrameMetadata:
         "runId": row["run_id"],
         "device": row["device"],
         "sizeBytes": row["size_bytes"],
+        "checksumSha256": row["checksum_sha256"],
         "capturedAt": row["captured_at"],
         "transferredAt": row["transferred_at"],
     }
@@ -187,13 +191,15 @@ def save_frame(
     path = resolved_dir / f"{frame_id}{extension}"
     path.write_bytes(data)
     captured_at = _now()
+    checksum = hashlib.sha256(data).hexdigest()
     try:
         with db.connect(db_path) as conn:
             _ensure_schema(conn)
             conn.execute(
-                "INSERT INTO frames (frame_id, run_id, device, path, size_bytes, captured_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (frame_id, run_id, device, str(path), len(data), captured_at),
+                "INSERT INTO frames "
+                "(frame_id, run_id, device, path, size_bytes, checksum_sha256, captured_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (frame_id, run_id, device, str(path), len(data), checksum, captured_at),
             )
             conn.commit()
     except Exception:
@@ -205,26 +211,33 @@ def save_frame(
         "runId": run_id,
         "device": device,
         "sizeBytes": len(data),
+        "checksumSha256": checksum,
         "capturedAt": captured_at,
         "transferredAt": None,
     }
 
 
 def update_frame_data(frame_id: str, data: bytes, *, db_path: Path | None = None) -> FrameMetadata:
-    """Overwrite `frame_id`'s file in place with `data`, and update its recorded `size_bytes`.
+    """Overwrite `frame_id`'s file in place with `data`, and update its recorded `size_bytes`
+    and `checksum_sha256`.
 
     For a step that enriches an already-saved frame's own file after the fact (plate-solve's
     best-effort WCS header write, INDIMCP-45/69) — unlike `save_frame`, this doesn't create a
     new `frameId`/row, since the frame is still the same capture, just with more metadata in
-    its header; `size_bytes` still needs updating, since a FITS header rewrite changes the
-    file's length (new cards added). Raises `FrameNotFoundError` if `frame_id` is unknown.
+    its header; `size_bytes` and `checksum_sha256` still need updating, since a FITS header
+    rewrite changes the file's bytes (new cards added). Raises `FrameNotFoundError` if
+    `frame_id` is unknown.
     """
     row = _get_row(frame_id, db_path)
     path = Path(row["path"])
     path.write_bytes(data)
+    checksum = hashlib.sha256(data).hexdigest()
     with db.connect(db_path) as conn:
         _ensure_schema(conn)
-        conn.execute("UPDATE frames SET size_bytes = ? WHERE frame_id = ?", (len(data), frame_id))
+        conn.execute(
+            "UPDATE frames SET size_bytes = ?, checksum_sha256 = ? WHERE frame_id = ?",
+            (len(data), checksum, frame_id),
+        )
         conn.commit()
     return get_frame_metadata(frame_id, db_path=db_path)
 

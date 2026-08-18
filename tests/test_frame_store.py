@@ -1,3 +1,4 @@
+import hashlib
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -50,6 +51,7 @@ def test_save_frame_writes_the_file_and_returns_metadata(store_paths: tuple[Path
     assert metadata["device"] == "ZWO CCD ASI2600MM Pro"
     assert metadata["runId"] == "run-1"
     assert metadata["sizeBytes"] == len(b"fits-bytes")
+    assert metadata["checksumSha256"] == hashlib.sha256(b"fits-bytes").hexdigest()
     assert metadata["transferredAt"] is None
     assert metadata["capturedAt"]
     saved_path = frames_dir / f"{metadata['frameId']}.fits"
@@ -154,6 +156,8 @@ def test_update_frame_data_overwrites_the_file_and_updates_size(
     )
 
     assert updated["sizeBytes"] == len(b"updated-longer-data")
+    assert updated["checksumSha256"] == hashlib.sha256(b"updated-longer-data").hexdigest()
+    assert updated["checksumSha256"] != saved["checksumSha256"]
     path = frame_store.get_frame_path(saved["frameId"], db_path=db_path)
     assert path.read_bytes() == b"updated-longer-data"
 

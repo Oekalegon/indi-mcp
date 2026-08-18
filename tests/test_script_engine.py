@@ -1287,6 +1287,7 @@ def _mock_capture_frame_success(
             "runId": None,
             "device": "CCD Simulator",
             "sizeBytes": 10,
+            "checksumSha256": "0" * 64,
             "capturedAt": "2026-07-20T00:00:00.000000+00:00",
             "transferredAt": None,
         }
@@ -4984,6 +4985,7 @@ def _mock_plate_solve(
                 "runId": None,
                 "device": "CCD Simulator",
                 "sizeBytes": 10,
+                "checksumSha256": "0" * 64,
                 "capturedAt": "2026-07-20T00:00:00.000000+00:00",
                 "transferredAt": None,
             }
