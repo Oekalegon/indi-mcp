@@ -30,10 +30,27 @@ usually means something about the rig/settings needs attention before spending m
 on likely-bad data. `get_sweep_status`'s `results` still reports every combination that did
 complete before the stop, successful or not.
 
+**Every combination is started with `run_id=sweep_id`** (`script_runs.start_script`'s optional
+`run_id` override), not a fresh id per combination. Deliberate, not an oversight: after a sweep
+finishes, nothing needs to distinguish which specific combination captured a given frame by
+`run_id` alone — each frame's own FITS headers (`CCD_GAIN`/`CCD_OFFSET`/`CCD_EXPOSURE`) already
+carry that — so sharing one id across every combination in the sweep means every frame the sweep
+captures, anywhere, is tagged with the same `run_id`, and `list_frames(run_id=sweepId)` retrieves
+all of them in a single call with no `frame_store` schema changes. It also means the existing
+`indi://scripts/{runId}`-scoped event stream doubles as a per-sweep event feed for free, since
+every combination's `scriptStarted`/`scriptProgress`/`scriptCompleted` events publish under that
+same id. Safe only because combinations run strictly sequentially — see `start_script`'s own
+docstring for the collision caveat this relies on.
+
+One consequence worth knowing: `get_script_status`/`cancel_script`/`pause_script` (the
+individual-run tools in `script_runs.py`) also resolve against a `sweepId`, since it's a real key
+in `script_runs`'s own `_runs` dict for as long as a combination is in flight under it — they
+just answer about whichever single combination currently occupies that slot, not the sweep as a
+whole. Calling the wrong tool on a sweep id doesn't error, it just gives a differently-grained
+answer than `get_sensor_calibration_sweep_status`/`cancel_sensor_calibration_sweep` would.
+
 Deliberately out of scope for this pass, matching this module's narrow todo scope
-(INDIMCP-102): sweep events aren't published to `event_streams`/`indi://scripts` the way each
-underlying script run's own events already are — a caller polls `get_sweep_status` instead. Also
-out of scope: pausing a sweep (only `cancel_sweep`) — bias/flat-dark capture has no manual
+(INDIMCP-102): pausing a sweep (only `cancel_sweep`) — bias/flat-dark capture has no manual
 precondition to pause for the way a flat sweep's panel-staging step will (INDIMCP-103).
 """
 
@@ -81,6 +98,10 @@ class SensorCalibrationSweepCombinationResult(TypedDict):
     `scriptCompleted`/`scriptFailed`/`scriptCancelled` — so a caller inspecting `results` after
     the fact can see exactly why a given combination didn't produce usable frames, not just that
     the sweep as a whole stopped.
+
+    `runId` always equals the sweep's own `sweepId` — every combination is deliberately started
+    with the same `run_id` (see this module's own docstring for why) — kept as its own field for
+    shape symmetry with `script_runs.ScriptRunStatus`, not because it varies per combination.
     """
 
     gain: float
@@ -96,6 +117,10 @@ class SensorCalibrationSweepProgress(TypedDict):
     `results` carries every combination finished so far (same shape as the terminal statuses'
     own `results`) — a caller can inspect each combination's outcome as it lands rather than
     waiting for the whole sweep to reach a terminal state.
+
+    `currentRunId` is `None` between combinations and the sweep's own `sweepId` while one is in
+    flight (every combination shares that id — see this module's own docstring) — kept mainly to
+    say plainly whether a combination is currently running at all.
     """
 
     kind: str
@@ -331,6 +356,7 @@ async def _run_sweep(
                     "darkCount": dark_count,
                 },
                 location_id=location_id,
+                run_id=sweep.sweep_id,
             )
             sweep.current_run_id = started["runId"]
             sweep.latest_status = _progress(sweep, index)

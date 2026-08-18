@@ -154,9 +154,54 @@ combination's `runId` up front, because combinations are deliberately sequenced 
 `runId` doesn't exist until every earlier one has finished. A `sweepId`-tracked background task
 is the only shape that works at all, not merely the more convenient one. Implemented in
 `sensor_calibration_sweep.py`, mirroring `script_runs.py`'s own `_Run`/`_runs` pattern
-(`_Sweep`/`_sweeps`, a `cancel_event`, a `latest_status` polled by `get_sweep_status`) but
-without its own `event_streams`/`indi://scripts` publishing — deliberately out of scope for this
-pass; a caller polls `get_sensor_calibration_sweep_status` instead of subscribing.
+(`_Sweep`/`_sweeps`, a `cancel_event`, a `latest_status` polled by `get_sweep_status`). This
+module doesn't publish its own `sensorCalibrationSweep*` events to `event_streams` — a caller
+polls `get_sensor_calibration_sweep_status` instead of subscribing — but see "Retrieving a
+sweep's frames" below for how the *existing* `indi://scripts/{runId}` stream ends up scoped to a
+sweep for free anyway.
+
+## Retrieving a sweep's frames
+
+**Decision: every combination in a sweep is started with `run_id=sweep_id`** (a caller-supplied
+override added to `script_runs.start_script`), not a fresh `run_id` per combination. Since every
+frame `capture_frame` saves is tagged with whatever `run_id` its enclosing script run was given,
+this means every frame captured anywhere in a sweep — across every gain/offset/exposure
+combination — shares one `run_id`, and `list_frames(run_id=sweepId)` retrieves all of them in a
+single call. No `frame_store` schema change, no new `sweepId` column, no new `list_frames`
+filter parameter.
+
+This was a deliberate id-space unification, not an overload of an unrelated field — it was
+seriously considered and rejected first: a caller passing an arbitrary UUID that could mean
+*either* a `frameId`, a `runId`, or a `sweepId`, resolved by whichever table happens to match, is
+exactly the kind of ambiguity this codebase's `kind`/`type`-tagged envelope convention exists to
+avoid — a stale or mistyped id would silently resolve against the wrong thing instead of failing
+clearly. Sharing `run_id` across a sweep's combinations is different: there's no guessing
+involved, `list_frames(run_id=...)` keeps meaning exactly what it always has (frames from the
+run(s) tagged with this id), a sweep's combinations just legitimately share one id by
+construction. No information is lost by giving up *per-combination* `run_id` granularity either
+— a frame's own FITS headers (`CCD_GAIN`/`CCD_OFFSET`/`CCD_EXPOSURE`) already record which
+combination produced it, so `run_id` was never the only way to recover that.
+
+Two consequences worth knowing, both accepted rather than mitigated:
+
+* **The `indi://scripts/{runId}`-scoped event stream doubles as a per-sweep feed for free** —
+  every combination's `scriptStarted`/`scriptProgress`/`scriptCompleted` events publish under
+  the same id, so a client subscribing to `indi://scripts/{sweepId}` sees the whole sweep's
+  blow-by-blow without this module needing its own event-publishing story.
+* **`get_script_status`/`cancel_script`/`pause_script` also resolve against a `sweepId`** — it's
+  a real key in `script_runs`'s own `_runs` dict for as long as a combination is in flight under
+  it. They just answer about whichever single combination currently occupies that slot, not the
+  sweep as a whole, so calling the wrong tool on a sweep id gives a differently-grained (if
+  plausible-looking) answer rather than an error. Not a correctness bug — `script_runs` and
+  `sensor_calibration_sweep` remain independent tracking systems that happen to share an id
+  value — but worth knowing before reaching for `get_script_status` out of habit.
+
+Safe only because a sweep's combinations run strictly sequentially, never concurrently (see
+`start_script`'s own docstring for the collision this relies on not happening) — a design
+constraint this module already had for the `sweepId`-vs-bare-`runId`-list reason above.
+
+INDIMCPKit's own frame-retrieval wrapper for a sweep (tracked alongside IMCPKIT-32/33) is just
+`list_frames(runId: sweepId)` under the hood — no new server-side tool needed for it.
 
 **Also resolved: fail-fast, not best-effort.** If one combination's run doesn't end in
 `scriptCompleted`, the sweep stops rather than continuing to later combinations — a failure

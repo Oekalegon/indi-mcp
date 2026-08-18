@@ -292,6 +292,7 @@ async def start_script(
     parameters: dict[str, Any] | None = None,
     *,
     location_id: str | None = None,
+    run_id: str | None = None,
 ) -> ScriptRunStarted:
     """Start `script_id` against `rig_id` as a background task and return immediately.
 
@@ -308,9 +309,20 @@ async def start_script(
     docstring (INDIMCP-60). Not echoed into the `scriptStarted`/`scriptProgress`/... envelopes
     below, the same way `parameters` itself isn't: it's an input to the run, not part of its
     reported status.
+
+    `run_id`, if given, is used as this run's id instead of generating a fresh one — for a
+    caller that deliberately wants several sequential runs to share one id (currently only
+    `sensor_calibration_sweep`, INDIMCP-102: every combination in a sweep is started with
+    `run_id=sweepId`, so every frame captured anywhere in the sweep is tagged with the same
+    `run_id` and `list_frames(run_id=sweepId)` retrieves all of them in one call — see
+    `docs/SensorCalibration.md`). Safe only when the caller guarantees the runs sharing an id
+    never overlap (a sweep runs its combinations strictly sequentially, awaiting each one's
+    completion before starting the next); this function does not itself check for a collision
+    with an existing in-flight run, so a caller passing a `run_id` that's already in `_runs` for
+    a still-running run would silently clobber that run's tracking entry.
     """
     script = script_store.get_script(script_id)
-    run_id = str(uuid.uuid4())
+    run_id = run_id if run_id is not None else str(uuid.uuid4())
     started: ScriptRunStarted = {
         "kind": "scriptStarted",
         "runId": run_id,

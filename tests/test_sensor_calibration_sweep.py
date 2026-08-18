@@ -156,12 +156,14 @@ async def test_start_sweep_rejects_an_empty_list() -> None:
 async def test_sweep_runs_every_combination_in_cartesian_order() -> None:
     _register_noop_calibration_set()
     calls: list[dict[str, Any]] = []
+    run_ids: list[str | None] = []
     original = script_runs.start_script
 
     async def spy(
         script_id: str, rig_id: str, parameters: dict[str, Any] | None = None, **kw: Any
     ) -> Any:
         calls.append(dict(parameters or {}))
+        run_ids.append(kw.get("run_id"))
         return await original(script_id, rig_id, parameters, **kw)
 
     with patch.object(script_runs, "start_script", spy):
@@ -183,11 +185,17 @@ async def test_sweep_runs_every_combination_in_cartesian_order() -> None:
     assert all(c["biasCount"] == 3 and c["darkCount"] == 2 for c in calls)
     assert all(c["biasExposureSeconds"] == 0.0 for c in calls)
 
+    # Every combination is started with the sweep's own id as its run_id (INDIMCP-102 follow-up)
+    # — so every frame the sweep captures, across every combination, is tagged with one id and
+    # `list_frames(run_id=sweepId)` retrieves all of them.
+    assert run_ids == [started["sweepId"]] * 8
+
     status = sensor_calibration_sweep.get_sweep_status(started["sweepId"])
     assert status["kind"] == "sensorCalibrationSweepCompleted"
     completed = cast(sensor_calibration_sweep.SensorCalibrationSweepCompleted, status)
     assert len(completed["results"]) == 8
     assert all(r["status"]["kind"] == "scriptCompleted" for r in completed["results"])
+    assert all(r["runId"] == started["sweepId"] for r in completed["results"])
 
 
 async def test_sweep_reports_running_progress_and_partial_results() -> None:
