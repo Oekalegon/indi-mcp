@@ -1126,9 +1126,7 @@ def read_connection_event_stream_for_target(target: str) -> dict[str, list[Conne
 
     `target` is unquoted before filtering — see `read_indi_message_stream_for_device`.
     """
-    return cast(
-        dict[str, list[ConnectionEvent]], event_streams.read_connection(unquote(target))
-    )
+    return cast(dict[str, list[ConnectionEvent]], event_streams.read_connection(unquote(target)))
 
 
 @mcp.tool()

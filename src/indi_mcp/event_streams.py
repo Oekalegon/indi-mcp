@@ -85,6 +85,7 @@ class ConnectionEvent(TypedDict):
     message: str | None
     timestamp: str
 
+
 _MAX_BUFFERED_EVENTS = 200
 
 _NOTIFY_TIMEOUT_SECONDS = 5.0

@@ -113,9 +113,7 @@ async def stop_server() -> IndiServerStatus:
     status = await get_status()
     if was_running and not status["running"]:
         event_streams.publish_connection_event(
-            _connection_event(
-                "connectionLost", f"indiserver stopped on port {_current_port}"
-            )
+            _connection_event("connectionLost", f"indiserver stopped on port {_current_port}")
         )
     return status
 
