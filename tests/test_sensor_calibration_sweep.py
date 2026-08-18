@@ -267,3 +267,64 @@ async def test_get_sweep_status_raises_for_unknown_sweep_id() -> None:
 async def test_cancel_sweep_raises_for_unknown_sweep_id() -> None:
     with pytest.raises(ValueError, match="unknown-sweep"):
         await sensor_calibration_sweep.cancel_sweep("unknown-sweep")
+
+
+async def test_evicts_the_oldest_finished_sweeps_once_over_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_sweeps` must not grow without bound on a long-lived server — once more than
+    `_MAX_FINISHED_SWEEPS` terminal sweeps are on file, the oldest ones are dropped. Mirrors
+    `test_script_runs.py`'s `test_evicts_the_oldest_finished_runs_once_over_the_cap`."""
+    monkeypatch.setattr(sensor_calibration_sweep, "_MAX_FINISHED_SWEEPS", 2)
+    _register_noop_calibration_set()
+
+    sweep_ids = []
+    for _ in range(3):
+        started = await sensor_calibration_sweep.start_sweep(
+            "test-rig", [50], [10], [1.0], bias_count=1, dark_count=1
+        )
+        await _await_sweep(started["sweepId"])
+        sweep_ids.append(started["sweepId"])
+
+    # The oldest finished sweep was evicted once the 3rd pushed the count over the cap.
+    with pytest.raises(ValueError, match=sweep_ids[0]):
+        sensor_calibration_sweep.get_sweep_status(sweep_ids[0])
+    assert sensor_calibration_sweep.get_sweep_status(sweep_ids[1])["kind"] == (
+        "sensorCalibrationSweepCompleted"
+    )
+    assert sensor_calibration_sweep.get_sweep_status(sweep_ids[2])["kind"] == (
+        "sensorCalibrationSweepCompleted"
+    )
+
+
+async def test_does_not_evict_an_in_flight_sweep_regardless_of_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-flight sweep is never evicted, even if the cap is already exceeded by other,
+    finished sweeps — only terminal sweeps are ever eligible for eviction. Mirrors
+    `test_script_runs.py`'s `test_does_not_evict_an_in_flight_run_regardless_of_the_cap`."""
+    monkeypatch.setattr(sensor_calibration_sweep, "_MAX_FINISHED_SWEEPS", 0)
+    _register_hanging_calibration_set()
+
+    # Left running — this is the in-flight sweep that must survive eviction.
+    in_flight = await sensor_calibration_sweep.start_sweep(
+        "test-rig", [50], [10], [1.0], bias_count=1, dark_count=1
+    )
+    await asyncio.sleep(0)
+
+    # Two sweeps that reach a terminal state (cancelled) — enough to trigger eviction against
+    # a cap of 0, which evicts every terminal sweep on file.
+    for _ in range(2):
+        started = await sensor_calibration_sweep.start_sweep(
+            "test-rig", [50], [10], [1.0], bias_count=1, dark_count=1
+        )
+        await asyncio.sleep(0)
+        await asyncio.wait_for(sensor_calibration_sweep.cancel_sweep(started["sweepId"]), timeout=2)
+
+    assert (
+        sensor_calibration_sweep.get_sweep_status(in_flight["sweepId"])["kind"]
+        == "sensorCalibrationSweepProgress"
+    )
+
+    # Clean up the still-running sweep so it doesn't outlive the test.
+    await asyncio.wait_for(sensor_calibration_sweep.cancel_sweep(in_flight["sweepId"]), timeout=2)

@@ -315,13 +315,19 @@ async def start_script(
     `sensor_calibration_sweep`, INDIMCP-102: every combination in a sweep is started with
     `run_id=sweepId`, so every frame captured anywhere in the sweep is tagged with the same
     `run_id` and `list_frames(run_id=sweepId)` retrieves all of them in one call — see
-    `docs/SensorCalibration.md`). Safe only when the caller guarantees the runs sharing an id
+    `docs/SensorCalibration.md`). Only safe when the caller guarantees the runs sharing an id
     never overlap (a sweep runs its combinations strictly sequentially, awaiting each one's
-    completion before starting the next); this function does not itself check for a collision
-    with an existing in-flight run, so a caller passing a `run_id` that's already in `_runs` for
-    a still-running run would silently clobber that run's tracking entry.
+    completion before starting the next) — raises `ValueError` rather than silently overwriting
+    `_runs[run_id]` if that id already belongs to a still-running run, since clobbering it would
+    orphan that run: it would keep executing in the background, but `get_script_status`/
+    `cancel_script` against `run_id` would resolve to the new run instead, leaving the original
+    permanently unpollable and uncancellable via its own id.
     """
     script = script_store.get_script(script_id)
+    if run_id is not None:
+        existing = _runs.get(run_id)
+        if existing is not None and not _is_terminal(existing):
+            raise ValueError(f"run_id {run_id!r} is already in use by an in-flight run")
     run_id = run_id if run_id is not None else str(uuid.uuid4())
     started: ScriptRunStarted = {
         "kind": "scriptStarted",
