@@ -100,7 +100,8 @@ letting the caller choose the gain/offset/exposure range per invocation.
 
 **Decision:** implement the sweep as a plain MCP tool (like `list_frames` or
 `purge_transferred_frames` — see [server.py](../src/indi_mcp/server.py)), not as a new script
-step or a new script. Sketch:
+step or a new script. Implemented for the bias/flat-dark side as
+`run_sensor_calibration_sweep` (INDIMCP-102; `server.py` + `sensor_calibration_sweep.py`):
 
 ```python
 @mcp.tool()
@@ -108,13 +109,20 @@ async def run_sensor_calibration_sweep(
     rig_id: str,
     gains: list[float],
     offsets: list[float],
+    flatExposureSecondsList: list[float],
     biasCount: int,
     darkCount: int,
-    flatExposureSecondsList: list[float],  # only for the flat-side tool, see below
-    flatCount: int,
-) -> SweepRunStarted:
+    biasExposureSeconds: float = 0.0,
+    location_id: str | None = None,
+) -> SensorCalibrationSweepStarted:
     ...
 ```
+
+Paired with `get_sensor_calibration_sweep_status(sweep_id)` and
+`cancel_sensor_calibration_sweep(sweep_id)`, mirroring `run_script`/`get_script_status`/
+`cancel_script`'s own three-tool shape. The flat side (INDIMCP-103) gets its own equivalent
+tool once the flat script split and panel-staging design below are settled — two tools, not one
+with a branch, per the "Open items" resolution below.
 
 MCP tool parameters are ordinary typed Python/pydantic inputs, not bound by
 `ScriptSchema.md`'s closed step vocabulary — that vocabulary exists specifically to keep
@@ -137,15 +145,70 @@ the sweep tool's own job is purely sequencing those calls (awaiting each run's t
 before starting the next — `start_script` itself returns immediately) and aggregating an overall
 status, not reimplementing capture logic.
 
-**Open question for INDIMCP-102/103 to resolve during implementation:** whether the sweep
-tool's own progress is tracked under a new top-level identifier (a `sweepId`, separate from the
-per-combination `runId`s, so a client can poll one thing for the whole sweep) or whether it just
-returns the ordered list of `runId`s it started and leaves the caller to poll each — the former
-is more convenient for a client but is new surface area (a second kind of "run" alongside
-script runs); the latter reuses 100% of existing polling/cancel/pause plumbing. Leaning toward a
-`sweepId` wrapper for a coherent single cancel/status story across the whole sweep, but this
-needs to be decided against `script_runs.py`'s existing `_Run`/event-stream shape before
-implementation starts.
+**Resolved (INDIMCP-102): `sweepId`, not a bare `runId` list — and not just for a nicer client
+API.** It turns out the bare-list option was never actually viable: `run_script` never blocks
+its caller, and a full sweep can run far longer than any single script, so the sweep tool can't
+block either — but unlike a caller looping `run_script` itself, the tool can't hand back every
+combination's `runId` up front, because combinations are deliberately sequenced one at a time
+(concurrent captures would race commands against the same camera), so a later combination's
+`runId` doesn't exist until every earlier one has finished. A `sweepId`-tracked background task
+is the only shape that works at all, not merely the more convenient one. Implemented in
+`sensor_calibration_sweep.py`, mirroring `script_runs.py`'s own `_Run`/`_runs` pattern
+(`_Sweep`/`_sweeps`, a `cancel_event`, a `latest_status` polled by `get_sweep_status`). This
+module doesn't publish its own `sensorCalibrationSweep*` events to `event_streams` — a caller
+polls `get_sensor_calibration_sweep_status` instead of subscribing — but see "Retrieving a
+sweep's frames" below for how the *existing* `indi://scripts/{runId}` stream ends up scoped to a
+sweep for free anyway.
+
+## Retrieving a sweep's frames
+
+**Decision: every combination in a sweep is started with `run_id=sweep_id`** (a caller-supplied
+override added to `script_runs.start_script`), not a fresh `run_id` per combination. Since every
+frame `capture_frame` saves is tagged with whatever `run_id` its enclosing script run was given,
+this means every frame captured anywhere in a sweep — across every gain/offset/exposure
+combination — shares one `run_id`, and `list_frames(run_id=sweepId)` retrieves all of them in a
+single call. No `frame_store` schema change, no new `sweepId` column, no new `list_frames`
+filter parameter.
+
+This was a deliberate id-space unification, not an overload of an unrelated field — it was
+seriously considered and rejected first: a caller passing an arbitrary UUID that could mean
+*either* a `frameId`, a `runId`, or a `sweepId`, resolved by whichever table happens to match, is
+exactly the kind of ambiguity this codebase's `kind`/`type`-tagged envelope convention exists to
+avoid — a stale or mistyped id would silently resolve against the wrong thing instead of failing
+clearly. Sharing `run_id` across a sweep's combinations is different: there's no guessing
+involved, `list_frames(run_id=...)` keeps meaning exactly what it always has (frames from the
+run(s) tagged with this id), a sweep's combinations just legitimately share one id by
+construction. No information is lost by giving up *per-combination* `run_id` granularity either
+— a frame's own FITS headers (`CCD_GAIN`/`CCD_OFFSET`/`CCD_EXPOSURE`) already record which
+combination produced it, so `run_id` was never the only way to recover that.
+
+Two consequences worth knowing, both accepted rather than mitigated:
+
+* **The `indi://scripts/{runId}`-scoped event stream doubles as a per-sweep feed for free** —
+  every combination's `scriptStarted`/`scriptProgress`/`scriptCompleted` events publish under
+  the same id, so a client subscribing to `indi://scripts/{sweepId}` sees the whole sweep's
+  blow-by-blow without this module needing its own event-publishing story.
+* **`get_script_status`/`cancel_script`/`pause_script` also resolve against a `sweepId`** — it's
+  a real key in `script_runs`'s own `_runs` dict for as long as a combination is in flight under
+  it. They just answer about whichever single combination currently occupies that slot, not the
+  sweep as a whole, so calling the wrong tool on a sweep id gives a differently-grained (if
+  plausible-looking) answer rather than an error. Not a correctness bug — `script_runs` and
+  `sensor_calibration_sweep` remain independent tracking systems that happen to share an id
+  value — but worth knowing before reaching for `get_script_status` out of habit.
+
+Safe only because a sweep's combinations run strictly sequentially, never concurrently (see
+`start_script`'s own docstring for the collision this relies on not happening) — a design
+constraint this module already had for the `sweepId`-vs-bare-`runId`-list reason above.
+
+INDIMCPKit's own frame-retrieval wrapper for a sweep (tracked alongside IMCPKIT-32/33) is just
+`list_frames(runId: sweepId)` under the hood — no new server-side tool needed for it.
+
+**Also resolved: fail-fast, not best-effort.** If one combination's run doesn't end in
+`scriptCompleted`, the sweep stops rather than continuing to later combinations — a failure
+partway through usually means something about the rig/settings needs attention before spending
+more capture time on likely-bad data. `results` still reports every combination that reached an
+outcome before the stop (including the one that failed, or — if stopped via `cancel_sweep` — the
+in-flight combination's own `scriptCancelled` outcome), not just the successful ones.
 
 ## Manual flat-panel staging within a flat sweep
 
@@ -205,18 +268,23 @@ layer (see INDIMCPKit's own device-type abstractions for `Mount`/`Camera`/`Filte
 `Focuser`). Out of scope for this doc; tracked as their own todos once the server-side tool
 shapes above are finalized, since the Swift signatures follow directly from them.
 
-## Open items for INDIMCP-102/103/104
+## Open items for INDIMCP-103
 
-* Exact sweep tool name(s) and whether bias/dark and flat sweeps are two tools (matching the
-  script split) or one tool with an optional flat-side branch — leaning toward two tools,
-  mirroring the two-script split and letting the bias/dark tool ship without the flat panel's
-  staging-confirmation design being finished.
-* Cartesian product of `gains × offsets` (and `× exposures` for flats) vs. paired lists (caller
-  supplies matched tuples) — cartesian is simpler to specify but can blow up combinatorially;
-  needs a decision once real-world sweep sizes are known.
-* The `sweepId` vs. bare-`runId`-list question above.
-* Flat-panel staging mechanism (pause/resume vs. documented precondition) for the *flat* side
-  above — resolved as document-only for flat-*dark* (see "Flat-dark" section above); the flat
-  side's own staging mechanism is still open.
+INDIMCP-102 (bias/flat-dark side) is implemented; everything below is specific to the remaining
+flat-side work:
+
+* Exact flat sweep tool name — a second tool alongside `run_sensor_calibration_sweep`
+  (`run_flat_calibration_sweep`, or similar), not a branch on the same tool, matching the
+  two-script split and letting the bias/dark tool exist independently of the flat panel's
+  staging-confirmation design.
+* Cartesian product of `gains × offsets × exposures`, matching INDIMCP-102's own resolution
+  (`itertools.product`, gains outermost) — likely the same choice for consistency, but worth
+  confirming once real-world flat-sweep sizes are known (a flat sweep multiplies exposure levels
+  in too, so combinatorial blow-up is a bigger risk here than on the bias/flat-dark side).
+* Flat-panel staging mechanism (pause/resume vs. documented precondition) for the *flat* side —
+  resolved as document-only for flat-*dark* (see "Flat-dark" section above); the flat side's own
+  staging mechanism is still open, and INDIMCP-102's `_Sweep`/background-task shape is the
+  natural place to hang a pause-for-confirmation step if that's the direction chosen.
 * Whether `flatCount`/`biasCount`/`darkCount` are fixed per sweep or themselves swept — no known
-  need for this yet, so not currently planned.
+  need for this yet, so not currently planned (INDIMCP-102 keeps `biasCount`/`darkCount` fixed
+  per sweep, shared across every combination).

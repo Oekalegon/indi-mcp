@@ -30,6 +30,7 @@ from indi_mcp import (
     script_engine,
     script_runs,
     script_store,
+    sensor_calibration_sweep,
     server,
 )
 
@@ -938,6 +939,89 @@ def test_resume_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch)
 
     assert result == {"kind": "scriptResumed", "runId": "abc"}
     assert calls == ["abc"]
+
+
+async def test_run_sensor_calibration_sweep_delegates_to_sensor_calibration_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    async def fake_start_sweep(
+        rig_id: str,
+        gains: list[float],
+        offsets: list[float],
+        flat_exposure_seconds_list: list[float],
+        bias_count: int,
+        dark_count: int,
+        *,
+        bias_exposure_seconds: float = 0.0,
+        location_id: str | None = None,
+    ) -> dict:
+        calls.append(
+            (
+                rig_id,
+                gains,
+                offsets,
+                flat_exposure_seconds_list,
+                bias_count,
+                dark_count,
+                bias_exposure_seconds,
+                location_id,
+            )
+        )
+        return {"kind": "sensorCalibrationSweepStarted", "sweepId": "sweep-1"}
+
+    monkeypatch.setattr(sensor_calibration_sweep, "start_sweep", fake_start_sweep)
+
+    result = await server.run_sensor_calibration_sweep(
+        "test-rig",
+        [50, 100],
+        [10, 20],
+        [1.0, 2.0],
+        biasCount=3,
+        darkCount=2,
+        biasExposureSeconds=0.5,
+        location_id="home-backyard",
+    )
+
+    assert result == {"kind": "sensorCalibrationSweepStarted", "sweepId": "sweep-1"}
+    # Positional args land in the right slots — biasCount/darkCount are both plain ints, so a
+    # swapped argument order here would silently pass every type check.
+    assert calls == [("test-rig", [50, 100], [10, 20], [1.0, 2.0], 3, 2, 0.5, "home-backyard")]
+
+
+def test_get_sensor_calibration_sweep_status_delegates_to_sensor_calibration_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_get_sweep_status(sweep_id: str) -> dict:
+        calls.append(sweep_id)
+        return {"kind": "sensorCalibrationSweepProgress", "sweepId": sweep_id}
+
+    monkeypatch.setattr(sensor_calibration_sweep, "get_sweep_status", fake_get_sweep_status)
+
+    result = server.get_sensor_calibration_sweep_status("sweep-1")
+
+    assert result == {"kind": "sensorCalibrationSweepProgress", "sweepId": "sweep-1"}
+    assert calls == ["sweep-1"]
+
+
+async def test_cancel_sensor_calibration_sweep_delegates_to_sensor_calibration_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_cancel_sweep(sweep_id: str) -> dict:
+        calls.append(sweep_id)
+        return {"kind": "sensorCalibrationSweepCancelled", "sweepId": sweep_id}
+
+    monkeypatch.setattr(sensor_calibration_sweep, "cancel_sweep", fake_cancel_sweep)
+
+    result = await server.cancel_sensor_calibration_sweep("sweep-1")
+
+    assert result == {"kind": "sensorCalibrationSweepCancelled", "sweepId": "sweep-1"}
+    assert calls == ["sweep-1"]
 
 
 _FRAME_METADATA: frame_store.FrameMetadata = {

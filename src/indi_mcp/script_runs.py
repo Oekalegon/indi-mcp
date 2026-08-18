@@ -54,6 +54,7 @@ __all__ = [
     "pause_script",
     "resume_script",
     "start_script",
+    "wait_for_completion",
 ]
 
 
@@ -291,6 +292,7 @@ async def start_script(
     parameters: dict[str, Any] | None = None,
     *,
     location_id: str | None = None,
+    run_id: str | None = None,
 ) -> ScriptRunStarted:
     """Start `script_id` against `rig_id` as a background task and return immediately.
 
@@ -307,9 +309,26 @@ async def start_script(
     docstring (INDIMCP-60). Not echoed into the `scriptStarted`/`scriptProgress`/... envelopes
     below, the same way `parameters` itself isn't: it's an input to the run, not part of its
     reported status.
+
+    `run_id`, if given, is used as this run's id instead of generating a fresh one — for a
+    caller that deliberately wants several sequential runs to share one id (currently only
+    `sensor_calibration_sweep`, INDIMCP-102: every combination in a sweep is started with
+    `run_id=sweepId`, so every frame captured anywhere in the sweep is tagged with the same
+    `run_id` and `list_frames(run_id=sweepId)` retrieves all of them in one call — see
+    `docs/SensorCalibration.md`). Only safe when the caller guarantees the runs sharing an id
+    never overlap (a sweep runs its combinations strictly sequentially, awaiting each one's
+    completion before starting the next) — raises `ValueError` rather than silently overwriting
+    `_runs[run_id]` if that id already belongs to a still-running run, since clobbering it would
+    orphan that run: it would keep executing in the background, but `get_script_status`/
+    `cancel_script` against `run_id` would resolve to the new run instead, leaving the original
+    permanently unpollable and uncancellable via its own id.
     """
     script = script_store.get_script(script_id)
-    run_id = str(uuid.uuid4())
+    if run_id is not None:
+        existing = _runs.get(run_id)
+        if existing is not None and not _is_terminal(existing):
+            raise ValueError(f"run_id {run_id!r} is already in use by an in-flight run")
+    run_id = run_id if run_id is not None else str(uuid.uuid4())
     started: ScriptRunStarted = {
         "kind": "scriptStarted",
         "runId": run_id,
@@ -445,6 +464,23 @@ def get_script_status(run_id: str) -> ScriptRunStatus:
     can still fetch its outcome.
     """
     return _get_run(run_id).latest_status
+
+
+async def wait_for_completion(run_id: str) -> ScriptRunStatus:
+    """Block until `run_id` reaches a terminal state, then return its final status.
+
+    For server-side orchestration that needs to sequence several script runs one
+    after another (e.g. `sensor_calibration_sweep`'s per-combination loop, INDIMCP-102)
+    without re-implementing "wait for this run to finish" as its own poll loop —
+    awaits the run's own background task directly, the same pattern `cancel_script`
+    already uses to return a real terminal status rather than a merely-requested one.
+    Safe to call on an already-finished run: `run.task` is already done, so this
+    returns immediately.
+    """
+    run = _get_run(run_id)
+    if run.task is not None:
+        await run.task
+    return run.latest_status
 
 
 async def cancel_script(run_id: str) -> ScriptRunStatus:

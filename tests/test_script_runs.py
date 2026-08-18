@@ -140,6 +140,70 @@ async def test_start_script_passes_location_id_through_to_execute_script(
     assert calls == ["home-backyard"]
 
 
+async def test_start_script_honors_a_caller_supplied_run_id() -> None:
+    """`sensor_calibration_sweep` (INDIMCP-102) deliberately starts every combination in a
+    sweep with the same `run_id` (the sweep's own id), so every frame the sweep captures is
+    tagged with one id instead of a fresh one per combination — see `start_script`'s own
+    docstring. This is the plumbing that makes that possible: a caller-supplied `run_id`
+    is used as-is instead of a fresh `uuid4`."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("noop")
+
+    started = await script_runs.start_script("noop", "test-rig", {}, run_id="fixed-run-id")
+    await _await_run(started["runId"])
+
+    assert started["runId"] == "fixed-run-id"
+    assert script_runs.get_script_status("fixed-run-id")["runId"] == "fixed-run-id"
+
+
+async def test_start_script_generates_a_fresh_run_id_when_none_given() -> None:
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("noop")
+
+    first = await script_runs.start_script("noop", "test-rig", {})
+    await _await_run(first["runId"])
+    second = await script_runs.start_script("noop", "test-rig", {})
+    await _await_run(second["runId"])
+
+    assert first["runId"] != second["runId"]
+
+
+async def test_start_script_rejects_a_run_id_already_in_use_by_an_in_flight_run() -> None:
+    """The collision guard `sensor_calibration_sweep` relies on for safety: reusing a
+    `run_id` while it still keys a running (non-terminal) run must fail loudly rather than
+    silently overwriting that run's tracking entry — see `start_script`'s own docstring for
+    why a silent clobber would orphan the original run."""
+    _rig(rig_store.Component(role="mount", id="mount-1", device="Telescope Simulator"))
+    _script(
+        "wait_forever",
+        steps=[_wait_for("mount", "CONNECTION", "equals", "On", element="DISCONNECT", timeout=100)],
+    )
+
+    started = await script_runs.start_script("wait_forever", "test-rig", {}, run_id="shared-id")
+
+    with pytest.raises(ValueError, match="shared-id"):
+        await script_runs.start_script("wait_forever", "test-rig", {}, run_id="shared-id")
+
+    # Clean up the still-running task so it doesn't outlive the test.
+    await asyncio.wait_for(script_runs.cancel_script(started["runId"]), timeout=2)
+
+
+async def test_start_script_allows_reusing_a_run_id_once_the_prior_run_is_terminal() -> None:
+    """The legitimate case a collision guard must not block: `sensor_calibration_sweep`
+    starts every combination with the same `run_id`, one after another, each only once the
+    previous one has already finished."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script("noop")
+
+    first = await script_runs.start_script("noop", "test-rig", {}, run_id="shared-id")
+    await _await_run(first["runId"])
+
+    second = await script_runs.start_script("noop", "test-rig", {}, run_id="shared-id")
+    await _await_run(second["runId"])
+
+    assert second["runId"] == "shared-id"
+
+
 async def test_run_completes_and_get_script_status_reports_scriptCompleted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
