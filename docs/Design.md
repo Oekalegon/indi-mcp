@@ -331,6 +331,7 @@ CREATE TABLE frames (
   device TEXT NOT NULL,
   path TEXT NOT NULL,             -- path on the INDI Device, relative to the frame storage root
   size_bytes INTEGER,
+  checksum_sha256 TEXT,           -- SHA-256 hex digest of the frame's bytes at capture time
   captured_at TEXT NOT NULL,      -- ISO 8601 UTC
   transferred_at TEXT             -- NULL until the Client Computer has retrieved it
 );
@@ -362,6 +363,7 @@ Two separate concerns: finding out what frames exist (metadata, cheap, queried a
     "runId": "b3f1c2d4-...",
     "device": "ZWO CCD ASI2600MM Pro",
     "sizeBytes": 33554432,
+    "checksumSha256": "b1946ac92492d2347c6235b4d2611184...",
     "capturedAt": "2026-07-14T22:04:11Z",
     "transferredAt": null,
     "downloadUrl": "http://indi-mcp.local:8000/frames/frame-0001"
@@ -375,7 +377,7 @@ Two separate concerns: finding out what frames exist (metadata, cheap, queried a
 
 Originally, frame content was exposed as an MCP resource instead: each frame got a `frame://{frame_id}` URI, read via the standard `resources/read` request, reusing MCP's existing binary content handling (a base64 `blob` resource content) rather than inventing a separate transfer mechanism. This was deliberately left open at the time ("deferred until real frame sizes from actual hardware are known rather than solved speculatively now") — MCP's resource-read mechanism returns the whole content in one JSON-RPC response, with no native chunked/range read to fall back on for a large one. Real frame sizes turned out to matter: an 18MB raw (~23MB base64-encoded) dark frame disconnected a real MCP client reading it this way. Since that's a protocol-level ceiling (any MCP client hits it eventually, just at a different size threshold depending on its own timeout/memory limits, not something specific to one client implementation), the fix moves the bytes outside the MCP protocol entirely rather than inventing an offset/length chunking convention on top of it. `frame://{frame_id}` itself has been removed — there was no safe use case left for it once it broke on real frame sizes, and keeping two ways to fetch the same bytes would mean two code paths to maintain and test for one that's known to fail. The new endpoint is unauthenticated, same as every MCP tool/resource this server already exposes over `streamable-http` (see Deployment.md's Hardening notes) — this doesn't introduce a new class of exposure, just a new URL path with the same trust model. The URL's host comes from `socket.gethostname()`, not the server's own bind address (`--host`, typically the wildcard `0.0.0.0` in production per Deployment.md, not itself a reachable client-facing address).
 
-**Explicit transfer confirmation, not read-implies-received.** `transferred_at` is *not* set just because the server sent the bytes — a network drop mid-transfer shouldn't be recorded as a successful transfer. Instead, the client calls a `confirm_frame_transfer` tool with the `frameId` once it has verified the frame is safely saved locally; only that sets `transferred_at`. This follows the same "don't trust delivery, wait for acknowledgement" principle already applied to the event log and script status.
+**Explicit transfer confirmation, not read-implies-received.** `transferred_at` is *not* set just because the server sent the bytes — a network drop mid-transfer shouldn't be recorded as a successful transfer. Instead, the client calls a `confirm_frame_transfer` tool with the `frameId` once it has verified the frame is safely saved locally; only that sets `transferred_at`. This follows the same "don't trust delivery, wait for acknowledgement" principle already applied to the event log and script status. `checksumSha256` (INDIMCP-95) lets that verification check the downloaded bytes' actual content, not just their length against `sizeBytes` — a truncated-but-coincidentally-same-length transfer would pass a size check but fail a hash comparison. `checksumSha256` is `null` for a frame captured before checksum support existed (its row predates the `checksum_sha256` column and was carried forward by a schema migration with nothing to hash) — always populated for every frame captured since.
 
 ## Deleting frames
 

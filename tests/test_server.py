@@ -1115,6 +1115,7 @@ _FRAME_METADATA: frame_store.FrameMetadata = {
     "runId": "run-1",
     "device": "cam",
     "sizeBytes": 10,
+    "checksumSha256": "0" * 64,
     "capturedAt": "2026-07-20T00:00:00.000000+00:00",
     "transferredAt": None,
 }
