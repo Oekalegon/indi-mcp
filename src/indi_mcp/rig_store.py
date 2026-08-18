@@ -224,8 +224,8 @@ _FAMILY_TO_ROLE: dict[str, Role] = {
 """Driver catalog family names (`DeviceDriver.family`) recognized by `draft_rig`."""
 
 _rigs: dict[str, Rig] = {}
-_save_lock = threading.Lock()
-"""Serializes `save_rig`'s write-then-reload against concurrent `save_rig` calls.
+_rigs_lock = threading.RLock()
+"""Guards every read or write of `_rigs`, and serializes `save_rig`'s write-then-reload.
 
 `save_rig` runs off the asyncio event loop via `asyncio.to_thread`
 (`server.save_rig`), so two saves triggered close together genuinely run in
@@ -236,6 +236,19 @@ reload happens to finish last wins and silently discards the other call's
 just-written rig from memory even though its file is on disk, and that
 call's own trailing `get_rig` can then raise `Unknown rig` despite having
 successfully written it.
+
+Deliberately a single lock rather than one per `directory`: `_rigs` is one
+shared, directory-agnostic cache (whatever was most recently loaded), not a
+per-directory store, so splitting the lock by `directory` would let saves to
+two different directories race on that same shared `_rigs` dict again —
+reintroducing the exact bug this lock exists to fix. In production there is
+only ever one rigs directory; `directory` is a parameter mainly so tests can
+isolate `tmp_path` fixtures from each other, not a sign of real per-directory
+independent state.
+
+`RLock` rather than `Lock` because `save_rig` calls `get_rig` (and
+`load_rigs`) while already holding the lock; a plain `Lock` would deadlock on
+that reentrant acquisition.
 """
 
 
@@ -257,7 +270,8 @@ def load_rigs(directory: Path | None = None) -> list[Rig]:
     rigs: dict[str, Rig] = {}
     if not directory.is_dir():
         logger.info("Rigs directory does not exist, no rigs loaded: %s", directory)
-        _rigs = rigs
+        with _rigs_lock:
+            _rigs = rigs
         return []
     for path in sorted(directory.glob("*.yaml")):
         if not path.is_file():
@@ -273,22 +287,25 @@ def load_rigs(directory: Path | None = None) -> list[Rig]:
             logger.warning("Duplicate rig id %r in %s, keeping first definition", rig.id, path)
             continue
         rigs[rig.id] = rig
-    _rigs = rigs
+    with _rigs_lock:
+        _rigs = rigs
     logger.info("Loaded %d rig(s) from %s", len(rigs), directory)
     return list(rigs.values())
 
 
 def list_rigs() -> list[RigSummary]:
     """List the id/name of every currently loaded rig."""
-    return [{"id": rig.id, "name": rig.name} for rig in _rigs.values()]
+    with _rigs_lock:
+        return [{"id": rig.id, "name": rig.name} for rig in _rigs.values()]
 
 
 def get_rig(rig_id: str) -> Rig:
     """Return the full definition of the rig identified by `rig_id`."""
-    rig = _rigs.get(rig_id)
-    if rig is None:
-        raise ValueError(f"Unknown rig: {rig_id!r}")
-    return rig
+    with _rigs_lock:
+        rig = _rigs.get(rig_id)
+        if rig is None:
+            raise ValueError(f"Unknown rig: {rig_id!r}")
+        return rig
 
 
 def save_rig(rig: Rig, *, overwrite: bool = False, directory: Path | None = None) -> Rig:
@@ -307,13 +324,14 @@ def save_rig(rig: Rig, *, overwrite: bool = False, directory: Path | None = None
     slip past the check. Reloads every rig in `directory` afterwards (see
     `load_rigs`) so the saved rig is immediately available by `id` to
     `get_rig`/`suggest_rig`/`check_rig`; the write and that reload are
-    serialized against other `save_rig` calls by `_save_lock`, since two
-    unlocked concurrent reloads could otherwise race (see `_save_lock`).
+    serialized against other `save_rig` calls (and against readers) by
+    `_rigs_lock`, since two unlocked concurrent reloads could otherwise race
+    (see `_rigs_lock`).
     """
     if not rig.id or rig.id in (".", "..") or "/" in rig.id or "\\" in rig.id:
         raise ValueError(f"Invalid rig id for a filename: {rig.id!r}")
     directory = directory if directory is not None else _rigs_dir()
-    with _save_lock:
+    with _rigs_lock:
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except NotADirectoryError as exc:
@@ -385,7 +403,9 @@ def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
     """
     connected = set(connected_devices)
     suggestions: list[RigSuggestion] = []
-    for rig in _rigs.values():
+    with _rigs_lock:
+        rigs = list(_rigs.values())
+    for rig in rigs:
         matched, missing = _match_devices(rig, connected)
         total = len(matched) + len(missing)
         score = len(matched) / total if total else None
