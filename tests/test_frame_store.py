@@ -18,6 +18,28 @@ def _backdate(db_path: Path, frame_id: str, captured_at: datetime) -> None:
         conn.commit()
 
 
+def _create_legacy_frames_table(db_path: Path) -> None:
+    """Create a `frames` table shaped as it was before `checksum_sha256` existed (INDIMCP-95),
+    simulating an already-deployed database that predates this column — see `_ensure_schema`.
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE frames (
+                id INTEGER PRIMARY KEY,
+                frame_id TEXT UNIQUE NOT NULL,
+                run_id TEXT,
+                device TEXT NOT NULL,
+                path TEXT NOT NULL,
+                size_bytes INTEGER,
+                captured_at TEXT NOT NULL,
+                transferred_at TEXT
+            )
+            """
+        )
+        conn.commit()
+
+
 @pytest.fixture()
 def store_paths(tmp_path: Path) -> tuple[Path, Path]:
     return tmp_path / "frames", tmp_path / "indi_mcp.sqlite3"
@@ -56,6 +78,38 @@ def test_save_frame_writes_the_file_and_returns_metadata(store_paths: tuple[Path
     assert metadata["capturedAt"]
     saved_path = frames_dir / f"{metadata['frameId']}.fits"
     assert saved_path.read_bytes() == b"fits-bytes"
+
+
+def test_save_frame_migrates_a_pre_checksum_database(store_paths: tuple[Path, Path]) -> None:
+    frames_dir, db_path = store_paths
+    _create_legacy_frames_table(db_path)
+
+    metadata = frame_store.save_frame(
+        b"data", device="cam", extension=".fits", directory=frames_dir, db_path=db_path
+    )
+
+    assert metadata["checksumSha256"] == hashlib.sha256(b"data").hexdigest()
+
+
+def test_get_frame_metadata_returns_none_checksum_for_a_pre_migration_row(
+    store_paths: tuple[Path, Path],
+) -> None:
+    frames_dir, db_path = store_paths
+    _create_legacy_frames_table(db_path)
+    frame_path = frames_dir / "legacy-frame.fits"
+    frame_path.parent.mkdir(parents=True, exist_ok=True)
+    frame_path.write_bytes(b"legacy-data")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO frames (frame_id, run_id, device, path, size_bytes, captured_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("legacy-frame", None, "cam", str(frame_path), 11, "2026-01-01T00:00:00.000000+00:00"),
+        )
+        conn.commit()
+
+    metadata = frame_store.get_frame_metadata("legacy-frame", db_path=db_path)
+
+    assert metadata["checksumSha256"] is None
 
 
 def test_save_frame_defaults_run_id_to_none_for_an_ad_hoc_capture(

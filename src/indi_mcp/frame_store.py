@@ -85,13 +85,18 @@ class FrameMetadata(TypedDict):
     `get_frame_metadata` tools (INDIMCP-11) expose to the client. `path` is deliberately
     excluded: it's an internal server-side detail (see `get_frame_path`), not something a
     client needs or should be able to infer the server's filesystem layout from.
+
+    `checksumSha256` is `None` only for a frame captured before checksum support existed
+    (INDIMCP-95) whose database row was carried forward by `_ensure_schema`'s `ALTER TABLE`
+    migration rather than recomputed — there's no file content to retroactively hash from just
+    a schema migration. Every frame captured via `save_frame` since always has one.
     """
 
     frameId: str
     runId: str | None
     device: str
     sizeBytes: int
-    checksumSha256: str
+    checksumSha256: str | None
     capturedAt: str
     transferredAt: str | None
 
@@ -112,7 +117,16 @@ def _frames_dir(directory: Path | None) -> Path:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the `frames` table/indexes if they don't already exist, per Design.md's sketch."""
+    """Create the `frames` table/indexes if they don't already exist, per Design.md's sketch.
+
+    `checksum_sha256` (INDIMCP-95) was added after `frames` itself first shipped, so on a
+    database that already has a `frames` table from before then, `CREATE TABLE IF NOT EXISTS`
+    alone is a no-op — it does not add columns to an existing table. The `ALTER TABLE` below
+    covers that already-deployed case (e.g. the Raspberry Pi's persistent database); existing
+    rows get `checksum_sha256 = NULL`, per `FrameMetadata.checksumSha256`'s own docstring. On a
+    fresh database this branch runs once, immediately after the `CREATE TABLE` above creates
+    the column already, and is just as harmless.
+    """
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS frames (
@@ -128,6 +142,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(frames)")}
+    if "checksum_sha256" not in existing_columns:
+        conn.execute("ALTER TABLE frames ADD COLUMN checksum_sha256 TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_frames_run_id ON frames (run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_frames_captured_at ON frames (captured_at)")
 
