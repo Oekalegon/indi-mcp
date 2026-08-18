@@ -10,6 +10,21 @@ description: >
   mount target or a specific sensor temperature. Pausable: capture_frame is
   the only step inside the repeat loop, so a pause request only ever lands
   between frames, never mid-exposure.
+
+  gain/offset (INDIMCP-103) are optional, same "omit to leave the device's
+  current setting alone" convention as capture_sensor_calibration_set — for
+  ordinary flat-field calibration they're normally left unset (matching
+  whatever the light frames used), but a sensor calibration sweep
+  (run_flat_calibration_sweep) always supplies both explicitly, since a PTC
+  needs flats at the specific gain/offset setting its matching flat-darks
+  (capture_sensor_calibration_set, INDIMCP-102) were captured at.
+
+  Assumes the flat panel (or other light source) this setting's flats need
+  is already staged before this script runs — the script engine has no way
+  to prompt for or verify that (see docs/SensorCalibration.md's "Decision:
+  split capture into a bias/flat-dark script and a separate flat script");
+  staging it is the caller's (or, for a client app driving a human operator,
+  that app's) responsibility.
 pausable: true
 parameters:
   filterName:
@@ -31,6 +46,20 @@ parameters:
     type: integer
     required: true
     description: Number of flat frames to capture.
+  gain:
+    type: number
+    required: false
+    description: >
+      Sensor gain to hold for every frame in this sequence. Omit to leave the
+      device's current setting alone — normal for ordinary flat-field
+      calibration; a sensor calibration sweep always supplies this.
+  offset:
+    type: number
+    required: false
+    description: >
+      Sensor offset to hold for every frame in this sequence. Omit to leave
+      the device's current setting alone — same "normally omitted, always
+      supplied by a sweep" convention as gain.
 steps:
   - step: select_filter
     role: filterWheel
@@ -45,3 +74,5 @@ steps:
         role: camera
         exposureSeconds: "{{ exposureSeconds }}"
         frameType: Flat
+        gain: "{{ gain }}"
+        offset: "{{ offset }}"
