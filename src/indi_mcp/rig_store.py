@@ -21,6 +21,7 @@ it against connected INDI devices (see `suggest_rig`/`check_rig`).
 
 import logging
 import os
+import threading
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -223,6 +224,32 @@ _FAMILY_TO_ROLE: dict[str, Role] = {
 """Driver catalog family names (`DeviceDriver.family`) recognized by `draft_rig`."""
 
 _rigs: dict[str, Rig] = {}
+_rigs_lock = threading.RLock()
+"""Guards every read or write of `_rigs`, and serializes `save_rig`'s write-then-reload.
+
+`save_rig` runs off the asyncio event loop via `asyncio.to_thread`
+(`server.save_rig`), so two saves triggered close together genuinely run in
+different OS threads rather than merely interleaved coroutines. Without this
+lock, two concurrent calls each do their own full directory glob+parse and
+then wholesale-replace the shared `_rigs` dict (`load_rigs`); whichever
+reload happens to finish last wins and silently discards the other call's
+just-written rig from memory even though its file is on disk, and that
+call's own trailing `get_rig` can then raise `Unknown rig` despite having
+successfully written it.
+
+Deliberately a single lock rather than one per `directory`: `_rigs` is one
+shared, directory-agnostic cache (whatever was most recently loaded), not a
+per-directory store, so splitting the lock by `directory` would let saves to
+two different directories race on that same shared `_rigs` dict again —
+reintroducing the exact bug this lock exists to fix. In production there is
+only ever one rigs directory; `directory` is a parameter mainly so tests can
+isolate `tmp_path` fixtures from each other, not a sign of real per-directory
+independent state.
+
+`RLock` rather than `Lock` because `save_rig` calls `get_rig` (and
+`load_rigs`) while already holding the lock; a plain `Lock` would deadlock on
+that reentrant acquisition.
+"""
 
 
 def _rigs_dir() -> Path:
@@ -243,7 +270,8 @@ def load_rigs(directory: Path | None = None) -> list[Rig]:
     rigs: dict[str, Rig] = {}
     if not directory.is_dir():
         logger.info("Rigs directory does not exist, no rigs loaded: %s", directory)
-        _rigs = rigs
+        with _rigs_lock:
+            _rigs = rigs
         return []
     for path in sorted(directory.glob("*.yaml")):
         if not path.is_file():
@@ -259,22 +287,25 @@ def load_rigs(directory: Path | None = None) -> list[Rig]:
             logger.warning("Duplicate rig id %r in %s, keeping first definition", rig.id, path)
             continue
         rigs[rig.id] = rig
-    _rigs = rigs
+    with _rigs_lock:
+        _rigs = rigs
     logger.info("Loaded %d rig(s) from %s", len(rigs), directory)
     return list(rigs.values())
 
 
 def list_rigs() -> list[RigSummary]:
     """List the id/name of every currently loaded rig."""
-    return [{"id": rig.id, "name": rig.name} for rig in _rigs.values()]
+    with _rigs_lock:
+        return [{"id": rig.id, "name": rig.name} for rig in _rigs.values()]
 
 
 def get_rig(rig_id: str) -> Rig:
     """Return the full definition of the rig identified by `rig_id`."""
-    rig = _rigs.get(rig_id)
-    if rig is None:
-        raise ValueError(f"Unknown rig: {rig_id!r}")
-    return rig
+    with _rigs_lock:
+        rig = _rigs.get(rig_id)
+        if rig is None:
+            raise ValueError(f"Unknown rig: {rig_id!r}")
+        return rig
 
 
 def save_rig(rig: Rig, *, overwrite: bool = False, directory: Path | None = None) -> Rig:
@@ -292,30 +323,34 @@ def save_rig(rig: Rig, *, overwrite: bool = False, directory: Path | None = None
     `overwrite`), so two concurrent saves of the same new `id` can't both
     slip past the check. Reloads every rig in `directory` afterwards (see
     `load_rigs`) so the saved rig is immediately available by `id` to
-    `get_rig`/`suggest_rig`/`check_rig`.
+    `get_rig`/`suggest_rig`/`check_rig`; the write and that reload are
+    serialized against other `save_rig` calls (and against readers) by
+    `_rigs_lock`, since two unlocked concurrent reloads could otherwise race
+    (see `_rigs_lock`).
     """
     if not rig.id or rig.id in (".", "..") or "/" in rig.id or "\\" in rig.id:
         raise ValueError(f"Invalid rig id for a filename: {rig.id!r}")
     directory = directory if directory is not None else _rigs_dir()
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-    except NotADirectoryError as exc:
-        raise ValueError(f"Cannot create rigs directory {directory}: {exc}") from exc
-    path = directory / f"{rig.id}.yaml"
-    if path.is_dir():
-        raise ValueError(f"Cannot save rig {rig.id!r}: {path} is a directory, not a file")
-    content = yaml.safe_dump(rig.model_dump(exclude_none=True), sort_keys=False)
-    try:
-        with path.open("w" if overwrite else "x", encoding="utf-8") as f:
-            f.write(content)
-    except FileExistsError as exc:
-        raise ValueError(
-            f"A rig file already exists for id {rig.id!r} ({path}); "
-            "pass overwrite=True to replace it."
-        ) from exc
-    logger.info("Saved rig %r to %s", rig.id, path)
-    load_rigs(directory)
-    return get_rig(rig.id)
+    with _rigs_lock:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except NotADirectoryError as exc:
+            raise ValueError(f"Cannot create rigs directory {directory}: {exc}") from exc
+        path = directory / f"{rig.id}.yaml"
+        if path.is_dir():
+            raise ValueError(f"Cannot save rig {rig.id!r}: {path} is a directory, not a file")
+        content = yaml.safe_dump(rig.model_dump(exclude_none=True), sort_keys=False)
+        try:
+            with path.open("w" if overwrite else "x", encoding="utf-8") as f:
+                f.write(content)
+        except FileExistsError as exc:
+            raise ValueError(
+                f"A rig file already exists for id {rig.id!r} ({path}); "
+                "pass overwrite=True to replace it."
+            ) from exc
+        logger.info("Saved rig %r to %s", rig.id, path)
+        load_rigs(directory)
+        return get_rig(rig.id)
 
 
 def update_component_slots(rig_id: str, role: str, slots: dict[int, str]) -> Rig:
@@ -368,7 +403,9 @@ def suggest_rig(connected_devices: Iterable[str]) -> list[RigSuggestion]:
     """
     connected = set(connected_devices)
     suggestions: list[RigSuggestion] = []
-    for rig in _rigs.values():
+    with _rigs_lock:
+        rigs = list(_rigs.values())
+    for rig in rigs:
         matched, missing = _match_devices(rig, connected)
         total = len(matched) + len(missing)
         score = len(matched) / total if total else None
