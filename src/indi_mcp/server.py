@@ -42,6 +42,7 @@ from indi_mcp.frame_store import FrameMetadata
 from indi_mcp.indi_driver import DriverInfo, DriverStatus
 from indi_mcp.indi_messaging import DeviceProperties, IndiEvent, MessagingStatus
 from indi_mcp.indi_server import INDI_PORT, IndiServerStatus
+from indi_mcp.issues import Issue, Severity
 from indi_mcp.observatory_store import (
     DraftLocationDeviceInfo,
     Observatory,
@@ -1130,13 +1131,44 @@ async def get_events(
 
 
 class FrameMetadataResponse(FrameMetadata):
-    """`FrameMetadata` plus `downloadUrl` — what `list_frames`/`get_frame_metadata` actually
-    return to a client (INDIMCP-89). `downloadUrl` is computed per response, not stored, since
-    it depends on the server's own current transport/host/port, not anything about the frame
-    itself — see `_frame_download_url`.
+    """`FrameMetadata` plus `downloadUrl`/`issues` — what `list_frames`/`get_frame_metadata`
+    actually return to a client (INDIMCP-89). `downloadUrl` is computed per response, not
+    stored, since it depends on the server's own current transport/host/port, not anything
+    about the frame itself — see `_frame_download_url`. `issues` surfaces conditions about this
+    particular frame's metadata the client should know about — currently only a missing
+    `checksumSha256` (INDIMCP-95 predates the frame), reported as a `frameChecksumMissing`
+    `WARNING` — reusing `issues.Issue` rather than inventing a second ad hoc warning shape.
+    Populated identically by both `list_frames` and `get_frame_metadata`, since both return
+    this same shape; see `_frame_issues`.
     """
 
     downloadUrl: str | None
+    issues: list[Issue]
+
+
+def _frame_issues(metadata: FrameMetadata) -> list[Issue]:
+    """`Issue`s about `metadata` itself, not about the request that fetched it.
+
+    `checksumSha256` is `None` only for a frame captured before checksum support existed
+    (INDIMCP-95) — see `FrameMetadata.checksumSha256`'s own docstring — so that's the one
+    condition worth flagging: `WARNING`, not `ERROR`/`FATAL`, since the frame itself is fine,
+    just not verifiable by hash.
+    """
+    if metadata["checksumSha256"] is not None:
+        return []
+    return [
+        {
+            "kind": "issue",
+            "severity": Severity.WARNING,
+            "code": "frameChecksumMissing",
+            "message": (
+                f"frame {metadata['frameId']!r} has no checksumSha256 — it was captured "
+                "before checksum support existed and cannot be integrity-checked"
+            ),
+            "role": None,
+            "device": metadata["device"],
+        }
+    ]
 
 
 def _frame_download_url(frame_id: str) -> str | None:
@@ -1154,8 +1186,12 @@ def _frame_download_url(frame_id: str) -> str | None:
     return f"http://{socket.gethostname()}:{mcp.settings.port}/frames/{quote(frame_id, safe='')}"
 
 
-def _with_download_url(metadata: FrameMetadata) -> FrameMetadataResponse:
-    return {**metadata, "downloadUrl": _frame_download_url(metadata["frameId"])}
+def _to_frame_response(metadata: FrameMetadata) -> FrameMetadataResponse:
+    return {
+        **metadata,
+        "downloadUrl": _frame_download_url(metadata["frameId"]),
+        "issues": _frame_issues(metadata),
+    }
 
 
 @mcp.tool()
@@ -1174,19 +1210,23 @@ async def list_frames(
     running `purge_transferred_frames`. Never returns a frame's on-disk
     path; each frame's `downloadUrl` is a `GET`-able HTTP URL for its raw
     bytes (INDIMCP-89), `None` if this server has no HTTP listener to
-    build one from (`stdio` transport).
+    build one from (`stdio` transport). See `FrameMetadataResponse` for
+    `issues`.
     """
     metadata = await asyncio.to_thread(
         frame_store.list_frames, run_id=run_id, device=device, since=since, transferred=transferred
     )
-    return [_with_download_url(m) for m in metadata]
+    return [_to_frame_response(m) for m in metadata]
 
 
 @mcp.tool()
 async def get_frame_metadata(frame_id: str) -> FrameMetadataResponse:
-    """Return the metadata for a single captured frame identified by `frame_id`."""
+    """Return the metadata for a single captured frame identified by `frame_id`.
+
+    See `FrameMetadataResponse` for `downloadUrl`/`issues`.
+    """
     metadata = await asyncio.to_thread(frame_store.get_frame_metadata, frame_id)
-    return _with_download_url(metadata)
+    return _to_frame_response(metadata)
 
 
 @mcp.tool()
