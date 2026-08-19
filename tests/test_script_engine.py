@@ -4845,6 +4845,38 @@ async def test_execute_script_capture_frame_aborts_exposure_on_wait_timeout(
     )
 
 
+async def test_execute_script_capture_frame_aborts_exposure_on_alert_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CCD_EXPOSURE going to Alert (a driver-reported hardware fault mid-exposure) is the
+    other ScriptExecutionError trigger _wait_for_property_state can raise, not just a
+    deadline timeout -- it must also abort the exposure (INDIMCP-92)."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 30,
+                "frameType": "Light",
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Alert")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+
+    with pytest.raises(script_engine.ScriptExecutionError):
+        await script_engine.execute_script("capture", "test-rig", {})
+
+    assert (
+        call("CCD Simulator", "CCD_ABORT_EXPOSURE", {"ABORT": "On"})
+        in send_property.await_args_list
+    )
+
+
 async def test_execute_script_capture_frame_timeout_propagates_even_if_abort_send_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
