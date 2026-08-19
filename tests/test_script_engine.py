@@ -4716,7 +4716,8 @@ async def test_execute_script_capture_frame_aborts_exposure_when_cancelled_mid_e
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """cancel_script's own cancellation must also stop the camera physically exposing
-    (INDIMCP-86), not just the MCP-side script/polling — see _abort_exposure_on_cancel."""
+    (INDIMCP-86), not just the MCP-side script/polling — see
+    _abort_exposure_on_failed_wait."""
     _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
     _script(
         "capture",
@@ -4809,6 +4810,71 @@ async def test_execute_script_capture_frame_cancel_propagates_even_if_abort_send
     with pytest.raises(script_engine.ScriptCancelled):
         await script_engine.execute_script("capture", "test-rig", {}, cancel_event=cancel_event)
     await canceller
+
+
+async def test_execute_script_capture_frame_aborts_exposure_on_wait_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CCD_EXPOSURE wait that times out (hung driver, flaky USB) must also stop the
+    camera physically exposing, the same gap INDIMCP-86 closed for cancellation --
+    see _abort_exposure_on_failed_wait (INDIMCP-92)."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 0.01,
+                "frameType": "Light",
+            }
+        ],
+    )
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Busy")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(script_engine, "_CAPTURE_READOUT_BUFFER_SECONDS", 0.01)
+
+    with pytest.raises(script_engine.ScriptExecutionError):
+        await script_engine.execute_script("capture", "test-rig", {})
+
+    assert (
+        call("CCD Simulator", "CCD_ABORT_EXPOSURE", {"ABORT": "On"})
+        in send_property.await_args_list
+    )
+
+
+async def test_execute_script_capture_frame_timeout_propagates_even_if_abort_send_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A camera whose driver doesn't define CCD_ABORT_EXPOSURE (send_property raises
+    ValueError) must not turn a timeout into something else -- ScriptExecutionError
+    still propagates, not the swallowed abort error."""
+    _rig(rig_store.Component(role="camera", id="cam-1", device="CCD Simulator"))
+    _script(
+        "capture",
+        steps=[
+            {
+                "step": "capture_frame",
+                "role": "camera",
+                "exposureSeconds": 0.01,
+                "frameType": "Light",
+            }
+        ],
+    )
+
+    async def failing_send_property(device: str, name: str, elements: dict[str, str]) -> None:
+        if name == "CCD_ABORT_EXPOSURE":
+            raise ValueError(f"Unknown property {name!r} on device {device!r}")
+
+    monkeypatch.setattr(indi_messaging, "send_property", failing_send_property)
+    monkeypatch.setattr(indi_messaging, "get_property_state", lambda device, name: "Busy")
+    monkeypatch.setattr(script_engine, "_WAIT_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(script_engine, "_CAPTURE_READOUT_BUFFER_SECONDS", 0.01)
+
+    with pytest.raises(script_engine.ScriptExecutionError):
+        await script_engine.execute_script("capture", "test-rig", {})
 
 
 async def test_execute_script_pausable_script_honors_pause_event(

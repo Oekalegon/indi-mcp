@@ -128,8 +128,9 @@ _CCD_ABORT_EXPOSURE_ELEMENT = "ABORT"
 """Standard INDI CCD property/element used to physically stop an in-progress exposure.
 
 Same convention `scripts/abort_exposure.yaml` (INDIMCP-86) sends as a standalone
-tool call; `_execute_capture_frame` also sends it itself when a script run is
-cancelled mid-exposure (INDIMCP-86) — see `_abort_exposure_on_cancel`.
+tool call; `_execute_capture_frame` also sends it itself when its `CCD_EXPOSURE`
+wait ends abnormally — cancelled (INDIMCP-86) or timed out (INDIMCP-92) — see
+`_abort_exposure_on_failed_wait`.
 """
 
 _FRAME_TYPE_ELEMENTS = {
@@ -1383,22 +1384,27 @@ async def _wait_for_property_state(
         await asyncio.sleep(_WAIT_POLL_INTERVAL_SECONDS)
 
 
-async def _abort_exposure_on_cancel(device: str) -> None:
-    """Best-effort: tell `device`'s driver to physically stop exposing after a cancellation.
+async def _abort_exposure_on_failed_wait(device: str) -> None:
+    """Best-effort: tell `device`'s driver to physically stop exposing after its `CCD_EXPOSURE`
+    wait ends abnormally.
 
-    Called only from `_execute_capture_frame`, when a script run is cancelled while its
-    `CCD_EXPOSURE` wait is still in flight (INDIMCP-86) — `cancel_script`'s own
-    `ScriptCancelled` only ever stops the MCP-side script/polling on its own (raised inside
-    `_wait_for_property_state`'s poll loop, see `_check_cancelled`); nothing else tells the
-    driver to stop, so without this the camera would keep physically exposing regardless of
-    the cancellation.
+    Called only from `_execute_capture_frame`, when its `CCD_EXPOSURE` wait raises before
+    the exposure actually finishes — either `ScriptCancelled` (a script run cancelled while
+    the wait is still in flight, INDIMCP-86) or `ScriptExecutionError` (the wait's own
+    deadline elapsed without `CCD_EXPOSURE` reaching `Ok` — a hung driver or flaky USB
+    connection, INDIMCP-92). Neither of those exceptions tells the driver anything on its
+    own (`ScriptCancelled` is raised inside `_wait_for_property_state`'s poll loop purely to
+    stop the MCP-side script/polling, see `_check_cancelled`; a timeout is just the same poll
+    loop giving up), so without this the camera would keep physically exposing regardless of
+    which one happened.
 
     Fire-and-forget rather than waiting for the driver to confirm (unlike
-    `scripts/abort_exposure.yaml`'s own standalone `wait_for`) — a cancellation should
-    return promptly, and a camera whose driver doesn't define `CCD_ABORT_EXPOSURE`
-    (`send_property` raises `ValueError`) or is slow/unresponsive to it must not turn a
-    clean cancellation into a stuck or failed one. Either case is logged and swallowed here,
-    not raised, so it never masks or delays the `ScriptCancelled` this is called to handle.
+    `scripts/abort_exposure.yaml`'s own standalone `wait_for`) — the caller needs to
+    propagate its own exception promptly, and a camera whose driver doesn't define
+    `CCD_ABORT_EXPOSURE` (`send_property` raises `ValueError`) or is slow/unresponsive to it
+    must not turn a clean cancellation or a timeout into a stuck one. Either case is logged
+    and swallowed here, not raised, so it never masks or delays the exception this is called
+    to handle.
     """
     try:
         await indi_messaging.send_property(
@@ -1406,7 +1412,7 @@ async def _abort_exposure_on_cancel(device: str) -> None:
         )
     except Exception:
         logger.warning(
-            "Failed to send %s to %s after cancelling its in-progress exposure",
+            "Failed to send %s to %s after its exposure wait ended abnormally",
             _CCD_ABORT_EXPOSURE_VECTOR,
             device,
             exc_info=True,
@@ -1555,11 +1561,11 @@ async def _execute_capture_frame(
             indi_messaging.PropertyState.OK,
             deadline - asyncio.get_running_loop().time(),
         )
-    except ScriptCancelled:
+    except (ScriptCancelled, ScriptExecutionError):
         # Only here, not around _wait_for_blob below: by the time CCD_EXPOSURE reaches Ok,
-        # the camera has already finished physically exposing, so a cancellation from that
-        # point on has nothing left to abort.
-        await _abort_exposure_on_cancel(device)
+        # the camera has already finished physically exposing, so a cancellation or timeout
+        # from that point on has nothing left to abort.
+        await _abort_exposure_on_failed_wait(device)
         raise
     data, extension = await _wait_for_blob(
         ctx, device, _CCD_BLOB_VECTOR, since, deadline - asyncio.get_running_loop().time()
