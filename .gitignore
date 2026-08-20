@@ -36,6 +36,10 @@ storage/
 # Observatory location definitions (save_observatory) — runtime data, not versioned
 /observatories/
 
+# Sphinx documentation (generated)
+docs/sphinx/_build/
+docs/sphinx/api/
+
 # Editors / OS
 .vscode/
 .idea/
