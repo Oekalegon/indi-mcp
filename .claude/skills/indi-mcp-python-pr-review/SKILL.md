@@ -228,6 +228,98 @@ Flag any violation of these as `[MINOR]` at minimum, `[DESIGN]` if it affects a 
 - One module per cohesive concern (e.g. don't mix INDI server-management tools and scripting-
   engine logic in the same file as the codebase grows)
 
+### Documentation (Sphinx / Docstrings)
+Every public symbol in `src/indi_mcp` — module-level functions, classes, methods, and MCP tool
+handlers not prefixed with `_` — needs a **complete Google-style docstring** (the project uses
+`napoleon`, configured in `docs/sphinx/conf.py`), not just a one-line summary. This applies with
+extra weight to MCP tool wrappers and any function on a device-command path, since callers can't
+safely use them without reading the implementation otherwise. Flag a missing summary/description
+as `[MINOR]`, and missing `Args`/`Returns`/`Raises` on a non-trivial hardware/protocol-facing
+function as `[DESIGN]`.
+
+A complete docstring includes, as applicable:
+- A one-line summary, optionally followed by a longer discussion paragraph.
+- `Args:` for every parameter — units, valid ranges, and any device-state precondition (e.g.
+  "camera must be connected before calling").
+- `Returns:` describing the returned value, including what an edge case means (e.g. `None`, an
+  empty list, or a boundary value).
+- `Raises:` naming which exceptions can propagate and under what conditions — critical on device
+  command paths where the caller needs to distinguish a transport failure from a rejected/unsafe
+  hardware command.
+- A `Note:`/`Warning:` callout (Sphinx admonition, renders via napoleon) for any safety-relevant
+  side effect (e.g. a slew that begins immediately without confirmation, a cooler command that
+  changes physical device state).
+
+Example of a complete docstring to hold PRs to:
+```python
+async def slew(ra_hours: float, dec_degrees: float) -> MountPosition:
+    """Slew the mount to the given equatorial coordinates.
+
+    The mount must be connected and unparked before calling this function;
+    call :func:`unpark` first if needed.
+
+    Args:
+        ra_hours: Target right ascension, in hours (0..<24).
+        dec_degrees: Target declination, in degrees (-90..90).
+
+    Returns:
+        The confirmed mount position once the slew completes.
+
+    Raises:
+        MountNotConnectedError: If the mount isn't connected.
+        MountParkedError: If the mount is still parked.
+        IndiCommandError: If the INDI server rejects or fails to confirm the command.
+
+    Warning:
+        This begins physical mount motion immediately; there is no
+        confirmation step before the slew starts.
+    """
+```
+
+Don't require this completeness on private (`_`-prefixed) functions, test code, or trivial
+one-line helpers — focus review effort on the public surface MCP clients and other modules rely
+on.
+
+### Documentation Staleness
+The check above only catches *missing* documentation on code the PR touches. Separately check
+whether the PR makes **existing** documentation wrong — a PR can be perfectly documented at every
+line it changes and still leave a stale docstring, Sphinx guide, or README section describing
+behavior that no longer exists once you look outside the diff.
+
+- **Changed public signature, unchanged callers of it in prose.** If the PR renames a public
+  symbol, adds/removes/reorders a parameter, or changes a return/raised-exception type, grep
+  `docs/sphinx/guides/`, `docs/*.md`, and `README.md` for the old name or a cross-reference role
+  using the old signature (e.g. `` :func:`old_name` ``). A match is a broken link or a wrong code
+  sample — flag as `[DESIGN]` (`[BLOCKER]` if the stale content would actively mislead a caller
+  about a safety-relevant precondition, e.g. a guide still claiming a script step is synchronous
+  after it became fire-and-forget).
+- **Changed behavior, unchanged description of it.** A signature can stay identical while the PR
+  changes what a call *does* — a new fallback path, a changed default, a caveat that no longer
+  applies, a precondition that's now enforced instead of assumed. If a docstring, guide, or
+  `docs/Design.md` specifically describes the old behavior, it needs updating in the same PR.
+  This is easy to miss because nothing about it shows up as "missing documentation" — the
+  docstring is still there, it's just now incorrect. Flag `[DESIGN]`.
+- **New capability that supersedes an existing "doesn't do X" statement.** If a PR adds something
+  `docs/Design.md`, a guide, or the README explicitly said wasn't supported/didn't exist yet,
+  that statement is now stale and needs removing or updating. Flag `[DESIGN]`.
+- **New public symbol added but never linked from anywhere in the docs.** A docstring satisfies
+  the completeness check above and will still be picked up automatically by `sphinx-autoapi`
+  (it walks `src/indi_mcp` and needs no manual registration), but it can still be effectively
+  unreachable to a reader browsing by topic if it's never referenced from `docs/sphinx/index.md`
+  or a guide's prose. This isn't a hard requirement for every new symbol (a single new parameter
+  on an already-covered function doesn't need its own guide mention), but a new MCP tool or a new
+  top-level workflow should be discoverable from at least one guide or the landing page, not only
+  reachable by already knowing its exact name. Flag as `[MINOR]`.
+- **Mechanical check, when available**: run `uv run sphinx-build -b html docs/sphinx
+  docs/sphinx/_build/html` on files the PR touches (or added) documentation for — a new warning
+  (broken cross-reference, malformed docstring field) is real signal, since `sphinx-autoapi`
+  reflects the docstring content verbatim. Treat any new warning introduced by the PR as at least
+  `[MINOR]`; a warning that makes a public function's documentation unreadable/unresolved is
+  `[DESIGN]`.
+
+Staleness review only needs to cover documentation that *describes* something the PR changed —
+don't go hunting for unrelated pre-existing staleness in every review.
+
 ---
 
 ## Checklist (run mentally for every PR)
@@ -249,6 +341,12 @@ Flag any violation of these as `[MINOR]` at minimum, `[DESIGN]` if it affects a 
 - [ ] `ruff check .`, `ruff format --check .`, `ty check .`, `pytest` all pass
 - [ ] Feature branches target `develop`, not `main`
 - [ ] Non-trivial new logic has a corresponding `pytest` test
+- [ ] Public functions/classes/methods have complete Google-style docstrings — summary plus
+      `Args`, `Returns`, and `Raises` where applicable
+- [ ] No stale documentation left behind — a changed public signature/behavior doesn't leave an
+      outdated cross-reference, code sample, or README/guide/`docs/Design.md` description of the
+      old shape; any new capability the PR adds is discoverable from a Sphinx guide, not only its
+      own docstring
 
 ---
 
