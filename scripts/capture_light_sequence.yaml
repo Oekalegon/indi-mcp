@@ -17,6 +17,10 @@ description: >
   `run_script: focus every: 2` loop (autofocus is INDIMCP-43). Pausable:
   capture_frame is the only step inside the repeat loop, so a pause request
   only ever lands between frames, never mid-exposure.
+
+  gain/offset (INDIMCP-109) are optional, same "omit to leave the device's
+  current setting alone" convention as capture_flat_sequence's gain/offset
+  (INDIMCP-103).
 pausable: true
 parameters:
   ra:
@@ -54,6 +58,19 @@ parameters:
     type: integer
     required: true
     description: Number of light frames to capture.
+  gain:
+    type: number
+    required: false
+    description: >
+      Sensor gain to hold for every frame in this sequence. Omit to leave
+      the device's current setting alone.
+  offset:
+    type: number
+    required: false
+    description: >
+      Sensor offset to hold for every frame in this sequence. Omit to leave
+      the device's current setting alone, same "normally omitted" convention
+      as gain.
 steps:
   - step: run_script
     script: cool_camera
@@ -78,3 +95,5 @@ steps:
         exposureSeconds: "{{ exposureSeconds }}"
         frameType: Light
         objectName: "{{ objectName }}"
+        gain: "{{ gain }}"
+        offset: "{{ offset }}"

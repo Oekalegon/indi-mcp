@@ -454,6 +454,8 @@ def test_builtin_capture_light_sequence_composes_cool_slew_filter_focus_and_repe
         "targetTempC",
         "exposureSeconds",
         "count",
+        "gain",
+        "offset",
     }
     assert lights.parameters["ra"].required is True
     assert lights.parameters["dec"].required is True
@@ -464,6 +466,8 @@ def test_builtin_capture_light_sequence_composes_cool_slew_filter_focus_and_repe
     assert lights.parameters["targetTempC"].default == -10
     assert lights.parameters["exposureSeconds"].required is True
     assert lights.parameters["count"].required is True
+    assert lights.parameters["gain"].required is False
+    assert lights.parameters["offset"].required is False
     assert len(lights.steps) == 5
     cool_step, slew_step, filter_step, focus_step, repeat_step = lights.steps
     assert isinstance(cool_step, script_store.RunScriptStep)
@@ -490,6 +494,8 @@ def test_builtin_capture_light_sequence_composes_cool_slew_filter_focus_and_repe
     assert capture_step.exposureSeconds == "{{ exposureSeconds }}"
     assert capture_step.frameType == "Light"
     assert capture_step.objectName == "{{ objectName }}"
+    assert capture_step.gain == "{{ gain }}"
+    assert capture_step.offset == "{{ offset }}"
 
 
 def test_builtin_capture_flat_sequence_skips_mount_and_cooling() -> None:
