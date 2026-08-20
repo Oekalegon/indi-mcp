@@ -10,6 +10,11 @@ description: >
   exposureSeconds) needs to match the light frames it will calibrate.
   Pausable: capture_frame is the only step inside the repeat loop, so a
   pause request only ever lands between frames, never mid-exposure.
+
+  gain/offset (INDIMCP-110) are optional, same "omit to leave the device's
+  current setting alone" convention as capture_flat_sequence's gain/offset
+  (INDIMCP-103) — a dark frame's gain/offset must match the light frames
+  it calibrates.
 pausable: true
 parameters:
   targetTempC:
@@ -25,6 +30,21 @@ parameters:
     type: integer
     required: true
     description: Number of dark frames to capture.
+  gain:
+    type: number
+    required: false
+    description: >
+      Sensor gain to hold for every frame in this sequence — normally
+      matching the light frames this calibrates. Omit to leave the
+      device's current setting alone.
+  offset:
+    type: number
+    required: false
+    description: >
+      Sensor offset to hold for every frame in this sequence — normally
+      matching the light frames this calibrates. Omit to leave the
+      device's current setting alone, same "normally omitted" convention
+      as gain.
 steps:
   - step: run_script
     script: cool_camera
@@ -36,3 +56,5 @@ steps:
         role: camera
         exposureSeconds: "{{ exposureSeconds }}"
         frameType: Dark
+        gain: "{{ gain }}"
+        offset: "{{ offset }}"

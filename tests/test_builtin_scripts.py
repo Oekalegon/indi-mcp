@@ -535,10 +535,12 @@ def test_builtin_capture_dark_sequence_skips_mount_filter_and_focus() -> None:
     darks = script_store.get_script("capture_dark_sequence")
 
     assert darks.pausable is True
-    assert set(darks.parameters) == {"targetTempC", "exposureSeconds", "count"}
+    assert set(darks.parameters) == {"targetTempC", "exposureSeconds", "count", "gain", "offset"}
     assert darks.parameters["targetTempC"].default == -10
     assert darks.parameters["exposureSeconds"].required is True
     assert darks.parameters["count"].required is True
+    assert darks.parameters["gain"].required is False
+    assert darks.parameters["offset"].required is False
     assert len(darks.steps) == 2
     cool_step, repeat_step = darks.steps
     assert isinstance(cool_step, script_store.RunScriptStep)
@@ -548,6 +550,8 @@ def test_builtin_capture_dark_sequence_skips_mount_filter_and_focus() -> None:
     capture_step = repeat_step.steps[0]
     assert isinstance(capture_step, script_store.CaptureFrameStep)
     assert capture_step.frameType == "Dark"
+    assert capture_step.gain == "{{ gain }}"
+    assert capture_step.offset == "{{ offset }}"
 
 
 def test_builtin_capture_bias_sequence_has_no_setup_steps() -> None:
