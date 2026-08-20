@@ -1,12 +1,13 @@
 """Sphinx configuration for the indi-mcp documentation."""
 
 import sys
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 project = "indi-mcp"
-copyright = "2026, Don Willems"
+copyright = f"{date.today().year}, Don Willems"
 author = "Don Willems"
 
 extensions = [
@@ -22,7 +23,6 @@ source_suffix = {
     ".md": "markdown",
 }
 
-templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 # -- AutoAPI (Python API extraction, DocC-style) ----------------------------

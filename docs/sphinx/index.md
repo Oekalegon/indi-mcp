@@ -12,4 +12,4 @@ guides/getting-started
 
 ## API Reference
 
-The full API reference, generated from source, is under [`api/`](api/index).
+The full API reference, generated from source, is under {doc}`api/index`.
