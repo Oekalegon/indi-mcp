@@ -560,10 +560,12 @@ def test_builtin_capture_bias_sequence_has_no_setup_steps() -> None:
     bias = script_store.get_script("capture_bias_sequence")
 
     assert bias.pausable is True
-    assert set(bias.parameters) == {"exposureSeconds", "count"}
+    assert set(bias.parameters) == {"exposureSeconds", "count", "gain", "offset"}
     assert bias.parameters["exposureSeconds"].required is False
     assert bias.parameters["exposureSeconds"].default == 0.0
     assert bias.parameters["count"].required is True
+    assert bias.parameters["gain"].required is False
+    assert bias.parameters["offset"].required is False
     assert len(bias.steps) == 1
     repeat_step = bias.steps[0]
     assert isinstance(repeat_step, script_store.RepeatStep)
@@ -572,6 +574,8 @@ def test_builtin_capture_bias_sequence_has_no_setup_steps() -> None:
     assert isinstance(capture_step, script_store.CaptureFrameStep)
     assert capture_step.role == "camera"
     assert capture_step.frameType == "Bias"
+    assert capture_step.gain == "{{ gain }}"
+    assert capture_step.offset == "{{ offset }}"
 
 
 def test_builtin_capture_sensor_calibration_set_captures_bias_and_flat_dark_only() -> None:

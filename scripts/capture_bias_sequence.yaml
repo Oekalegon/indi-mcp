@@ -9,6 +9,11 @@ description: >
   this script has no setup steps at all. Pausable: capture_frame is the
   only step inside the repeat loop, so a pause request only ever lands
   between frames, never mid-exposure.
+
+  gain/offset (INDIMCP-111) are optional, same "omit to leave the device's
+  current setting alone" convention as capture_flat_sequence's gain/offset
+  (INDIMCP-103) — a bias frame's gain/offset must match the light frames
+  it calibrates.
 pausable: true
 parameters:
   exposureSeconds:
@@ -20,6 +25,21 @@ parameters:
     type: integer
     required: true
     description: Number of bias frames to capture.
+  gain:
+    type: number
+    required: false
+    description: >
+      Sensor gain to hold for every frame in this sequence — normally
+      matching the light frames this calibrates. Omit to leave the
+      device's current setting alone.
+  offset:
+    type: number
+    required: false
+    description: >
+      Sensor offset to hold for every frame in this sequence — normally
+      matching the light frames this calibrates. Omit to leave the
+      device's current setting alone, same "normally omitted" convention
+      as gain.
 steps:
   - step: repeat
     count: "{{ count }}"
@@ -28,3 +48,5 @@ steps:
         role: camera
         exposureSeconds: "{{ exposureSeconds }}"
         frameType: Bias
+        gain: "{{ gain }}"
+        offset: "{{ offset }}"
