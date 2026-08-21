@@ -130,7 +130,7 @@ MCP tool parameters are ordinary typed Python/pydantic inputs, not bound by
 layer](Design.md#architecture-overview): "a script is then just declarative data, not
 executable code, it can safely be authored on the controlling computer and uploaded to the MCP
 server to run"). A server-side tool's own implementation was never part of that constraint —
-`save_script`'s validation, cycle detection, etc. are exactly the safety mechanism that only
+`configuration`'s `action="save"` validation, cycle detection, etc. are exactly the safety mechanism that only
 applies to *script* content; a fixed, non-uploadable Python function driving `list[float]`
 inputs doesn't touch it at all.
 

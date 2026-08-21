@@ -28,7 +28,7 @@ Two tools are merged into one parameterized tool only when they are the **same o
 | `list_indi_drivers` | `list_indi_driver_catalog`, `list_running_indi_drivers` | `(scope: "catalog"\|"running")` |
 | `indi_property` | `get_device_properties`, `send_indi_property` | `(action: "get"\|"set", device: str, name?: str, elements?: dict[str, str])` |
 
-### Configuration entities — rig / observatory / script (was 16 tools → 4)
+### Configuration entities — rig / observatory / script (was 16 tools → 4) — implemented (INDIMCP-115)
 
 Generic CRUD collapses across entity kinds:
 

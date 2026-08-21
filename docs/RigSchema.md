@@ -100,7 +100,7 @@ components:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `id` | string | yes | Stable identifier for this rig. Used by scripts and MCP tools (`get_rig`, and eventually rig-aware script parameters) to reference it. Must be unique across all rig files; if two files declare the same `id`, the one loaded first (files are read in sorted filename order) wins and the other is skipped. |
+| `id` | string | yes | Stable identifier for this rig. Used by scripts and MCP tools (`configuration`'s `action="get"`, and eventually rig-aware script parameters) to reference it. Must be unique across all rig files; if two files declare the same `id`, the one loaded first (files are read in sorted filename order) wins and the other is skipped. |
 | `name` | string | yes | Human-readable display name. |
 | `components` | list of objects | yes (may be empty) | The rig's equipment. See below. |
 
@@ -133,7 +133,7 @@ to make this reference easier to read — again, not a grouping that exists in t
 | `apertureMm` | number | `telescope` | Aperture, in millimeters. |
 | `focalLengthMm` | number | `telescope` | Focal length, in millimeters. |
 | `minPosition` / `maxPosition` | integer | `focuser` | The focuser's travel range, in its native position units. |
-| `slots` | map of integer → string | `filterWheel` | Filter name per slot position (1-indexed, matching the filter wheel's own numbering). Omit or leave incomplete for slots that aren't in use or aren't yet decided. If left empty and the driver's own live `FILTER_NAME` isn't, `select_filter` adopts the driver's names onto this field automatically (`docs/ScriptSchema.md`'s `select_filter` step, INDIMCP-64) — otherwise, a `slots` map that disagrees with the driver's `FILTER_NAME` (slot count or names) fails `select_filter` outright rather than picking a side; resolve it explicitly via the `sync_filter_names` MCP tool/script step (push this rig's `slots` onto the driver) or `adopt_filter_names_from_driver` (copy the driver's `FILTER_NAME` onto this field instead). |
+| `slots` | map of integer → string | `filterWheel` | Filter name per slot position (1-indexed, matching the filter wheel's own numbering). Omit or leave incomplete for slots that aren't in use or aren't yet decided. If left empty and the driver's own live `FILTER_NAME` isn't, `select_filter` adopts the driver's names onto this field automatically (`docs/ScriptSchema.md`'s `select_filter` step, INDIMCP-64) — otherwise, a `slots` map that disagrees with the driver's `FILTER_NAME` (slot count or names) fails `select_filter` outright rather than picking a side; resolve it explicitly via `rig_diagnostics`'s `action="sync"` with `direction="to_driver"` (push this rig's `slots` onto the driver) or `direction="from_driver"` (copy the driver's `FILTER_NAME` onto this field instead) — or the equivalent `sync_filter_names`/`adopt_filter_names_from_driver` script steps directly. |
 | `cooled` | boolean | `camera` | Whether the camera has active sensor cooling. |
 | `pixelsX` / `pixelsY` | integer | `camera` | Sensor resolution. |
 | `pixelSizeMicron` | number | `camera` | Pixel pitch, in microns. |
@@ -162,7 +162,7 @@ has a motorized guide focuser or similar.
   has no way to confirm `apertureMm`/`focalLengthMm`, or which camera is the imaging vs.
   guiding one, so those parts of the rig can only come from the YAML.
 * **No silent auto-selection.** The server never guesses which rig is physically mounted.
-  `suggest_rig` proposes a likely match by cross-referencing connected device names against
+  `rig_diagnostics`'s `action="suggest"` proposes a likely match by cross-referencing connected device names against
   configured rigs, but the operator (or client) explicitly selects the active rig; scripts and
   tool calls reference a rig by `id`.
 * **Unknown top-level fields are rejected**, not ignored, so a typo'd or outdated field name

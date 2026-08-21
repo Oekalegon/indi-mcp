@@ -368,7 +368,7 @@ async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family
 
     monkeypatch.setattr(rig_store, "draft_rig", fake_draft_rig)
 
-    result = await server.draft_rig()
+    result = await server.configuration("draft", "rig")
 
     assert result == {"kind": "rigDraft", "components": [], "notes": []}
     # Only cameras get CCD_INFO, only filter wheels get FILTER_NAME, only focusers get a range.
@@ -403,7 +403,7 @@ async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family
     assert by_name["Unknown Device"]["focusRange"] is None
 
 
-async def test_save_rig_delegates_to_rig_store_with_the_overwrite_flag(
+async def test_configuration_save_rig_delegates_to_rig_store_with_the_overwrite_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(id="minimal", name="Minimal rig", components=[])
@@ -415,13 +415,189 @@ async def test_save_rig_delegates_to_rig_store_with_the_overwrite_flag(
 
     monkeypatch.setattr(rig_store, "save_rig", fake_save_rig)
 
-    result = await server.save_rig(rig, overwrite=True)
+    result = await server.configuration(
+        "save", "rig", config=rig.model_dump(mode="json"), overwrite=True
+    )
 
     assert result == rig
     assert calls == [(rig, True)]
 
 
-async def test_sync_filter_names_delegates_to_script_engine_with_resolved_device(
+async def test_configuration_get_rejects_config_id_missing() -> None:
+    with pytest.raises(ValueError, match="requires config_id"):
+        await server.configuration("get", "rig")
+
+
+async def test_configuration_get_rejects_config_and_overwrite() -> None:
+    with pytest.raises(ValueError, match="only valid with"):
+        await server.configuration("get", "rig", config_id="minimal", config={})
+
+
+async def test_configuration_save_rejects_config_id() -> None:
+    with pytest.raises(ValueError, match="config_id is not valid"):
+        await server.configuration("save", "rig", config_id="minimal", config={})
+
+
+async def test_configuration_save_requires_config() -> None:
+    with pytest.raises(ValueError, match="requires config"):
+        await server.configuration("save", "rig")
+
+
+async def test_configuration_draft_rejects_config_id_config_or_overwrite() -> None:
+    with pytest.raises(ValueError, match="not valid with"):
+        await server.configuration("draft", "rig", config_id="minimal")
+
+
+async def test_configuration_draft_rejects_kind_script() -> None:
+    with pytest.raises(ValueError, match='not supported for kind="script"'):
+        await server.configuration("draft", "script")
+
+
+async def test_configuration_get_rig_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = rig_store.Rig(id="minimal", name="Minimal rig", components=[])
+    monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
+
+    result = await server.configuration("get", "rig", config_id="minimal")
+
+    assert result == rig
+
+
+async def test_configuration_get_observatory_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    observatory = observatory_store.Observatory(
+        id="minimal", name="Minimal site", latitudeDeg=0, longitudeDeg=0
+    )
+    monkeypatch.setattr(observatory_store, "get_observatory", lambda observatory_id: observatory)
+
+    result = await server.configuration("get", "observatory", config_id="minimal")
+
+    assert result == observatory
+
+
+async def test_configuration_get_script_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    script = script_store.Script(
+        id="minimal",
+        name="Minimal script",
+        description="d",
+        steps=[],
+        parameters={},
+        pausable=False,
+    )
+    monkeypatch.setattr(script_store, "get_script", lambda script_id: script)
+
+    result = await server.configuration("get", "script", config_id="minimal")
+
+    assert result == script
+
+
+async def test_configuration_save_observatory_delegates_with_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observatory = observatory_store.Observatory(
+        id="minimal", name="Minimal site", latitudeDeg=0, longitudeDeg=0
+    )
+    calls: list[tuple[observatory_store.Observatory, bool]] = []
+
+    def fake_save_observatory(
+        observatory: observatory_store.Observatory, *, overwrite: bool = False
+    ) -> observatory_store.Observatory:
+        calls.append((observatory, overwrite))
+        return observatory
+
+    monkeypatch.setattr(observatory_store, "save_observatory", fake_save_observatory)
+
+    result = await server.configuration(
+        "save", "observatory", config=observatory.model_dump(mode="json"), overwrite=True
+    )
+
+    assert result == observatory
+    assert calls == [(observatory, True)]
+
+
+async def test_configuration_save_script_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    script = script_store.Script(
+        id="minimal",
+        name="Minimal script",
+        description="d",
+        steps=[],
+        parameters={},
+        pausable=False,
+    )
+    calls: list[tuple[script_store.Script, bool]] = []
+
+    def fake_save_script(
+        script: script_store.Script, *, overwrite: bool = False
+    ) -> script_store.Script:
+        calls.append((script, overwrite))
+        return script
+
+    monkeypatch.setattr(script_store, "save_script", fake_save_script)
+
+    result = await server.configuration("save", "script", config=script.model_dump(mode="json"))
+
+    assert result == script
+    assert calls == [(script, False)]
+
+
+async def test_list_config_rig_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rig_store, "list_rigs", lambda: [{"id": "minimal", "name": "Minimal"}])
+
+    assert server.list_config("rig") == [{"id": "minimal", "name": "Minimal"}]
+
+
+async def test_list_config_observatory_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        observatory_store, "list_observatories", lambda: [{"id": "home", "name": "Home"}]
+    )
+
+    assert server.list_config("observatory") == [{"id": "home", "name": "Home"}]
+
+
+async def test_list_config_script_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        script_store, "list_scripts", lambda: [{"id": "park", "name": "Park", "description": "d"}]
+    )
+
+    assert server.list_config("script") == [{"id": "park", "name": "Park", "description": "d"}]
+
+
+async def test_rig_diagnostics_suggest_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(indi_messaging, "list_devices", lambda: ["CCD Simulator"])
+    monkeypatch.setattr(
+        rig_store, "suggest_rig", lambda devices: [{"rigId": "minimal", "score": 1.0}]
+    )
+
+    result = await server.rig_diagnostics("suggest")
+
+    assert result == [{"rigId": "minimal", "score": 1.0}]
+
+
+async def test_rig_diagnostics_suggest_rejects_rig_id_role_or_direction() -> None:
+    with pytest.raises(ValueError, match="not valid with"):
+        await server.rig_diagnostics("suggest", rig_id="minimal")
+
+
+async def test_rig_diagnostics_check_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(indi_messaging, "list_devices", lambda: ["CCD Simulator"])
+    monkeypatch.setattr(
+        rig_store, "check_rig", lambda rig_id, devices: {"kind": "rigCheck", "ok": True}
+    )
+
+    result = await server.rig_diagnostics("check", rig_id="minimal")
+
+    assert result == {"kind": "rigCheck", "ok": True}
+
+
+async def test_rig_diagnostics_check_rejects_role_or_direction() -> None:
+    with pytest.raises(ValueError, match='only valid with action="sync"'):
+        await server.rig_diagnostics("check", rig_id="minimal", role="filterWheel")
+
+
+async def test_rig_diagnostics_requires_rig_id_for_check_and_sync() -> None:
+    with pytest.raises(ValueError, match="requires rig_id"):
+        await server.rig_diagnostics("check")
+
+
+async def test_rig_diagnostics_sync_to_driver_delegates_to_script_engine_with_resolved_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(
@@ -448,7 +624,9 @@ async def test_sync_filter_names_delegates_to_script_engine_with_resolved_device
 
     monkeypatch.setattr(script_engine, "sync_filter_names", fake_sync_filter_names)
 
-    result = await server.sync_filter_names("test-rig", "filterWheel")
+    result = await server.rig_diagnostics(
+        "sync", rig_id="test-rig", role="filterWheel", direction="to_driver"
+    )
 
     assert calls == [("filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"})]
     assert result == {
@@ -458,17 +636,19 @@ async def test_sync_filter_names_delegates_to_script_engine_with_resolved_device
     }
 
 
-async def test_sync_filter_names_raises_when_role_has_no_connected_device(
+async def test_rig_diagnostics_sync_raises_when_role_has_no_connected_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
     monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
 
     with pytest.raises(ValueError, match="expected exactly one"):
-        await server.sync_filter_names("test-rig", "filterWheel")
+        await server.rig_diagnostics(
+            "sync", rig_id="test-rig", role="filterWheel", direction="to_driver"
+        )
 
 
-async def test_sync_filter_names_raises_when_role_matches_more_than_one_component(
+async def test_rig_diagnostics_sync_raises_when_role_matches_more_than_one_component(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(
@@ -482,10 +662,12 @@ async def test_sync_filter_names_raises_when_role_matches_more_than_one_componen
     monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
 
     with pytest.raises(ValueError, match="expected exactly one"):
-        await server.sync_filter_names("test-rig", "filterWheel")
+        await server.rig_diagnostics(
+            "sync", rig_id="test-rig", role="filterWheel", direction="to_driver"
+        )
 
 
-async def test_adopt_filter_names_from_driver_delegates_to_script_engine_with_resolved_device(
+async def test_rig_diagnostics_sync_from_driver_delegates_to_script_engine_with_resolved_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(
@@ -514,7 +696,9 @@ async def test_adopt_filter_names_from_driver_delegates_to_script_engine_with_re
         script_engine, "adopt_filter_names_from_driver", fake_adopt_filter_names_from_driver
     )
 
-    result = await server.adopt_filter_names_from_driver("test-rig", "filterWheel")
+    result = await server.rig_diagnostics(
+        "sync", rig_id="test-rig", role="filterWheel", direction="from_driver"
+    )
 
     assert calls == [
         ("test-rig", "filterWheel", "Filter Wheel Simulator", {1: "Luminance", 2: "Red"})
@@ -526,17 +710,19 @@ async def test_adopt_filter_names_from_driver_delegates_to_script_engine_with_re
     }
 
 
-async def test_adopt_filter_names_from_driver_raises_when_role_has_no_connected_device(
+async def test_rig_diagnostics_sync_from_driver_raises_when_role_has_no_connected_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
     monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
 
     with pytest.raises(ValueError, match="expected exactly one"):
-        await server.adopt_filter_names_from_driver("test-rig", "filterWheel")
+        await server.rig_diagnostics(
+            "sync", rig_id="test-rig", role="filterWheel", direction="from_driver"
+        )
 
 
-async def test_adopt_filter_names_from_driver_raises_when_role_matches_more_than_one_component(
+async def test_rig_diagnostics_sync_from_driver_raises_when_role_matches_more_than_one_component(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(
@@ -550,29 +736,14 @@ async def test_adopt_filter_names_from_driver_raises_when_role_matches_more_than
     monkeypatch.setattr(rig_store, "get_rig", lambda rig_id: rig)
 
     with pytest.raises(ValueError, match="expected exactly one"):
-        await server.adopt_filter_names_from_driver("test-rig", "filterWheel")
+        await server.rig_diagnostics(
+            "sync", rig_id="test-rig", role="filterWheel", direction="from_driver"
+        )
 
 
-async def test_save_observatory_delegates_to_observatory_store_with_the_overwrite_flag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    observatory = observatory_store.Observatory(
-        id="minimal", name="Minimal site", latitudeDeg=0, longitudeDeg=0
-    )
-    calls: list[tuple[observatory_store.Observatory, bool]] = []
-
-    def fake_save_observatory(
-        observatory: observatory_store.Observatory, *, overwrite: bool = False
-    ) -> observatory_store.Observatory:
-        calls.append((observatory, overwrite))
-        return observatory
-
-    monkeypatch.setattr(observatory_store, "save_observatory", fake_save_observatory)
-
-    result = await server.save_observatory(observatory, overwrite=True)
-
-    assert result == observatory
-    assert calls == [(observatory, True)]
+async def test_rig_diagnostics_sync_requires_role_and_direction() -> None:
+    with pytest.raises(ValueError, match="requires both role and direction"):
+        await server.rig_diagnostics("sync", rig_id="test-rig")
 
 
 async def test_draft_observatory_only_fetches_state_for_devices_reporting_the_coord(
@@ -620,7 +791,7 @@ async def test_draft_observatory_only_fetches_state_for_devices_reporting_the_co
 
     monkeypatch.setattr(observatory_store, "draft_observatory", fake_draft_observatory)
 
-    result = await server.draft_observatory()
+    result = await server.configuration("draft", "observatory")
 
     assert result["kind"] == "observatoryDraft"
     # GEOGRAPHIC_COORD is queried for every device; state is only queried when it's present.
