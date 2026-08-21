@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import pydantic
 import pytest
 from mcp.server.lowlevel.server import NotificationOptions, request_ctx
 from mcp.shared.context import RequestContext
@@ -443,6 +444,21 @@ async def test_configuration_save_requires_config() -> None:
         await server.configuration("save", "rig")
 
 
+async def test_configuration_save_rejects_malformed_rig_config() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        await server.configuration("save", "rig", config={"not": "a valid rig"})
+
+
+async def test_configuration_save_rejects_malformed_observatory_config() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        await server.configuration("save", "observatory", config={"not": "a valid observatory"})
+
+
+async def test_configuration_save_rejects_malformed_script_config() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        await server.configuration("save", "script", config={"not": "a valid script"})
+
+
 async def test_configuration_draft_rejects_config_id_config_or_overwrite() -> None:
     with pytest.raises(ValueError, match="not valid with"):
         await server.configuration("draft", "rig", config_id="minimal")
@@ -744,6 +760,11 @@ async def test_rig_diagnostics_sync_from_driver_raises_when_role_matches_more_th
 async def test_rig_diagnostics_sync_requires_role_and_direction() -> None:
     with pytest.raises(ValueError, match="requires both role and direction"):
         await server.rig_diagnostics("sync", rig_id="test-rig")
+
+
+async def test_rig_diagnostics_sync_requires_direction_when_role_given() -> None:
+    with pytest.raises(ValueError, match="requires both role and direction"):
+        await server.rig_diagnostics("sync", rig_id="test-rig", role="filterWheel")
 
 
 async def test_draft_observatory_only_fetches_state_for_devices_reporting_the_coord(
