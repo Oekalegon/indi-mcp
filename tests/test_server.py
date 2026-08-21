@@ -320,6 +320,11 @@ async def test_indi_property_set_requires_name_and_elements() -> None:
         await server.indi_property("set", "CCD Simulator", name="CONNECTION")
 
 
+async def test_indi_property_set_requires_name_and_elements_missing_name() -> None:
+    with pytest.raises(ValueError, match="requires both name and elements"):
+        await server.indi_property("set", "CCD Simulator", elements={"CONNECT": "On"})
+
+
 async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
