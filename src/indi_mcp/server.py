@@ -796,12 +796,12 @@ trade-off) but still real script parameters with real defaults once resolved —
 the_scripts_own_parameters` checks those resolve to.
 """
 
-_CAMERA_ACTION_RESOLVED_DEFAULTS: dict[str, Any] = {
-    "targetTempC": -10,
-    "timeoutSeconds": 300,
-    "frameType": "Light",
-    "binningX": 1,
-    "binningY": 1,
+_CAMERA_ACTION_RESOLVED_DEFAULTS: dict[str, dict[str, Any]] = {
+    "cool": {"targetTempC": -10, "timeoutSeconds": 300},
+    "cooler_on": {},
+    "cooler_off": {},
+    "abort_exposure": {},
+    "capture_frame": {"frameType": "Light", "binningX": 1, "binningY": 1},
 }
 """The real default `camera_action` resolves each optional parameter to when omitted (matching
 the old `cool_camera`/`capture_frame` tools' own defaults) — not visible in `camera_action`'s
@@ -811,6 +811,11 @@ conditional-defaults trade-off). Exposed here purely so
 `test_wrapper_tool_signature_matches_the_scripts_own_parameters` can still check these against
 each script's own declared default, the same cross-check the old single-purpose wrapper tools
 got for free from their real (non-sentinel) Python defaults.
+
+Nested by `action` (matching `_CAMERA_ACTION_ALLOWED_PARAMS`/`_CAMERA_ACTION_REQUIRED_PARAMS`'s
+own shape), not a single flat `{param_name: default}` map — a flat map would silently give the
+wrong value if a future action ever reused one of these parameter names with a different
+intended default, exactly the scenario this dict exists to handle correctly (PR review of #91).
 """
 
 
@@ -887,8 +892,8 @@ async def camera_action(
     if not required <= given_names:
         raise ValueError(f"action={action!r} requires {sorted(required)}")
 
-    defaults = _CAMERA_ACTION_RESOLVED_DEFAULTS
     if action == "cool":
+        defaults = _CAMERA_ACTION_RESOLVED_DEFAULTS["cool"]
         return await script_runs.start_script(
             "cool_camera",
             rig_id,
@@ -902,6 +907,7 @@ async def camera_action(
     if action in ("cooler_on", "cooler_off", "abort_exposure"):
         return await script_runs.start_script(action, rig_id, {})
 
+    defaults = _CAMERA_ACTION_RESOLVED_DEFAULTS["capture_frame"]
     return await script_runs.start_script(
         "capture_frame",
         rig_id,

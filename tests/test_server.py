@@ -994,6 +994,19 @@ async def test_camera_action_cool_passes_explicit_values(
     assert calls == [("cool_camera", "test-rig", {"targetTempC": -20, "timeoutSeconds": 60}, None)]
 
 
+async def test_camera_action_cool_passes_partial_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only targetTempC given, timeoutSeconds omitted -- each parameter's None-sentinel
+    resolution must be independent, not accidentally coupled to whether the other was given.
+    """
+    calls = _fake_start_script(monkeypatch)
+
+    await server.camera_action("test-rig", "cool", targetTempC=-20)
+
+    assert calls == [("cool_camera", "test-rig", {"targetTempC": -20, "timeoutSeconds": 300}, None)]
+
+
 async def test_camera_action_cooler_on_delegates_to_start_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
