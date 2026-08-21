@@ -888,105 +888,167 @@ def _fake_start_script(
     return calls
 
 
-async def test_park_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_mount_action_park_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    result = await server.park("test-rig")
+    result = await server.mount_action("test-rig", "park")
 
     assert result == {"kind": "scriptStarted", "runId": "abc"}
     assert calls == [("park", "test-rig", {}, None)]
 
 
-async def test_unpark_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_mount_action_unpark_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    await server.unpark("test-rig")
+    await server.mount_action("test-rig", "unpark")
 
     assert calls == [("unpark", "test-rig", {}, None)]
 
 
-async def test_slew_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_mount_action_track_off_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    await server.slew("test-rig", ra=10.5, dec=41.2)
+    await server.mount_action("test-rig", "track_off")
+
+    assert calls == [("track_off", "test-rig", {}, None)]
+
+
+@pytest.mark.parametrize("action", ["park", "unpark", "track_off"])
+async def test_mount_action_no_param_actions_reject_any_parameter(action: str) -> None:
+    with pytest.raises(ValueError, match="requires exactly"):
+        await server.mount_action("test-rig", action, ra=10.5)  # type: ignore[arg-type]
+
+
+async def test_mount_action_slew_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.mount_action("test-rig", "slew", ra=10.5, dec=41.2)
 
     assert calls == [("slew", "test-rig", {"ra": 10.5, "dec": 41.2}, None)]
 
 
-async def test_cool_camera_delegates_to_start_script_with_defaults(
+async def test_mount_action_slew_requires_ra_and_dec() -> None:
+    with pytest.raises(ValueError, match="requires exactly"):
+        await server.mount_action("test-rig", "slew", ra=10.5)
+
+
+async def test_mount_action_set_track_mode_delegates_to_start_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    await server.cool_camera("test-rig")
+    await server.mount_action("test-rig", "set_track_mode", modeSwitchElement="TRACK_SIDEREAL")
+
+    assert calls == [("set_track_mode", "test-rig", {"modeSwitchElement": "TRACK_SIDEREAL"}, None)]
+
+
+async def test_mount_action_set_custom_tracking_rate_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.mount_action(
+        "test-rig", "set_custom_tracking_rate", raRateArcsecPerSec=15.0, decRateArcsecPerSec=-0.5
+    )
+
+    assert calls == [
+        (
+            "set_custom_tracking_rate",
+            "test-rig",
+            {"raRateArcsecPerSec": 15.0, "decRateArcsecPerSec": -0.5},
+            None,
+        )
+    ]
+
+
+async def test_mount_action_set_custom_tracking_rate_requires_both_rates() -> None:
+    with pytest.raises(ValueError, match="requires exactly"):
+        await server.mount_action("test-rig", "set_custom_tracking_rate", raRateArcsecPerSec=15.0)
+
+
+async def test_camera_action_cool_delegates_to_start_script_with_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.camera_action("test-rig", "cool")
 
     assert calls == [("cool_camera", "test-rig", {"targetTempC": -10, "timeoutSeconds": 300}, None)]
 
 
-async def test_cooler_on_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_camera_action_cool_passes_explicit_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    await server.cooler_on("test-rig")
+    await server.camera_action("test-rig", "cool", targetTempC=-20, timeoutSeconds=60)
+
+    assert calls == [("cool_camera", "test-rig", {"targetTempC": -20, "timeoutSeconds": 60}, None)]
+
+
+async def test_camera_action_cool_passes_partial_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only targetTempC given, timeoutSeconds omitted -- each parameter's None-sentinel
+    resolution must be independent, not accidentally coupled to whether the other was given.
+    """
+    calls = _fake_start_script(monkeypatch)
+
+    await server.camera_action("test-rig", "cool", targetTempC=-20)
+
+    assert calls == [("cool_camera", "test-rig", {"targetTempC": -20, "timeoutSeconds": 300}, None)]
+
+
+async def test_camera_action_cooler_on_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.camera_action("test-rig", "cooler_on")
 
     assert calls == [("cooler_on", "test-rig", {}, None)]
 
 
-async def test_cooler_off_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_camera_action_cooler_off_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    await server.cooler_off("test-rig")
+    await server.camera_action("test-rig", "cooler_off")
 
     assert calls == [("cooler_off", "test-rig", {}, None)]
 
 
-async def test_abort_exposure_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_camera_action_abort_exposure_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    await server.abort_exposure("test-rig")
+    await server.camera_action("test-rig", "abort_exposure")
 
     assert calls == [("abort_exposure", "test-rig", {}, None)]
 
 
-async def test_select_filter_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _fake_start_script(monkeypatch)
-
-    await server.select_filter("test-rig", filterName="Ha")
-
-    assert calls == [("select_filter", "test-rig", {"filterName": "Ha"}, None)]
+@pytest.mark.parametrize("action", ["cooler_on", "cooler_off", "abort_exposure"])
+async def test_camera_action_no_param_actions_reject_any_parameter(action: str) -> None:
+    with pytest.raises(ValueError, match="doesn't accept"):
+        await server.camera_action("test-rig", action, targetTempC=-20)  # type: ignore[arg-type]
 
 
-async def test_set_focus_position_delegates_to_start_script(
+async def test_camera_action_capture_frame_delegates_to_start_script_with_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    await server.set_focus_position("test-rig", position=15000)
-
-    assert calls == [("set_focus_position", "test-rig", {"position": 15000}, None)]
-
-
-async def test_connect_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _fake_start_script(monkeypatch)
-
-    await server.connect("test-rig", role="mount")
-
-    assert calls == [("connect", "test-rig", {"role": "mount"}, None)]
-
-
-async def test_disconnect_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _fake_start_script(monkeypatch)
-
-    await server.disconnect("test-rig", role="mount")
-
-    assert calls == [("disconnect", "test-rig", {"role": "mount"}, None)]
-
-
-async def test_capture_frame_delegates_to_start_script_with_defaults(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = _fake_start_script(monkeypatch)
-
-    await server.capture_frame("test-rig", exposureSeconds=300)
+    await server.camera_action("test-rig", "capture_frame", exposureSeconds=300)
 
     assert calls == [
         (
@@ -1009,49 +1071,66 @@ async def test_capture_frame_delegates_to_start_script_with_defaults(
     ]
 
 
-async def test_capture_frame_passes_location_id_through_to_start_script(
+async def test_camera_action_capture_frame_passes_location_id_through_to_start_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    await server.capture_frame("test-rig", exposureSeconds=300, location_id="home-backyard")
+    await server.camera_action(
+        "test-rig", "capture_frame", exposureSeconds=300, location_id="home-backyard"
+    )
 
     assert calls[0][3] == "home-backyard"
 
 
-async def test_track_off_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _fake_start_script(monkeypatch)
-
-    await server.track_off("test-rig")
-
-    assert calls == [("track_off", "test-rig", {}, None)]
+async def test_camera_action_capture_frame_requires_exposure_seconds() -> None:
+    with pytest.raises(ValueError, match="requires"):
+        await server.camera_action("test-rig", "capture_frame")
 
 
-async def test_set_track_mode_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _fake_start_script(monkeypatch)
-
-    await server.set_track_mode("test-rig", modeSwitchElement="TRACK_SIDEREAL")
-
-    assert calls == [("set_track_mode", "test-rig", {"modeSwitchElement": "TRACK_SIDEREAL"}, None)]
+async def test_camera_action_cool_rejects_capture_frame_parameters() -> None:
+    with pytest.raises(ValueError, match="doesn't accept"):
+        await server.camera_action("test-rig", "cool", exposureSeconds=300)
 
 
-async def test_set_custom_tracking_rate_delegates_to_start_script(
+async def test_filter_wheel_action_select_delegates_to_start_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _fake_start_script(monkeypatch)
 
-    await server.set_custom_tracking_rate(
-        "test-rig", raRateArcsecPerSec=15.0, decRateArcsecPerSec=-0.5
-    )
+    await server.filter_wheel_action("test-rig", "select", filterName="Ha")
 
-    assert calls == [
-        (
-            "set_custom_tracking_rate",
-            "test-rig",
-            {"raRateArcsecPerSec": 15.0, "decRateArcsecPerSec": -0.5},
-            None,
-        )
-    ]
+    assert calls == [("select_filter", "test-rig", {"filterName": "Ha"}, None)]
+
+
+async def test_focuser_action_set_position_delegates_to_start_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.focuser_action("test-rig", "set_position", position=15000)
+
+    assert calls == [("set_focus_position", "test-rig", {"position": 15000}, None)]
+
+
+async def test_set_connection_true_delegates_to_connect_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.set_connection("test-rig", role="mount", connected=True)
+
+    assert calls == [("connect", "test-rig", {"role": "mount"}, None)]
+
+
+async def test_set_connection_false_delegates_to_disconnect_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_start_script(monkeypatch)
+
+    await server.set_connection("test-rig", role="mount", connected=False)
+
+    assert calls == [("disconnect", "test-rig", {"role": "mount"}, None)]
 
 
 async def test_plate_solve_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1290,18 +1369,6 @@ async def test_plate_solve_uploaded_frame_decodes_base64_and_delegates(
 
 
 _WRAPPER_TOOLS_BY_SCRIPT_ID = {
-    "park": server.park,
-    "unpark": server.unpark,
-    "slew": server.slew,
-    "cool_camera": server.cool_camera,
-    "select_filter": server.select_filter,
-    "set_focus_position": server.set_focus_position,
-    "connect": server.connect,
-    "disconnect": server.disconnect,
-    "capture_frame": server.capture_frame,
-    "track_off": server.track_off,
-    "set_track_mode": server.set_track_mode,
-    "set_custom_tracking_rate": server.set_custom_tracking_rate,
     "plate_solve": server.plate_solve,
     "plate_solve_until_precision": server.plate_solve_until_precision,
 }
@@ -1309,12 +1376,23 @@ _WRAPPER_TOOLS_BY_SCRIPT_ID = {
 
 @pytest.mark.parametrize("script_id", sorted(_WRAPPER_TOOLS_BY_SCRIPT_ID))
 def test_wrapper_tool_signature_matches_the_scripts_own_parameters(script_id: str) -> None:
-    """Each convenience wrapper (INDIMCP-49) hand-encodes its script's own `parameters:`
-    block as Python parameter names/required-ness/defaults — nothing else keeps the two in
-    sync, so this cross-checks the wrapper's actual signature against the loaded script's
-    declared `Parameter`s directly, rather than against a third hardcoded expectations list,
-    turning a future YAML/Python desync into a fast, specific test failure instead of a
-    confusing `scriptFailed` at call time."""
+    """Each remaining one-tool-per-script convenience wrapper hand-encodes its script's own
+    `parameters:` block as Python parameter names/required-ness/defaults — nothing else keeps
+    the two in sync, so this cross-checks the wrapper's actual signature against the loaded
+    script's declared `Parameter`s directly, rather than against a third hardcoded expectations
+    list, turning a future YAML/Python desync into a fast, specific test failure instead of a
+    confusing `scriptFailed` at call time.
+
+    `park`/`unpark`/`slew`/`cool_camera`/`select_filter`/`set_focus_position`/`connect`/
+    `disconnect`/`capture_frame`/`track_off`/`set_track_mode`/`set_custom_tracking_rate` used
+    to be covered here too (INDIMCP-49), before INDIMCP-116 grouped them into `mount_action`/
+    `camera_action`/`filter_wheel_action`/`focuser_action`/`set_connection` — see
+    `test_merged_action_tool_params_match_the_scripts_own_parameters` below for their
+    replacement coverage; a single tool's signature spanning several scripts' worth of
+    parameters can't be introspected this same way (every parameter is optional at the Python
+    level regardless of which action actually requires it, so `inspect.signature` alone can no
+    longer tell required from optional per action).
+    """
     script_store.load_scripts(SCRIPTS_DIR)
     script = script_store.get_script(script_id)
     signature = inspect.signature(_WRAPPER_TOOLS_BY_SCRIPT_ID[script_id])
@@ -1338,6 +1416,85 @@ def test_wrapper_tool_signature_matches_the_scripts_own_parameters(script_id: st
             assert wrapper_default == parameter.default, (
                 f"{script_id}.{name}: wrapper default {wrapper_default!r} != script "
                 f"default {parameter.default!r}"
+            )
+
+
+_MERGED_ACTION_SCRIPT_PARAMS: dict[str, set[str]] = {
+    "park": server._MOUNT_ACTION_PARAMS["park"],
+    "unpark": server._MOUNT_ACTION_PARAMS["unpark"],
+    "slew": server._MOUNT_ACTION_PARAMS["slew"],
+    "track_off": server._MOUNT_ACTION_PARAMS["track_off"],
+    "set_track_mode": server._MOUNT_ACTION_PARAMS["set_track_mode"],
+    "set_custom_tracking_rate": server._MOUNT_ACTION_PARAMS["set_custom_tracking_rate"],
+    "cool_camera": server._CAMERA_ACTION_ALLOWED_PARAMS["cool"],
+    "cooler_on": server._CAMERA_ACTION_ALLOWED_PARAMS["cooler_on"],
+    "cooler_off": server._CAMERA_ACTION_ALLOWED_PARAMS["cooler_off"],
+    "abort_exposure": server._CAMERA_ACTION_ALLOWED_PARAMS["abort_exposure"],
+    "capture_frame": server._CAMERA_ACTION_ALLOWED_PARAMS["capture_frame"] - {"location_id"},
+    "select_filter": {"filterName"},
+    "set_focus_position": {"position"},
+    "connect": {"role"},
+    "disconnect": {"role"},
+}
+_MERGED_ACTION_SCRIPT_REQUIRED_PARAMS: dict[str, set[str]] = {
+    "park": set(),
+    "unpark": set(),
+    "slew": {"ra", "dec"},
+    "track_off": set(),
+    "set_track_mode": {"modeSwitchElement"},
+    "set_custom_tracking_rate": {"raRateArcsecPerSec", "decRateArcsecPerSec"},
+    "cool_camera": set(),
+    "cooler_on": set(),
+    "cooler_off": set(),
+    "abort_exposure": set(),
+    "capture_frame": {"exposureSeconds"},
+    "select_filter": {"filterName"},
+    "set_focus_position": {"position"},
+    "connect": {"role"},
+    "disconnect": {"role"},
+}
+_MERGED_ACTION_SCRIPT_RESOLVED_DEFAULTS: dict[str, dict[str, object]] = {
+    "cool_camera": {"targetTempC": -10, "timeoutSeconds": 300},
+    "capture_frame": {"frameType": "Light", "binningX": 1, "binningY": 1},
+}
+
+
+@pytest.mark.parametrize("script_id", sorted(_MERGED_ACTION_SCRIPT_PARAMS))
+def test_merged_action_tool_params_match_the_scripts_own_parameters(script_id: str) -> None:
+    """Same cross-check as `test_wrapper_tool_signature_matches_the_scripts_own_parameters`,
+    adapted for the `*_action` tools (INDIMCP-116) that replaced the old one-tool-per-script
+    wrappers for mount/camera/filter-wheel/focuser/connection scripts. Their Python signature
+    spans every action the tool supports, not just one script's parameters, and every
+    parameter defaults to `None` in the signature regardless of whether the particular action
+    actually requires it — so `inspect.signature` alone can no longer distinguish required
+    from optional per action, or reveal a resolved default that isn't `None`. This checks
+    against the tool's own per-action allowed/required/resolved-default dicts
+    (`_MOUNT_ACTION_PARAMS` etc.) instead — the same single source of truth the dispatch code
+    itself uses, so a future YAML/Python desync still fails here rather than only surfacing as
+    a confusing `scriptFailed` at call time.
+    """
+    script_store.load_scripts(SCRIPTS_DIR)
+    script = script_store.get_script(script_id)
+
+    expected_params = _MERGED_ACTION_SCRIPT_PARAMS[script_id]
+    assert expected_params == set(script.parameters), (
+        f"{script_id}'s expected parameters {sorted(expected_params)} don't match its "
+        f"script's declared parameters {sorted(script.parameters)}"
+    )
+
+    expected_required = _MERGED_ACTION_SCRIPT_REQUIRED_PARAMS[script_id]
+    resolved_defaults = _MERGED_ACTION_SCRIPT_RESOLVED_DEFAULTS.get(script_id, {})
+    for name, parameter in script.parameters.items():
+        assert (name in expected_required) == parameter.required, (
+            f"{script_id}.{name}: script declares required={parameter.required}, but the "
+            f"tool's own required-params set does"
+            f"{'' if name in expected_required else ' not'} include it"
+        )
+        if name in resolved_defaults:
+            assert resolved_defaults[name] == parameter.default, (
+                f"{script_id}.{name}: tool resolves the omitted default to "
+                f"{resolved_defaults[name]!r}, but the script declares default "
+                f"{parameter.default!r}"
             )
 
 

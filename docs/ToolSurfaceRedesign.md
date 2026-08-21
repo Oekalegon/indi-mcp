@@ -50,7 +50,7 @@ Kept separate:
 
 **Why `check`/`suggest`/`sync`/`run` don't belong in `configuration`:** a wider merge was proposed and rejected during design. The blocker is that `action` and `kind` stop moving independently — `check`/`suggest`/`sync` only ever pair with `kind="rig"`, `run` only with `kind="script"` and needs a `parameters` dict instead of `config`, and `run`'s return type (an async run handle) differs structurally from every other action's return type (a config object). At that point the tool schema can no longer express which parameters are valid for a given `action`/`kind` pair via `oneOf`/required-field constraints alone, so validity would fall back to hand-written runtime checks (asking the tool to "return errors for wrong combinations") instead of a schema the client — or the model — can reason about before calling. That's the same trade the design principle above warns against: it trades the tool-*selection* problem for a parameter-*selection* problem. `kind="filters"` was also proposed for this tool and rejected for a related reason: `rig`/`observatory`/`script` are config *entity types*, while "filters" names an *operation on a rig*, not a fourth entity — conflating the two muddies what the discriminator means.
 
-### Direct device actions (was 15 tools → 5)
+### Direct device actions (was 15 tools → 5) — implemented (INDIMCP-116)
 
 Grouped by device role rather than by verb — matches how a rig user already thinks about their gear:
 
