@@ -708,8 +708,17 @@ second hardcoded expectations list drifting out of sync with either side.
 @mcp.tool()
 async def mount_action(
     rig_id: str,
-    action: Literal[
-        "park", "unpark", "slew", "track_off", "set_track_mode", "set_custom_tracking_rate"
+    action: Annotated[
+        Literal[
+            "park", "unpark", "slew", "track_off", "set_track_mode", "set_custom_tracking_rate"
+        ],
+        Field(
+            json_schema_extra={
+                "requiredParamsByAction": {
+                    name: sorted(params) for name, params in _MOUNT_ACTION_PARAMS.items()
+                }
+            }
+        ),
     ],
     ra: float | None = None,
     dec: float | None = None,
@@ -731,7 +740,11 @@ async def mount_action(
     `raRateArcsecPerSec`/`decRateArcsecPerSec` are required for, and only valid with,
     `action="set_custom_tracking_rate"` (INDIMCP-49), which also selects custom tracking on
     the mount. `park`/`unpark`/`track_off` (INDIMCP-48/49) take no parameters at all — any
-    parameter above given alongside an action it doesn't belong to raises `ValueError`.
+    parameter above given alongside an action it doesn't belong to raises `ValueError`. Every
+    parameter above is optional at the schema level regardless of `action`, since a required-
+    ness that depends on a sibling field's value can't be expressed in JSON Schema — `action`'s
+    own schema carries the real per-`action` required set under `requiredParamsByAction` for a
+    schema-reading caller (see `_MOUNT_ACTION_PARAMS`).
     """
     given = {
         "ra": ra,
@@ -804,7 +817,16 @@ got for free from their real (non-sentinel) Python defaults.
 @mcp.tool()
 async def camera_action(
     rig_id: str,
-    action: Literal["cool", "cooler_on", "cooler_off", "abort_exposure", "capture_frame"],
+    action: Annotated[
+        Literal["cool", "cooler_on", "cooler_off", "abort_exposure", "capture_frame"],
+        Field(
+            json_schema_extra={
+                "requiredParamsByAction": {
+                    name: sorted(params) for name, params in _CAMERA_ACTION_REQUIRED_PARAMS.items()
+                }
+            }
+        ),
+    ],
     targetTempC: float | None = None,
     timeoutSeconds: float | None = None,
     exposureSeconds: float | None = None,
@@ -835,7 +857,12 @@ async def camera_action(
     set all four together for a sub-frame; `location_id` is passed straight through to
     `run_script` for this script's own celestial-context FITS header enrichment. Any parameter
     given alongside an action it doesn't belong to, or a required parameter missing for the
-    action given, raises `ValueError`.
+    action given, raises `ValueError`. Every parameter above is optional at the schema level
+    regardless of `action` — `exposureSeconds` included, despite having no fallback if
+    omitted for `action="capture_frame"` — since JSON Schema can't express a required-ness
+    that depends on a sibling field's value; `action`'s own schema carries the real per-
+    `action` required set under `requiredParamsByAction` for a schema-reading caller (see
+    `_CAMERA_ACTION_REQUIRED_PARAMS`).
     """
     given = {
         "targetTempC": targetTempC,
