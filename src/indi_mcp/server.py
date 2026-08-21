@@ -8,14 +8,14 @@ import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote, unquote
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_PARAMS, ErrorData
-from pydantic import AnyUrl
+from pydantic import AnyUrl, Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, PlainTextResponse, Response
 
@@ -372,12 +372,71 @@ def list_config(
     return script_store.list_scripts()
 
 
+def _defuse_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Rename `model_json_schema()`'s reserved `$ref`/`$defs` keys to the non-reserved
+    `x-ref`/`x-defs` (the standard JSON Schema vendor-extension prefix), so embedding this
+    schema inside another tool's `json_schema_extra` doesn't break that tool's own schema
+    generation.
+
+    `pydantic`'s `GenerateJsonSchema` walks the *entire* final document for any literal
+    `$ref` key while resolving its own model's schema — including inert documentation data
+    sitting inside an unrelated field's `json_schema_extra` (`_CONFIG_SCHEMA_BY_KIND`, below)
+    — and tries to resolve it against its own internal definitions table regardless of what
+    it actually points to or whether it was ever meant for pydantic to interpret. Rewriting
+    the target path (rather than renaming the key) doesn't help: confirmed by
+    `KeyError: '#/properties/config/schemaByKind/rig/$defs/Component'` even after pointing
+    the ref at the real nested location — pydantic's walker doesn't understand a `$ref`
+    outside its own model is meant for an external reader, not for its own resolution.
+    Renaming the key entirely sidesteps this, since only the literal strings `$ref`/`$defs`
+    trigger pydantic's special-casing. `x-`-prefixed keys are the standard JSON Schema
+    convention for vendor/tool-specific extensions a generic consumer should ignore but a
+    schema-aware one can still resolve — a reader of `schemaByKind` just needs to know this
+    substitution to reconstruct the original schema, same as resolving any other `$ref`.
+    """
+
+    def _rewrite(node: Any) -> Any:
+        if isinstance(node, dict):
+            renamed = {
+                ("x-ref" if key == "$ref" else "x-defs" if key == "$defs" else key): value
+                for key, value in node.items()
+            }
+            return {key: _rewrite(value) for key, value in renamed.items()}
+        if isinstance(node, list):
+            return [_rewrite(item) for item in node]
+        return node
+
+    return cast(dict[str, Any], _rewrite(schema))
+
+
+_CONFIG_SCHEMA_BY_KIND = {
+    "rig": _defuse_schema_refs(Rig.model_json_schema()),
+    "observatory": _defuse_schema_refs(Observatory.model_json_schema()),
+    "script": _defuse_schema_refs(Script.model_json_schema()),
+}
+"""The real `Rig`/`Observatory`/`Script` JSON Schemas, keyed by `configuration`'s `kind`.
+
+`configuration`'s own `config` parameter has to be a plain `dict[str, Any]` — one parameter
+represents three different shapes depending on the sibling `kind` argument, and JSON Schema
+can't make a parameter's shape conditional on another parameter's value (see
+`docs/ToolSurfaceRedesign.md`'s "payload merged across `kind` loses its structural schema"
+trade-off). Attaching the full schemas here as `config`'s `json_schema_extra` (below) restores
+that visibility for a schema-reading client — without a discriminated union, which would mean
+adding a shared discriminator field to `Rig`/`Observatory`/`Script`, breaking every existing
+`rigs/`/`observatories/`/`scripts/*.yaml` file's on-disk schema for no benefit to the two
+models here, which don't need one — `kind` already tells `configuration` which shape to
+expect and validate against; this is documentation only, not enforced by FastMCP itself.
+"""
+
+
 @mcp.tool()
 async def configuration(
     action: Literal["get", "save", "draft"],
     kind: Literal["rig", "observatory", "script"],
     config_id: str | None = None,
-    config: dict[str, Any] | None = None,
+    config: Annotated[
+        dict[str, Any] | None,
+        Field(json_schema_extra={"schemaByKind": _CONFIG_SCHEMA_BY_KIND}),
+    ] = None,
     overwrite: bool = False,
 ) -> Rig | Observatory | Script | RigDraft | ObservatoryDraft:
     """Get, save, or draft a rig/observatory/script configuration — replaces
@@ -388,7 +447,11 @@ async def configuration(
     `action="save"` requires `config` — validated against the shape `kind` expects (`Rig`/
     `Observatory`/`Script`) before anything is written, same as the old `save_rig`/
     `save_observatory`/`save_script` tools — and rejects `config_id`, since the id to save
-    under lives inside `config` itself (`config["id"]`), not as a separate argument.
+    under lives inside `config` itself (`config["id"]`), not as a separate argument. `config`'s
+    own real per-`kind` JSON Schema (every required/optional field, nested shapes) is attached
+    to its parameter schema under `schemaByKind` for a schema-reading caller — `config` itself
+    stays a plain object here since its shape depends on the sibling `kind` argument, which
+    JSON Schema can't express directly.
     `action="draft"` takes none of `config_id`/`config`/`overwrite`, and only supports
     `kind="rig"`/`kind="observatory"` — there is no `draft_script` equivalent (a script has no
     live-device state to pre-fill from); raises `ValueError` for `kind="script"`. Every other
