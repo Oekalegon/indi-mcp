@@ -215,31 +215,50 @@ async def manage_indi_infra(
             raise ValueError('label is only valid with component="driver"')
         if host is not None:
             raise ValueError('host is only valid with component="messaging"')
-        if action == "start":
-            return await indi_server.start_server(port if port is not None else INDI_PORT)
-        if action == "stop":
-            if port is not None:
-                raise ValueError('port is only valid with action="start" or "restart"')
-            return await indi_server.stop_server()
-        return await indi_server.restart_server(port)
+        return await _manage_indi_server(action, port)
 
     if component == "driver":
         if host is not None or port is not None:
             raise ValueError(
                 'host/port are only valid with component="server" or component="messaging"'
             )
-        if label is None:
-            raise ValueError('label is required for component="driver"')
-        if action == "start":
-            return await indi_driver.start_driver(label)
-        if action == "stop":
-            return await indi_driver.stop_driver(label)
-        raise ValueError(
-            'action="restart" is not supported for component="driver" — stop then start'
-        )
+        return await _manage_indi_driver(action, label)
 
     if label is not None:
         raise ValueError('label is only valid with component="driver"')
+    return await _manage_indi_messaging(action, host, port)
+
+
+async def _manage_indi_server(
+    action: Literal["start", "stop", "restart"], port: int | None
+) -> IndiServerStatus:
+    """`manage_indi_infra`'s `component="server"` branch, extracted for readability."""
+    if action == "start":
+        return await indi_server.start_server(port if port is not None else INDI_PORT)
+    if action == "stop":
+        if port is not None:
+            raise ValueError('port is only valid with action="start" or "restart"')
+        return await indi_server.stop_server()
+    return await indi_server.restart_server(port)
+
+
+async def _manage_indi_driver(
+    action: Literal["start", "stop", "restart"], label: str | None
+) -> DriverStatus:
+    """`manage_indi_infra`'s `component="driver"` branch, extracted for readability."""
+    if label is None:
+        raise ValueError('label is required for component="driver"')
+    if action == "start":
+        return await indi_driver.start_driver(label)
+    if action == "stop":
+        return await indi_driver.stop_driver(label)
+    raise ValueError('action="restart" is not supported for component="driver" — stop then start')
+
+
+async def _manage_indi_messaging(
+    action: Literal["start", "stop", "restart"], host: str | None, port: int | None
+) -> MessagingStatus:
+    """`manage_indi_infra`'s `component="messaging"` branch, extracted for readability."""
     if action == "start":
         return await indi_messaging.start_messaging(
             host if host is not None else "localhost",
