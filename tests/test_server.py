@@ -26,6 +26,7 @@ from indi_mcp import (
     frame_store,
     indi_driver,
     indi_messaging,
+    indi_server,
     observatory_store,
     plate_solver,
     rig_store,
@@ -58,6 +59,265 @@ def _restore_transport_security() -> Iterator[None]:
     original = server.mcp.settings.transport_security
     yield
     server.mcp.settings.transport_security = original
+
+
+async def test_manage_indi_infra_server_start_delegates_with_default_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    async def fake_start_server(port: int) -> dict:
+        calls.append(port)
+        return {"running": True, "port": port}
+
+    monkeypatch.setattr(indi_server, "start_server", fake_start_server)
+
+    result = await server.manage_indi_infra("server", "start")
+
+    assert result == {"running": True, "port": indi_server.INDI_PORT}
+    assert calls == [indi_server.INDI_PORT]
+
+
+async def test_manage_indi_infra_server_start_passes_explicit_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    async def fake_start_server(port: int) -> dict:
+        calls.append(port)
+        return {"running": True, "port": port}
+
+    monkeypatch.setattr(indi_server, "start_server", fake_start_server)
+
+    await server.manage_indi_infra("server", "start", port=7777)
+
+    assert calls == [7777]
+
+
+async def test_manage_indi_infra_server_stop_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+
+    async def fake_stop_server() -> dict:
+        calls.append(True)
+        return {"running": False, "port": indi_server.INDI_PORT}
+
+    monkeypatch.setattr(indi_server, "stop_server", fake_stop_server)
+
+    result = await server.manage_indi_infra("server", "stop")
+
+    assert result == {"running": False, "port": indi_server.INDI_PORT}
+    assert calls == [True]
+
+
+async def test_manage_indi_infra_server_restart_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int | None] = []
+
+    async def fake_restart_server(port: int | None) -> dict:
+        calls.append(port)
+        return {"running": True, "port": port or indi_server.INDI_PORT}
+
+    monkeypatch.setattr(indi_server, "restart_server", fake_restart_server)
+
+    await server.manage_indi_infra("server", "restart", port=9999)
+
+    assert calls == [9999]
+
+
+async def test_manage_indi_infra_server_rejects_label() -> None:
+    with pytest.raises(ValueError, match="label"):
+        await server.manage_indi_infra("server", "start", label="CCD Simulator")
+
+
+async def test_manage_indi_infra_server_stop_rejects_port() -> None:
+    with pytest.raises(ValueError, match="port"):
+        await server.manage_indi_infra("server", "stop", port=8000)
+
+
+async def test_manage_indi_infra_driver_start_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_start_driver(label: str) -> dict:
+        calls.append(label)
+        return {"label": label, "running": True}
+
+    monkeypatch.setattr(indi_driver, "start_driver", fake_start_driver)
+
+    result = await server.manage_indi_infra("driver", "start", label="CCD Simulator")
+
+    assert result == {"label": "CCD Simulator", "running": True}
+    assert calls == ["CCD Simulator"]
+
+
+async def test_manage_indi_infra_driver_stop_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_stop_driver(label: str) -> dict:
+        calls.append(label)
+        return {"label": label, "running": False}
+
+    monkeypatch.setattr(indi_driver, "stop_driver", fake_stop_driver)
+
+    await server.manage_indi_infra("driver", "stop", label="CCD Simulator")
+
+    assert calls == ["CCD Simulator"]
+
+
+async def test_manage_indi_infra_driver_requires_label() -> None:
+    with pytest.raises(ValueError, match="label"):
+        await server.manage_indi_infra("driver", "start")
+
+
+async def test_manage_indi_infra_driver_rejects_restart() -> None:
+    with pytest.raises(ValueError, match="restart"):
+        await server.manage_indi_infra("driver", "restart", label="CCD Simulator")
+
+
+async def test_manage_indi_infra_driver_rejects_host_or_port() -> None:
+    with pytest.raises(ValueError, match="host/port"):
+        await server.manage_indi_infra("driver", "start", label="CCD Simulator", port=8000)
+
+
+async def test_manage_indi_infra_messaging_start_delegates_with_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    async def fake_start_messaging(host: str, port: int) -> dict:
+        calls.append((host, port))
+        return {"running": True, "host": host, "port": port}
+
+    monkeypatch.setattr(indi_messaging, "start_messaging", fake_start_messaging)
+
+    result = await server.manage_indi_infra("messaging", "start")
+
+    assert result == {"running": True, "host": "localhost", "port": indi_server.INDI_PORT}
+    assert calls == [("localhost", indi_server.INDI_PORT)]
+
+
+async def test_manage_indi_infra_messaging_start_passes_explicit_host_and_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    async def fake_start_messaging(host: str, port: int) -> dict:
+        calls.append((host, port))
+        return {"running": True, "host": host, "port": port}
+
+    monkeypatch.setattr(indi_messaging, "start_messaging", fake_start_messaging)
+
+    await server.manage_indi_infra("messaging", "start", host="10.0.0.5", port=7624)
+
+    assert calls == [("10.0.0.5", 7624)]
+
+
+async def test_manage_indi_infra_messaging_stop_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+
+    async def fake_stop_messaging() -> dict:
+        calls.append(True)
+        return {"running": False, "host": "localhost", "port": indi_server.INDI_PORT}
+
+    monkeypatch.setattr(indi_messaging, "stop_messaging", fake_stop_messaging)
+
+    await server.manage_indi_infra("messaging", "stop")
+
+    assert calls == [True]
+
+
+async def test_manage_indi_infra_messaging_rejects_restart() -> None:
+    with pytest.raises(ValueError, match="restart"):
+        await server.manage_indi_infra("messaging", "restart")
+
+
+async def test_manage_indi_infra_messaging_rejects_label() -> None:
+    with pytest.raises(ValueError, match="label"):
+        await server.manage_indi_infra("messaging", "start", label="CCD Simulator")
+
+
+async def test_get_indi_status_server_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_get_status() -> dict:
+        return {"running": True, "port": indi_server.INDI_PORT}
+
+    monkeypatch.setattr(indi_server, "get_status", fake_get_status)
+
+    result = await server.get_indi_status("server")
+
+    assert result == {"running": True, "port": indi_server.INDI_PORT}
+
+
+async def test_get_indi_status_messaging_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_get_status() -> dict:
+        return {"running": True, "host": "localhost", "port": indi_server.INDI_PORT}
+
+    monkeypatch.setattr(indi_messaging, "get_status", fake_get_status)
+
+    result = await server.get_indi_status("messaging")
+
+    assert result == {"running": True, "host": "localhost", "port": indi_server.INDI_PORT}
+
+
+async def test_list_indi_drivers_catalog_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_get_driver_catalog() -> list[dict]:
+        return [{"label": "CCD Simulator", "running": False}]
+
+    monkeypatch.setattr(indi_driver, "get_driver_catalog", fake_get_driver_catalog)
+
+    result = await server.list_indi_drivers("catalog")
+
+    assert result == [{"label": "CCD Simulator", "running": False}]
+
+
+async def test_list_indi_drivers_running_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_list_running_drivers() -> list[dict]:
+        return [{"label": "CCD Simulator", "running": True}]
+
+    monkeypatch.setattr(indi_driver, "list_running_drivers", fake_list_running_drivers)
+
+    result = await server.list_indi_drivers("running")
+
+    assert result == [{"label": "CCD Simulator", "running": True}]
+
+
+async def test_indi_property_get_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_get_device_properties(device: str) -> dict:
+        calls.append(device)
+        return {"device": device, "properties": [], "refreshed": True}
+
+    monkeypatch.setattr(indi_messaging, "get_device_properties", fake_get_device_properties)
+
+    result = await server.indi_property("get", "CCD Simulator")
+
+    assert result == {"device": "CCD Simulator", "properties": [], "refreshed": True}
+    assert calls == ["CCD Simulator"]
+
+
+async def test_indi_property_get_rejects_name_or_elements() -> None:
+    with pytest.raises(ValueError, match="name/elements"):
+        await server.indi_property("get", "CCD Simulator", name="CONNECTION")
+
+
+async def test_indi_property_set_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    async def fake_send_property(device: str, name: str, elements: dict) -> dict:
+        calls.append((device, name, elements))
+        return {"kind": "propertyCommand", "device": device, "name": name}
+
+    monkeypatch.setattr(indi_messaging, "send_property", fake_send_property)
+
+    result = await server.indi_property(
+        "set", "CCD Simulator", name="CONNECTION", elements={"CONNECT": "On"}
+    )
+
+    assert result == {"kind": "propertyCommand", "device": "CCD Simulator", "name": "CONNECTION"}
+    assert calls == [("CCD Simulator", "CONNECTION", {"CONNECT": "On"})]
+
+
+async def test_indi_property_set_requires_name_and_elements() -> None:
+    with pytest.raises(ValueError, match="requires both name and elements"):
+        await server.indi_property("set", "CCD Simulator", name="CONNECTION")
 
 
 async def test_draft_rig_only_fetches_properties_relevant_to_each_devices_family(

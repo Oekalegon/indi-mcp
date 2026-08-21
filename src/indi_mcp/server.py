@@ -188,97 +188,125 @@ async def get_server_info() -> ServerInfo:
 
 
 @mcp.tool()
-async def start_indi_server(port: int = INDI_PORT) -> IndiServerStatus:
-    """Start the INDI server (`indiserver`) on the given port.
+async def manage_indi_infra(
+    component: Literal["server", "driver", "messaging"],
+    action: Literal["start", "stop", "restart"],
+    label: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+) -> IndiServerStatus | DriverStatus | MessagingStatus:
+    """Start, stop, or restart the INDI server, a single INDI driver, or the messaging
+    connection — replaces the old `start/stop/restart_indi_server`, `start/stop_indi_driver`,
+    and `start/stop_indi_messaging` tools (INDIMCP-114).
 
-    Restarts it if it is already running.
+    Valid `action`s depend on `component`: `"server"` supports `start`/`stop`/`restart`;
+    `"driver"` and `"messaging"` support only `start`/`stop` — there is no `restart` for
+    either (for a driver, stop then start; for messaging, reconnect the same way) — raises
+    `ValueError` if asked for one. `label` is required for, and only valid with,
+    `component="driver"` (the driver's catalog label, e.g. `"CCD Simulator"`). `host`/`port`
+    are only valid with `component="messaging"`'s `start` (`host` defaults to `"localhost"`,
+    `port` to `INDI_PORT`) or `component="server"`'s `start`/`restart` (`port`, defaulting to
+    `INDI_PORT`). Any other combination — e.g. `label` with `component="server"`, or `port`
+    with `component="driver"` — raises `ValueError` rather than silently ignoring the
+    irrelevant argument.
     """
-    return await indi_server.start_server(port)
+    if component == "server":
+        if label is not None:
+            raise ValueError('label is only valid with component="driver"')
+        if host is not None:
+            raise ValueError('host is only valid with component="messaging"')
+        if action == "start":
+            return await indi_server.start_server(port if port is not None else INDI_PORT)
+        if action == "stop":
+            if port is not None:
+                raise ValueError('port is only valid with action="start" or "restart"')
+            return await indi_server.stop_server()
+        return await indi_server.restart_server(port)
+
+    if component == "driver":
+        if host is not None or port is not None:
+            raise ValueError(
+                'host/port are only valid with component="server" or component="messaging"'
+            )
+        if label is None:
+            raise ValueError('label is required for component="driver"')
+        if action == "start":
+            return await indi_driver.start_driver(label)
+        if action == "stop":
+            return await indi_driver.stop_driver(label)
+        raise ValueError(
+            'action="restart" is not supported for component="driver" — stop then start'
+        )
+
+    if label is not None:
+        raise ValueError('label is only valid with component="driver"')
+    if action == "start":
+        return await indi_messaging.start_messaging(
+            host if host is not None else "localhost",
+            port if port is not None else INDI_PORT,
+        )
+    if action == "stop":
+        if host is not None or port is not None:
+            raise ValueError('host/port are only valid with action="start"')
+        return await indi_messaging.stop_messaging()
+    raise ValueError(
+        'action="restart" is not supported for component="messaging" — stop then start'
+    )
 
 
 @mcp.tool()
-async def stop_indi_server() -> IndiServerStatus:
-    """Stop the running INDI server (`indiserver`)."""
-    return await indi_server.stop_server()
+async def get_indi_status(
+    component: Literal["server", "messaging"],
+) -> IndiServerStatus | MessagingStatus:
+    """Report whether the INDI server or the messaging connection is running — replaces
+    `get_indi_server_status`/`get_indi_messaging_status` (INDIMCP-114).
 
-
-@mcp.tool()
-async def restart_indi_server(port: int | None = None) -> IndiServerStatus:
-    """Restart the INDI server (`indiserver`), optionally switching to a new port."""
-    return await indi_server.restart_server(port)
-
-
-@mcp.tool()
-async def get_indi_server_status() -> IndiServerStatus:
-    """Report whether the INDI server (`indiserver`) is running, and on which port."""
-    return await indi_server.get_status()
-
-
-@mcp.tool()
-async def list_indi_driver_catalog() -> list[DriverInfo]:
-    """List every INDI driver installed on this device, whether or not it is running."""
-    return await indi_driver.get_driver_catalog()
-
-
-@mcp.tool()
-async def start_indi_driver(label: str) -> DriverStatus:
-    """Start the INDI driver identified by its catalog label (e.g. "CCD Simulator")."""
-    return await indi_driver.start_driver(label)
-
-
-@mcp.tool()
-async def stop_indi_driver(label: str) -> DriverStatus:
-    """Stop the running INDI driver identified by its catalog label."""
-    return await indi_driver.stop_driver(label)
-
-
-@mcp.tool()
-async def list_running_indi_drivers() -> list[DriverStatus]:
-    """List all currently running INDI drivers."""
-    return await indi_driver.list_running_drivers()
-
-
-@mcp.tool()
-async def start_indi_messaging(host: str = "localhost", port: int = INDI_PORT) -> MessagingStatus:
-    """Connect to the INDI server and start streaming its property/message events."""
-    return await indi_messaging.start_messaging(host, port)
-
-
-@mcp.tool()
-async def stop_indi_messaging() -> MessagingStatus:
-    """Disconnect from the INDI server and stop streaming its events."""
-    return await indi_messaging.stop_messaging()
-
-
-@mcp.tool()
-async def get_indi_messaging_status() -> MessagingStatus:
-    """Report whether the INDI messaging stream is running, and its host/port."""
+    No `component="driver"` here — per-driver status is `list_indi_drivers(scope="running")`,
+    which reports every running driver at once rather than one at a time.
+    """
+    if component == "server":
+        return await indi_server.get_status()
     return await indi_messaging.get_status()
 
 
 @mcp.tool()
-async def list_indi_messages(device: str | None = None, limit: int = 50) -> list[IndiEvent]:
-    """List the most recently seen INDI events, newest first, optionally filtered to one device."""
-    return indi_messaging.list_messages(device, limit)
-
-
-@mcp.tool()
-async def send_indi_property(device: str, name: str, elements: dict[str, str]) -> IndiEvent:
-    """Send a command to an INDI device, setting `elements` on its property `name`."""
-    return await indi_messaging.send_property(device, name, elements)
-
-
-@mcp.tool()
-async def get_device_properties(device: str) -> DeviceProperties:
-    """Query the INDI server for the live state of every property on `device`.
-
-    Queries `indiserver` directly (`getProperties`) rather than returning
-    whatever was last cached, so the result reflects the device's actual
-    state at call time when possible — check the returned `refreshed` flag,
-    which is `False` if the driver didn't respond in time and `properties`
-    fell back to a previously-cached reading.
+async def list_indi_drivers(
+    scope: Literal["catalog", "running"],
+) -> list[DriverInfo] | list[DriverStatus]:
+    """List INDI drivers — either the full catalog installed on this device
+    (`scope="catalog"`) or only those currently running (`scope="running"`) — replaces
+    `list_indi_driver_catalog`/`list_running_indi_drivers` (INDIMCP-114).
     """
-    return await indi_messaging.get_device_properties(device)
+    if scope == "catalog":
+        return await indi_driver.get_driver_catalog()
+    return await indi_driver.list_running_drivers()
+
+
+@mcp.tool()
+async def indi_property(
+    action: Literal["get", "set"],
+    device: str,
+    name: str | None = None,
+    elements: dict[str, str] | None = None,
+) -> DeviceProperties | IndiEvent:
+    """Get the live state of every property on an INDI device, or set one property's
+    elements — replaces `get_device_properties`/`send_indi_property` (INDIMCP-114).
+
+    `action="get"` queries `indiserver` directly (`getProperties`) rather than returning
+    whatever was last cached, so the result reflects the device's actual state at call time
+    when possible — check the returned `refreshed` flag, which is `False` if the driver
+    didn't respond in time and `properties` fell back to a previously-cached reading. `name`/
+    `elements` are not valid with `action="get"`. `action="set"` sends `elements` to
+    `device`'s property `name`, and requires both — raises `ValueError` if either is missing,
+    or if `name`/`elements` are given alongside `action="get"`.
+    """
+    if action == "get":
+        if name is not None or elements is not None:
+            raise ValueError('name/elements are only valid with action="set"')
+        return await indi_messaging.get_device_properties(device)
+    if name is None or elements is None:
+        raise ValueError('action="set" requires both name and elements')
+    return await indi_messaging.send_property(device, name, elements)
 
 
 @mcp.resource("indi://messages", mime_type="application/json")
@@ -289,8 +317,8 @@ def read_indi_message_stream() -> dict[str, list[IndiEvent]]:
     streams`: a subscriber is sent `notifications/resources/updated`
     whenever a new event is published, and re-reads this resource to fetch
     it. This is a best-effort, live-only channel — a client that was
-    disconnected should use `list_indi_messages` or `get_events` (the
-    durable event log, INDIMCP-15) to catch up, not assume it saw everything.
+    disconnected should use `get_events(stream="messages")` (the durable
+    event log, INDIMCP-15) to catch up, not assume it saw everything.
     """
     return cast(dict[str, list[IndiEvent]], event_streams.read_messages())
 

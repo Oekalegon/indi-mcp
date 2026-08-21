@@ -16,7 +16,7 @@ Two tools are merged into one parameterized tool only when they are the **same o
 
 ## Target tool inventory
 
-### INDI infrastructure (was 15 tools → 5)
+### INDI infrastructure (was 15 tools → 5) — implemented (INDIMCP-114)
 
 | Tool | Replaces | Signature |
 |---|---|---|
@@ -95,7 +95,7 @@ The rig-based cases — old `plate_solve` and `plate_solve_until_precision` — 
 
 | Tool | Notes |
 |---|---|
-| `get_events` | Unchanged. Confirm during implementation whether this already subsumes `list_indi_messages`; if so, drop the latter (accounted for above under `indi_property`/`list_indi_drivers`, not separately). |
+| `get_events` | Unchanged. Confirmed (INDIMCP-114) that `get_events(stream="messages", device=...)` already subsumes `list_indi_messages` — same durable event log, same filter — so `list_indi_messages` is dropped with no replacement, not folded into `indi_property`/`list_indi_drivers`. |
 
 ## Tally
 
