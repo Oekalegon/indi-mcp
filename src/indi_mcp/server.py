@@ -8,14 +8,14 @@ import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote, unquote
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_PARAMS, ErrorData
-from pydantic import AnyUrl
+from pydantic import AnyUrl, Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, PlainTextResponse, Response
 
@@ -356,124 +356,156 @@ def read_indi_message_stream_for_device(device: str) -> dict[str, list[IndiEvent
 
 
 @mcp.tool()
-def list_rigs() -> list[RigSummary]:
-    """List the id/name of every configured imaging rig (see `docs/RigSchema.md`)."""
-    return rig_store.list_rigs()
+def list_config(
+    kind: Literal["rig", "observatory", "script"],
+) -> list[RigSummary] | list[ObservatorySummary] | list[ScriptSummary]:
+    """List the id/name of every configured rig, observatory, or script — replaces
+    `list_rigs`/`list_observatories`/`list_scripts` (INDIMCP-115).
+
+    See `docs/RigSchema.md`, `docs/ObservatorySchema.md`, `docs/ScriptSchema.md` for the
+    full shape of each `kind`.
+    """
+    if kind == "rig":
+        return rig_store.list_rigs()
+    if kind == "observatory":
+        return observatory_store.list_observatories()
+    return script_store.list_scripts()
+
+
+def _defuse_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Rename `model_json_schema()`'s reserved `$ref`/`$defs` keys to the non-reserved
+    `x-ref`/`x-defs` (the standard JSON Schema vendor-extension prefix), so embedding this
+    schema inside another tool's `json_schema_extra` doesn't break that tool's own schema
+    generation.
+
+    `pydantic`'s `GenerateJsonSchema` walks the *entire* final document for any literal
+    `$ref` key while resolving its own model's schema — including inert documentation data
+    sitting inside an unrelated field's `json_schema_extra` (`_CONFIG_SCHEMA_BY_KIND`, below)
+    — and tries to resolve it against its own internal definitions table regardless of what
+    it actually points to or whether it was ever meant for pydantic to interpret. Rewriting
+    the target path (rather than renaming the key) doesn't help: confirmed by
+    `KeyError: '#/properties/config/schemaByKind/rig/$defs/Component'` even after pointing
+    the ref at the real nested location — pydantic's walker doesn't understand a `$ref`
+    outside its own model is meant for an external reader, not for its own resolution.
+    Renaming the key entirely sidesteps this, since only the literal strings `$ref`/`$defs`
+    trigger pydantic's special-casing. `x-`-prefixed keys are the standard JSON Schema
+    convention for vendor/tool-specific extensions a generic consumer should ignore but a
+    schema-aware one can still resolve — a reader of `schemaByKind` just needs to know this
+    substitution to reconstruct the original schema, same as resolving any other `$ref`.
+    """
+
+    def _rewrite(node: Any) -> Any:
+        if isinstance(node, dict):
+            renamed = {
+                ("x-ref" if key == "$ref" else "x-defs" if key == "$defs" else key): value
+                for key, value in node.items()
+            }
+            return {key: _rewrite(value) for key, value in renamed.items()}
+        if isinstance(node, list):
+            return [_rewrite(item) for item in node]
+        return node
+
+    return cast(dict[str, Any], _rewrite(schema))
+
+
+_CONFIG_SCHEMA_BY_KIND = {
+    "rig": _defuse_schema_refs(Rig.model_json_schema()),
+    "observatory": _defuse_schema_refs(Observatory.model_json_schema()),
+    "script": _defuse_schema_refs(Script.model_json_schema()),
+}
+"""The real `Rig`/`Observatory`/`Script` JSON Schemas, keyed by `configuration`'s `kind`.
+
+`configuration`'s own `config` parameter has to be a plain `dict[str, Any]` — one parameter
+represents three different shapes depending on the sibling `kind` argument, and JSON Schema
+can't make a parameter's shape conditional on another parameter's value (see
+`docs/ToolSurfaceRedesign.md`'s "payload merged across `kind` loses its structural schema"
+trade-off). Attaching the full schemas here as `config`'s `json_schema_extra` (below) restores
+that visibility for a schema-reading client — without a discriminated union, which would mean
+adding a shared discriminator field to `Rig`/`Observatory`/`Script`, breaking every existing
+`rigs/`/`observatories/`/`scripts/*.yaml` file's on-disk schema for no benefit to the two
+models here, which don't need one — `kind` already tells `configuration` which shape to
+expect and validate against; this is documentation only, not enforced by FastMCP itself.
+"""
 
 
 @mcp.tool()
-def get_rig(rig_id: str) -> Rig:
-    """Return the full definition of the imaging rig identified by `rig_id`."""
-    return rig_store.get_rig(rig_id)
+async def configuration(
+    action: Literal["get", "save", "draft"],
+    kind: Literal["rig", "observatory", "script"],
+    config_id: str | None = None,
+    config: Annotated[
+        dict[str, Any] | None,
+        Field(json_schema_extra={"schemaByKind": _CONFIG_SCHEMA_BY_KIND}),
+    ] = None,
+    overwrite: bool = False,
+) -> Rig | Observatory | Script | RigDraft | ObservatoryDraft:
+    """Get, save, or draft a rig/observatory/script configuration — replaces
+    `get_rig`/`get_observatory`/`get_script`, `save_rig`/`save_observatory`/`save_script`,
+    and `draft_rig`/`draft_observatory` (INDIMCP-115).
 
-
-@mcp.tool()
-async def save_rig(rig: Rig, overwrite: bool = False) -> Rig:
-    """Save a rig definition — hand-authored, or completed from a `draft_rig` result.
-
-    Writes `rig` to `rigs/<rig.id>.yaml` and reloads it so it's immediately
-    available by `id` to `get_rig`/`suggest_rig`/`check_rig`. Refuses to
-    replace an existing rig file unless `overwrite` is set, since reusing an
-    `id` could otherwise silently destroy a previously saved rig. The actual
-    file I/O runs in a worker thread so it doesn't block the event loop.
+    `action="get"` requires `config_id` (the config to fetch), rejects `config`/`overwrite`.
+    `action="save"` requires `config` — validated against the shape `kind` expects (`Rig`/
+    `Observatory`/`Script`) before anything is written, same as the old `save_rig`/
+    `save_observatory`/`save_script` tools — and rejects `config_id`, since the id to save
+    under lives inside `config` itself (`config["id"]`), not as a separate argument. `config`'s
+    own real per-`kind` JSON Schema (every required/optional field, nested shapes) is attached
+    to its parameter schema under `schemaByKind` for a schema-reading caller — `config` itself
+    stays a plain object here since its shape depends on the sibling `kind` argument, which
+    JSON Schema can't express directly.
+    `action="draft"` takes none of `config_id`/`config`/`overwrite`, and only supports
+    `kind="rig"`/`kind="observatory"` — there is no `draft_script` equivalent (a script has no
+    live-device state to pre-fill from); raises `ValueError` for `kind="script"`. Every other
+    invalid combination — e.g. `config_id` alongside `action="save"`, or `config` alongside
+    `action="get"` — also raises `ValueError` rather than silently ignoring the irrelevant
+    argument.
     """
-    return await asyncio.to_thread(rig_store.save_rig, rig, overwrite=overwrite)
+    if action == "get":
+        if config is not None or overwrite:
+            raise ValueError('config/overwrite are only valid with action="save"')
+        if config_id is None:
+            raise ValueError('action="get" requires config_id')
+        if kind == "rig":
+            return rig_store.get_rig(config_id)
+        if kind == "observatory":
+            return observatory_store.get_observatory(config_id)
+        return script_store.get_script(config_id)
 
-
-@mcp.tool()
-def suggest_rig() -> list[RigSuggestion]:
-    """Propose which configured rig is likely mounted, by matching connected INDI devices.
-
-    Never auto-selects a rig; candidates are sorted best match first for the
-    operator or client to choose from.
-    """
-    return rig_store.suggest_rig(indi_messaging.list_devices())
-
-
-@mcp.tool()
-def check_rig(rig_id: str) -> RigCheck:
-    """Warn on any of the given rig's devices that aren't currently connected.
-
-    This is a warning, not a hard failure: a rig might be intentionally
-    used without one of its devices (e.g. imaging without a guide camera).
-    """
-    return rig_store.check_rig(rig_id, indi_messaging.list_devices())
-
-
-def _resolve_unique_connected_component(rig_id: str, role: str) -> rig_store.Component:
-    """The single, device-connected component of `rig_id` matching `role` (INDIMCP-64).
-
-    A rig's `role` is explicitly allowed to be shared by more than one component
-    (`rig_store.Component.role`'s own docstring), so `sync_filter_names`/
-    `adopt_filter_names_from_driver` can't just take the first match the way a careless
-    `next(...)` would — that risks silently reading one physical filter wheel's `device`/
-    `slots` while `rig_store.update_component_slots` (called by both tools) writes to *every*
-    component sharing the role. Raising here if `role` doesn't resolve to exactly one
-    connected component mirrors `script_engine._resolve_role_to_component`'s own strict
-    behavior for a script run resolving roles to devices.
-    """
-    rig = rig_store.get_rig(rig_id)
-    matches = [c for c in rig.components if c.role == role and c.device is not None]
-    if len(matches) != 1:
-        raise ValueError(
-            f"rig {rig_id!r} has {len(matches)} connected component(s) for role {role!r}; "
-            "expected exactly one"
+    if action == "save":
+        if config_id is not None:
+            raise ValueError('config_id is not valid with action="save" — pass it inside config')
+        if config is None:
+            raise ValueError('action="save" requires config')
+        if kind == "rig":
+            return await asyncio.to_thread(
+                rig_store.save_rig, Rig.model_validate(config), overwrite=overwrite
+            )
+        if kind == "observatory":
+            return await asyncio.to_thread(
+                observatory_store.save_observatory,
+                Observatory.model_validate(config),
+                overwrite=overwrite,
+            )
+        return await asyncio.to_thread(
+            script_store.save_script, Script.model_validate(config), overwrite=overwrite
         )
-    return matches[0]
+
+    if config_id is not None or config is not None or overwrite:
+        raise ValueError('config_id/config/overwrite are not valid with action="draft"')
+    if kind == "rig":
+        return await _draft_rig()
+    if kind == "observatory":
+        return await _draft_observatory()
+    raise ValueError('action="draft" is not supported for kind="script"')
 
 
-@mcp.tool()
-async def sync_filter_names(rig_id: str, role: str) -> FilterSyncOutcome:
-    """Push `rig_id`'s configured filter names for `role` to the EFW driver's live
-    `FILTER_NAME`, if they disagree (INDIMCP-64).
+async def _draft_rig() -> RigDraft:
+    """`configuration`'s `action="draft"`/`kind="rig"` branch, extracted for readability.
 
-    A deliberate action only: `select_filter` never does this on its own — it either adopts
-    the driver's names onto the rig if the rig has no `slots` configured, or fails fatally if
-    it does and they disagree, but never overwrites the driver itself — since overwriting a
-    live device's own configuration should always be something an operator or client
-    explicitly asked for. Call this tool (or use a script's own explicit `sync_filter_names`
-    step) when that's actually what's wanted; see `adopt_filter_names_from_driver` for the
-    reverse direction (copying the driver's config onto the rig instead). Raises if `role`
-    isn't a connected `filterWheel`-like component with `slots` configured, if the device
-    doesn't expose `FILTER_NAME`, or if the rig and driver declare a different *number* of
-    filter slots (refuses to push a configuration for what's likely a differently-sized wheel).
-    """
-    component = _resolve_unique_connected_component(rig_id, role)
-    assert component.device is not None  # guaranteed by _resolve_unique_connected_component
-    return await script_engine.sync_filter_names(role, component.device, component.slots or {})
-
-
-@mcp.tool()
-async def adopt_filter_names_from_driver(rig_id: str, role: str) -> FilterAdoptOutcome:
-    """Copy the EFW driver's live `FILTER_NAME` for `role` onto rig `rig_id`, overwriting
-    whatever filter `slots` the rig currently declares (INDIMCP-64) — the reverse direction
-    from `sync_filter_names`.
-
-    A deliberate action only, for when a rig and its driver disagree and the operator decides
-    the *driver* is the source of truth this time. `select_filter`'s own automatic
-    reconciliation never overwrites a rig that already has `slots` configured (it fails
-    fatally on disagreement instead, requiring the operator to choose a direction explicitly);
-    this tool (or a script's own explicit `adopt_filter_names_from_driver` step) is that
-    choice. Raises if `role` isn't a connected `filterWheel`-like component, if the device
-    doesn't expose `FILTER_NAME`, if the driver declares no filter slots at all, or if
-    persisting the change to the rig's YAML file fails.
-    """
-    component = _resolve_unique_connected_component(rig_id, role)
-    assert component.device is not None  # guaranteed by _resolve_unique_connected_component
-    return await script_engine.adopt_filter_names_from_driver(
-        rig_id, role, component.device, component.slots or {}
-    )
-
-
-@mcp.tool()
-async def draft_rig() -> RigDraft:
-    """Pre-fill a draft rig skeleton from currently connected INDI devices.
-
-    Combines each device's driver family (camera/filter wheel/focuser/mount)
-    with whatever live properties it exposes (CCD_INFO, FILTER_NAME, focuser
-    range) into a starting point. Never auto-finalizes a rig: fields INDI
-    can't supply and any ambiguous role assignments are left for the
-    operator to complete and save themselves.
+    Pre-fills a draft rig skeleton from currently connected INDI devices, combining each
+    device's driver family (camera/filter wheel/focuser/mount) with whatever live properties
+    it exposes (CCD_INFO, FILTER_NAME, focuser range) into a starting point. Never
+    auto-finalizes a rig: fields INDI can't supply and any ambiguous role assignments are left
+    for the operator to complete and save themselves.
     """
     devices: list[DraftDeviceInfo] = []
     for name in indi_messaging.list_devices():
@@ -504,44 +536,17 @@ async def draft_rig() -> RigDraft:
     return rig_store.draft_rig(devices)
 
 
-@mcp.tool()
-def list_observatories() -> list[ObservatorySummary]:
-    """List the id/name of every configured observatory location (see `ObservatorySchema.md`)."""
-    return observatory_store.list_observatories()
+async def _draft_observatory() -> ObservatoryDraft:
+    """`configuration`'s `action="draft"`/`kind="observatory"` branch, extracted for
+    readability.
 
-
-@mcp.tool()
-def get_observatory(observatory_id: str) -> Observatory:
-    """Return the full definition of the observatory location identified by `observatory_id`."""
-    return observatory_store.get_observatory(observatory_id)
-
-
-@mcp.tool()
-async def save_observatory(observatory: Observatory, overwrite: bool = False) -> Observatory:
-    """Save an observatory location definition — hand-authored, or completed from a
-    `draft_observatory` result.
-
-    Writes `observatory` to `observatories/<observatory.id>.yaml` and reloads
-    it so it's immediately available by `id` to `get_observatory`. Refuses to
-    replace an existing file unless `overwrite` is set, since reusing an `id`
-    could otherwise silently destroy a previously saved location. The actual
-    file I/O runs in a worker thread so it doesn't block the event loop.
-    """
-    return await asyncio.to_thread(
-        observatory_store.save_observatory, observatory, overwrite=overwrite
-    )
-
-
-@mcp.tool()
-async def draft_observatory() -> ObservatoryDraft:
-    """Pre-fill a draft observatory location from a connected device's live `GEOGRAPHIC_COORD`.
-
-    INDI's `GEOGRAPHIC_COORD` standard property (LAT/LONG/ELEV) is exposed
-    by GPS drivers and often by mount drivers too. Never auto-selects or
-    auto-saves a location: the result is a starting point — `id`/`name` have
-    no INDI equivalent, and a stale/missing/all-zero fix is flagged in
-    `notes` — for the operator to complete and save themselves via
-    `save_observatory`, consistent with `draft_rig`.
+    Pre-fills a draft observatory location from a connected device's live
+    `GEOGRAPHIC_COORD`. INDI's `GEOGRAPHIC_COORD` standard property (LAT/LONG/ELEV) is
+    exposed by GPS drivers and often by mount drivers too. Never auto-selects or auto-saves a
+    location: the result is a starting point — `id`/`name` have no INDI equivalent, and a
+    stale/missing/all-zero fix is flagged in `notes` — for the operator to complete and save
+    themselves via `configuration(action="save", kind="observatory", ...)`, consistent with
+    `_draft_rig`.
     """
     devices: list[DraftLocationDeviceInfo] = []
     for name in indi_messaging.list_devices():
@@ -560,38 +565,88 @@ async def draft_observatory() -> ObservatoryDraft:
     return observatory_store.draft_observatory(devices)
 
 
-@mcp.tool()
-def list_scripts() -> list[ScriptSummary]:
-    """List the id/name/description of every loaded script (see `docs/ScriptSchema.md`)."""
-    return script_store.list_scripts()
+def _resolve_unique_connected_component(rig_id: str, role: str) -> rig_store.Component:
+    """The single, device-connected component of `rig_id` matching `role` (INDIMCP-64).
 
-
-@mcp.tool()
-def get_script(script_id: str) -> Script:
-    """Return the full definition of the script identified by `script_id`."""
-    return script_store.get_script(script_id)
-
-
-@mcp.tool()
-async def save_script(script: Script, overwrite: bool = False) -> Script:
-    """Upload and save a script written on the Client Computer.
-
-    Writes `script` to `user_scripts/<script.id>.yaml` — a separate
-    directory from the built-in scripts shipped in `scripts/`, so an
-    upload can never be clobbered by a redeploy of the built-in checkout,
-    or silently shadow a built-in script's id — and reloads the merged
-    library so it's immediately available by `id` to `get_script` and to
-    `run_script`. Only ever validates and stores declarative step data
-    (`yaml.safe_load`, no executable code), per the safety approach in
-    `docs/Design.md`. Rejected outright, before anything is written, if
-    `script` doesn't fit the rest of the library — an unresolved
-    `run_script` reference, a mismatched argument type, a call cycle, or an
-    id already used by a built-in script. Refuses to replace an existing
-    uploaded script file unless `overwrite` is set, since reusing an `id`
-    could otherwise silently destroy a previously saved script. The actual
-    file I/O runs in a worker thread so it doesn't block the event loop.
+    A rig's `role` is explicitly allowed to be shared by more than one component
+    (`rig_store.Component.role`'s own docstring), so `rig_diagnostics`'s `action="sync"`
+    can't just take the first match the way a careless `next(...)` would — that risks
+    silently reading one physical filter wheel's `device`/`slots` while
+    `rig_store.update_component_slots` (called by both sync directions) writes to *every*
+    component sharing the role. Raising here if `role` doesn't resolve to exactly one
+    connected component mirrors `script_engine._resolve_role_to_component`'s own strict
+    behavior for a script run resolving roles to devices.
     """
-    return await asyncio.to_thread(script_store.save_script, script, overwrite=overwrite)
+    rig = rig_store.get_rig(rig_id)
+    matches = [c for c in rig.components if c.role == role and c.device is not None]
+    if len(matches) != 1:
+        raise ValueError(
+            f"rig {rig_id!r} has {len(matches)} connected component(s) for role {role!r}; "
+            "expected exactly one"
+        )
+    return matches[0]
+
+
+@mcp.tool()
+async def rig_diagnostics(
+    action: Literal["check", "suggest", "sync"],
+    rig_id: str | None = None,
+    role: str | None = None,
+    direction: Literal["to_driver", "from_driver"] | None = None,
+) -> RigCheck | list[RigSuggestion] | FilterSyncOutcome | FilterAdoptOutcome:
+    """Check a rig's device connectivity, suggest which configured rig is likely mounted, or
+    reconcile a filter wheel's names against its driver — replaces `check_rig`, `suggest_rig`,
+    and `sync_filter_names`/`adopt_filter_names_from_driver` (INDIMCP-115, INDIMCP-64).
+
+    `action="check"` warns on any of `rig_id`'s devices that aren't currently connected — a
+    warning, not a hard failure, since a rig might be intentionally used without one of its
+    devices (e.g. imaging without a guide camera). `action="suggest"` proposes which
+    configured rig is likely mounted, by matching connected INDI devices — never
+    auto-selects; candidates are sorted best match first — and takes neither `rig_id` nor
+    `role`/`direction`, since it considers every configured rig, not one.
+
+    `action="sync"` requires `rig_id`, `role`, and `direction` together. `direction=
+    "to_driver"` pushes `rig_id`'s configured filter names for `role` onto the EFW driver's
+    live `FILTER_NAME`, if they disagree — a deliberate action only: `select_filter` never
+    does this on its own (it either adopts the driver's names onto the rig if the rig has no
+    `slots` configured, or fails fatally if it does and they disagree, but never overwrites
+    the driver itself, since overwriting a live device's own configuration should always be
+    something an operator or client explicitly asked for). `direction="from_driver"` is the
+    reverse: copies the driver's live `FILTER_NAME` for `role` onto `rig_id`, overwriting
+    whatever filter `slots` the rig currently declares — for when a rig and its driver
+    disagree and the operator decides the *driver* is the source of truth this time. Either
+    direction raises if `role` isn't a connected `filterWheel`-like component, or if the
+    device doesn't expose `FILTER_NAME`; `to_driver` additionally raises if the rig and driver
+    declare a different *number* of filter slots (refuses to push a configuration for what's
+    likely a differently-sized wheel); `from_driver` additionally raises if the driver
+    declares no filter slots at all, or if persisting the change to the rig's YAML file fails.
+
+    Every other combination — `role`/`direction` with `action="check"`, `rig_id`/`role`/
+    `direction` with `action="suggest"`, `action="sync"` missing `rig_id`/`role`/`direction`
+    — raises `ValueError`.
+    """
+    if action == "suggest":
+        if rig_id is not None or role is not None or direction is not None:
+            raise ValueError('rig_id/role/direction are not valid with action="suggest"')
+        return rig_store.suggest_rig(indi_messaging.list_devices())
+
+    if rig_id is None:
+        raise ValueError(f"action={action!r} requires rig_id")
+
+    if action == "check":
+        if role is not None or direction is not None:
+            raise ValueError('role/direction are only valid with action="sync"')
+        return rig_store.check_rig(rig_id, indi_messaging.list_devices())
+
+    if role is None or direction is None:
+        raise ValueError('action="sync" requires both role and direction')
+    component = _resolve_unique_connected_component(rig_id, role)
+    assert component.device is not None  # guaranteed by _resolve_unique_connected_component
+    if direction == "to_driver":
+        return await script_engine.sync_filter_names(role, component.device, component.slots or {})
+    return await script_engine.adopt_filter_names_from_driver(
+        rig_id, role, component.device, component.slots or {}
+    )
 
 
 @mcp.tool()

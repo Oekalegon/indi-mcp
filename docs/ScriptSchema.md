@@ -263,9 +263,10 @@ driver's own live `FILTER_NAME` (INDIMCP-64):
   names), the step fails with a `filterConfigMismatch` issue and the run aborts — selecting a
   filter under a config mismatch risks moving the wrong physical filter into the light path, so
   this never guesses which side is right or silently proceeds. Fix the disagreement (hand-edit
-  the rig, reconfigure the driver, run `sync_filter_names` to push the rig's config onto the
-  driver, or run `adopt_filter_names_from_driver` to copy the driver's config onto the rig)
-  before selecting a filter again.
+  the rig, reconfigure the driver, run the `sync_filter_names` step (or `rig_diagnostics`'s
+  `action="sync"`, `direction="to_driver"`) to push the rig's config onto the driver, or run
+  the `adopt_filter_names_from_driver` step (or `direction="from_driver"`) to copy the driver's
+  config onto the rig) before selecting a filter again.
 * Skipped entirely if the driver doesn't expose `FILTER_NAME` at all, or if neither side has any
   slots configured.
 
@@ -283,7 +284,7 @@ disagree — the same reconciliation `select_filter` performs automatically, exc
 pushes the rig's config onto the driver rather than adopting the driver's names or failing. A
 deliberate, standalone action (INDIMCP-64): never invoked automatically by `select_filter`,
 which only ever adopts-if-empty or fails fatally on a real mismatch (see above); include this
-step (or call the equivalent `sync_filter_names` MCP tool) wherever the rig's config should
+step (or call `rig_diagnostics`'s equivalent `action="sync"`, `direction="to_driver"`) wherever the rig's config should
 overwrite the driver's own `FILTER_NAME`. Fails (`scriptFailed`) if the driver doesn't expose
 `FILTER_NAME` at all, if the rig has no `slots` configured, or if the rig and the driver declare
 a *different number* of filter slots (refusing to push a configuration for what's likely a
@@ -407,7 +408,7 @@ unchanged on different physical setups: a `run_script` MCP call (or `run_script`
 below) carries a `rigId` alongside `script`/`parameters` (extending
 [Design.md § Calling scripts and script results](Design.md#calling-scripts-and-script-results)'s
 "Starting a script" shape), and every `role` a step references is resolved against that rig's
-`components` for the whole run — see `get_rig`/`check_rig` in [RigSchema.md](RigSchema.md). A
+`components` for the whole run — see `configuration`'s `action="get"`/`rig_diagnostics`'s `action="check"` in [RigSchema.md](RigSchema.md). A
 role with no matching component in the selected rig, or matching a component with no `device`
 (e.g. a `telescope` component, which has no INDI device of its own), is a validation error at
 run start, not a per-step runtime failure.
@@ -470,7 +471,7 @@ resolve correctly and safely across the whole library:
 
 ## Uploading client-authored scripts
 
-`save_script` (INDIMCP-9) lets a client write a script on the Client Computer and upload it to
+`configuration`'s `action="save"`, `kind="script"` (INDIMCP-9) lets a client write a script on the Client Computer and upload it to
 the MCP server to run, per [Design.md](Design.md#architecture-overview)'s scripting-layer intro
 and "YAML is loaded only with `yaml.safe_load`" above. Uploaded scripts are validated the same
 way as built-in ones (schema, then the library-wide `run_script`/cycle/argument checks from
@@ -488,7 +489,7 @@ than being written and silently dropped at the next load.
   `id`-keyed library before validation, so a `run_script` step in an uploaded script can call a
   built-in one and vice versa — same as any other `run_script` reference in "Script composition".
 * **A built-in `id` always wins.** If an uploaded script's `id` collides with a built-in one, the
-  built-in is kept and the uploaded script is dropped (logged) at load time; `save_script` itself
+  built-in is kept and the uploaded script is dropped (logged) at load time; `configuration`'s `action="save"` itself
   rejects an upload that reuses a built-in `id` outright, so a client can never shadow or
   override built-in behavior by choosing the same `id`.
 * **Uploads are validated against the *whole* merged library, not just themselves.** Saving a
