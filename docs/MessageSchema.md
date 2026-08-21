@@ -23,7 +23,7 @@ messaging layer) a `type` field naming the underlying INDI property type. `kind`
 | `propertyCommand` | messaging | `new*Vector` | A command was sent to a property (client → server). |
 | `propertyDeleted` | messaging | `delProperty` | A property (or, if `name` is absent, a whole device) was removed. |
 | `message` | messaging | `message` | A driver/device log message, not tied to a specific property. |
-| `scriptStarted`, `scriptProgress`, `scriptMessage`, `scriptCompleted`, `scriptFailed`, `scriptCancelled`, `scriptPaused`, `scriptResumed`, `scriptPauseRejected` | scripting | — | See [Design.md § Calling scripts and script results](Design.md#calling-scripts-and-script-results); field reference in [Scripting layer envelope](#scripting-layer-envelope) below. `scriptMessage` (INDIMCP-58) is never returned by `get_script_status` — see that row below. |
+| `scriptStarted`, `scriptProgress`, `scriptMessage`, `scriptCompleted`, `scriptFailed`, `scriptCancelled`, `scriptPaused`, `scriptResumed`, `scriptPauseRejected` | scripting | — | See [Design.md § Calling scripts and script results](Design.md#calling-scripts-and-script-results); field reference in [Scripting layer envelope](#scripting-layer-envelope) below. `scriptMessage` (INDIMCP-58) is never returned by `manage_script_run`'s `action="status"` — see that row below. |
 | `connectionMade`, `connectionLost` | connection | `ConnectionMade`/`ConnectionLost` (local, `target="server"` only) or process-level (`target="indiserver"`/a driver label) | See [Connection-lifecycle envelope](#connection-lifecycle-envelope) below (INDIMCP-57). |
 
 `type` (messaging `kind`s only) is one of `text`, `number`, `switch`, `light`, `blob`, matching
@@ -220,7 +220,7 @@ bare `runId` to poll with).
 |---|---|
 | `scriptStarted` | `script` (string), `startedAt` (ISO 8601), `pausable` (boolean) |
 | `scriptProgress` | `step` (integer), `totalSteps` (integer \| null), `message` (string \| null), `role` (string \| null), `device` (string \| null) |
-| `scriptMessage` | `message` (string), `role` (string \| null), `device` (string \| null) — **not** returned by `get_script_status` (see below) |
+| `scriptMessage` | `message` (string), `role` (string \| null), `device` (string \| null) — **not** returned by `manage_script_run`'s `action="status"` (see below) |
 | `scriptCompleted` | `finishedAt` (ISO 8601), `result` (script-defined summary object) |
 | `scriptFailed` | `failedAtStep` (integer), `error` (`{ "message": string }`) |
 | `scriptCancelled` | `cancelledAtStep` (integer), `finishedAt` (ISO 8601) |
@@ -233,8 +233,9 @@ progress reports on is acting on — `null` for a step with no single role of it
 (`run_script`, a `count`-based `repeat`). `scriptMessage` is a lower-noise, message-only
 sibling of `scriptProgress` for a step handler to report per-invocation activity (e.g.
 `capture_frame` reporting the frame it just saved) without that being a numbered progress
-step — unlike every other `kind` in this table, it's **not** part of `get_script_status`'s
-"current status" response, since it's a point-in-time note rather than run state; a client
+step — unlike every other `kind` in this table, it's **not** part of `manage_script_run`'s
+`action="status"` "current status" response, since it's a point-in-time note rather than run
+state; a client
 only sees it live via `indi://mcp-server/scripts` or by replaying the event log.
 
 ## Connection-lifecycle envelope
@@ -291,7 +292,7 @@ display it.
 `scriptProgress`'s optional `triggeredBy` field (a nested messaging-layer event, per
 [Design.md § Event streams](Design.md#event-streams)) is not yet implemented — it's part of the
 not-yet-built `indi://scripts` resource (INDIMCP-14), not the current polling-only
-`get_script_status`, and its shape when added is exactly the messaging-layer `propertyUpdate`
+`manage_script_run`'s `action="status"`, and its shape when added is exactly the messaging-layer `propertyUpdate`
 object documented above.
 
 ## Implementation note

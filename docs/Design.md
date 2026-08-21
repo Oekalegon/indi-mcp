@@ -86,9 +86,9 @@ The tool call's immediate result acknowledges the run has started, using the sam
 
 Whether a run can be paused (see below) depends on the script itself — some scripts have no safe point to suspend at (e.g. mid-slew), others do (e.g. between exposures in a capture sequence). The `pausable` flag reports this upfront, decided by the script definition rather than by the caller.
 
-**Named convenience wrappers** (INDIMCP-49, consolidated INDIMCP-116) — the most common built-in scripts (`park`, `unpark`, `slew`, `cool_camera`, `cooler_on`, `cooler_off`, `abort_exposure`, `select_filter`, `set_focus_position`, `connect`, `disconnect`, `capture_frame`, `track_off`, `set_track_mode`, `set_custom_tracking_rate`) are each still one `action` of one of five typed MCP tools grouped by device role — `mount_action`, `camera_action`, `filter_wheel_action`, `focuser_action`, `set_connection` (e.g. `mount_action(rigId, action="slew", ra=..., dec=...)`) — rather than requiring every caller to go through `run_script("slew", rigId, {"ra": ..., "dec": ...})` directly. (Each of those fifteen wrapper tools originally existed one-to-one with these script names; INDIMCP-116 grouped them by device to shrink the overall MCP tool count — see `docs/ToolSurfaceRedesign.md`.) Each still just picks which built-in script to run based on `action` — a thin passthrough to the exact same `run_script`/`start_script` machinery — same `runId`, same asynchronous "returns immediately" contract, same `get_script_status`/`cancel_script`/`pause_script`/`resume_script` story — so nothing above changes; this is purely about giving MCP clients a better-typed, more discoverable entry point for a single common action. It doesn't replace the scripting layer: the underlying `scripts/*.yaml` file still exists and is still what a composed sequence's own `run_script`/`repeat`/`if` steps call into (e.g. `capture_light_sequence` calling `cool_camera` and `select_filter` internally) — scripts remain how more complex, multi-step sequences get built and reused, while the wrapper tools exist for a single action taken on its own.
+**Named convenience wrappers** (INDIMCP-49, consolidated INDIMCP-116) — the most common built-in scripts (`park`, `unpark`, `slew`, `cool_camera`, `cooler_on`, `cooler_off`, `abort_exposure`, `select_filter`, `set_focus_position`, `connect`, `disconnect`, `capture_frame`, `track_off`, `set_track_mode`, `set_custom_tracking_rate`) are each still one `action` of one of five typed MCP tools grouped by device role — `mount_action`, `camera_action`, `filter_wheel_action`, `focuser_action`, `set_connection` (e.g. `mount_action(rigId, action="slew", ra=..., dec=...)`) — rather than requiring every caller to go through `run_script("slew", rigId, {"ra": ..., "dec": ...})` directly. (Each of those fifteen wrapper tools originally existed one-to-one with these script names; INDIMCP-116 grouped them by device to shrink the overall MCP tool count — see `docs/ToolSurfaceRedesign.md`.) Each still just picks which built-in script to run based on `action` — a thin passthrough to the exact same `run_script`/`start_script` machinery — same `runId`, same asynchronous "returns immediately" contract, same `manage_script_run` story — so nothing above changes; this is purely about giving MCP clients a better-typed, more discoverable entry point for a single common action. It doesn't replace the scripting layer: the underlying `scripts/*.yaml` file still exists and is still what a composed sequence's own `run_script`/`repeat`/`if` steps call into (e.g. `capture_light_sequence` calling `cool_camera` and `select_filter` internally) — scripts remain how more complex, multi-step sequences get built and reused, while the wrapper tools exist for a single action taken on its own.
 
-**Progress** — while connected, the client receives streamed progress notifications for the run; after a reconnect, the same information can be fetched with a `runId` lookup (e.g. a `get_script_status` tool):
+**Progress** — while connected, the client receives streamed progress notifications for the run; after a reconnect, the same information can be fetched with a `runId` lookup (`manage_script_run`'s `action="status"`):
 
 ```json
 {
@@ -124,8 +124,8 @@ regardless of whether there's anything to say):
 Not every primitive emits these — only ones with per-invocation activity worth surfacing
 live (`capture_frame` reporting the frame it just saved is the first case). Published to
 `indi://mcp-server/scripts` and the durable event log like every other status here, but **not** part of
-`get_script_status`'s "current status" reconnect story — it's a point-in-time note, not a
-change to the run's state, so it never overwrites what `get_script_status` returns for a
+`manage_script_run`'s `action="status"` "current status" reconnect story — it's a point-in-time
+note, not a change to the run's state, so it never overwrites what that action returns for a
 `runId` (a reconnecting client polling for "what's the run doing right now" still gets the
 most recent `scriptProgress`/terminal status, not a stale message).
 
@@ -160,7 +160,7 @@ rather than `scriptCompleted` duplicating data that already lives in the `frames
 }
 ```
 
-**Cancelling** — a `cancel_script` tool call, taking just the `runId`, always applies (any run can be cancelled, regardless of `pausable`). It stops the script promptly at the next safe point and returns a terminal status:
+**Cancelling** — `manage_script_run`'s `action="cancel"`, taking just the `runId`, always applies (any run can be cancelled, regardless of `pausable`). It stops the script promptly at the next safe point and returns a terminal status:
 
 ```json
 {
@@ -173,7 +173,7 @@ rather than `scriptCompleted` duplicating data that already lives in the `frames
 
 Cancelling while a `capture_frame` step's exposure is still in flight also sends `CCD_ABORT_EXPOSURE` to the camera, best-effort, before returning `scriptCancelled` (INDIMCP-86) — otherwise the camera would keep physically exposing after the run itself has already stopped. The same abort is sent, best-effort, if that exposure wait instead times out (a hung driver or flaky USB connection never bringing `CCD_EXPOSURE` to `Ok`) before the run fails with `scriptFailed` (INDIMCP-92) — same underlying gap, just the second trigger that can leave a `capture_frame` exposure abandoned mid-flight. This is the only step type cancellation/timeout reaches into like this; every other step still just stops promptly at the next safe point with no device-specific cleanup. `camera_action`'s `action="abort_exposure"` (above) also exists as its own call outside a script run, for aborting an exposure standalone.
 
-**Pausing and resuming** — `pause_script` and `resume_script` tool calls, also taking just the `runId`. These only succeed if the run's `pausable` flag was `true`:
+**Pausing and resuming** — `manage_script_run`'s `action="pause"`/`"resume"`, also taking just the `runId`. These only succeed if the run's `pausable` flag was `true`:
 
 ```json
 {
@@ -293,7 +293,7 @@ They share the same envelope convention (not the same channel) so client-side pa
 
 **Mechanism:** these are implemented as standard MCP subscribable resources. A client calls `resources/subscribe` on a URI (e.g. `indi://mcp-server/scripts` or `indi://mcp-server/scripts/{runId}`); the server sends `notifications/resources/updated` whenever a new event occurs; the client calls `resources/read` to fetch it. Resource content is a small JSON envelope with a rolling window of recent events, e.g. `{ "events": [ ... ] }`.
 
-**These subscriptions are a best-effort, live-only channel, not the resilience mechanism.** A client that was offline (e.g. the Wi-Fi drop scenario from the intro) should not assume it received every event it missed — it should treat the subscription as "notify me while I'm connected" and use the `runId`-based polling tools (`get_script_status`, etc.) and the event log (below) as the source of truth to catch up after reconnecting.
+**These subscriptions are a best-effort, live-only channel, not the resilience mechanism.** A client that was offline (e.g. the Wi-Fi drop scenario from the intro) should not assume it received every event it missed — it should treat the subscription as "notify me while I'm connected" and use the `runId`-based polling tools (`manage_script_run`'s `action="status"`, etc.) and the event log (below) as the source of truth to catch up after reconnecting.
 
 ## Event log
 
@@ -320,7 +320,7 @@ CREATE INDEX idx_events_target ON events (target);
 
 **Retention:** events older than **1 day** are purged, since this log exists to bridge reconnects and short-term history — not as permanent storage (captured frames have their own, separate storage; see the scripting layer above). Purging runs periodically (e.g. hourly) as a `DELETE FROM events WHERE occurred_at < ?` against the indexed column, followed by an incremental `VACUUM` to reclaim space and limit SD-card write wear.
 
-**Catch-up query:** a client that reconnects can fetch what it missed with a query against this log — e.g. a `get_events` tool taking `stream`, optional `device`/`run_id`/`target` filters, and a `since` timestamp — rather than relying only on `get_script_status` for scripts and having no equivalent history for INDI messages or connection state.
+**Catch-up query:** a client that reconnects can fetch what it missed with a query against this log — e.g. a `get_events` tool taking `stream`, optional `device`/`run_id`/`target` filters, and a `since` timestamp — rather than relying only on `manage_script_run`'s `action="status"` for scripts and having no equivalent history for INDI messages or connection state.
 
 **Backpressure on the write path (INDIMCP-59):** durable writes are serialized through a single bounded in-process queue and one persistent worker task, not a fresh task per event. A "chatty" device's `propertyUpdate`s can arrive many times a second, and spawning an unbounded `asyncio.to_thread` write per event would let arbitrarily many threads pile up all contending for the same SQLite write lock — on a resource-constrained Pi, that risks exhausting the process's thread pool entirely, starving every other blocking call sharing it (frame storage, the retention purge). If the queue fills faster than the worker can drain it, the *oldest* queued event is dropped to make room for the newest, matching the same bounded, newest-biased policy the in-memory live-view buffers already use, rather than letting the queue grow without limit.
 

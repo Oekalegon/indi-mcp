@@ -62,7 +62,7 @@ Grouped by device role rather than by verb — matches how a rig user already th
 | `focuser_action` | `set_focus_position` | `(rig_id, action: "set_position", position)` |
 | `set_connection` | `connect`, `disconnect` | `(rig_id, role, connected: bool)` |
 
-### Script run control (was 4 tools → 1)
+### Script run control (was 4 tools → 1) — implemented (INDIMCP-117)
 
 | Tool | Replaces | Signature |
 |---|---|---|

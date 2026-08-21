@@ -1498,7 +1498,9 @@ def test_merged_action_tool_params_match_the_scripts_own_parameters(script_id: s
             )
 
 
-def test_get_script_status_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_manage_script_run_status_delegates_to_script_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
 
     def fake_get_script_status(run_id: str) -> dict:
@@ -1507,13 +1509,15 @@ def test_get_script_status_delegates_to_script_runs(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(script_runs, "get_script_status", fake_get_script_status)
 
-    result = server.get_script_status("abc")
+    result = await server.manage_script_run("abc", "status")
 
     assert result == {"kind": "scriptProgress", "runId": "abc"}
     assert calls == ["abc"]
 
 
-async def test_cancel_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_manage_script_run_cancel_delegates_to_script_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
 
     async def fake_cancel_script(run_id: str) -> dict:
@@ -1522,13 +1526,15 @@ async def test_cancel_script_delegates_to_script_runs(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(script_runs, "cancel_script", fake_cancel_script)
 
-    result = await server.cancel_script("abc")
+    result = await server.manage_script_run("abc", "cancel")
 
     assert result == {"kind": "scriptCancelled", "runId": "abc"}
     assert calls == ["abc"]
 
 
-def test_pause_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_manage_script_run_pause_delegates_to_script_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
 
     def fake_pause_script(run_id: str) -> dict:
@@ -1537,13 +1543,15 @@ def test_pause_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(script_runs, "pause_script", fake_pause_script)
 
-    result = server.pause_script("abc")
+    result = await server.manage_script_run("abc", "pause")
 
     assert result == {"kind": "scriptPaused", "runId": "abc"}
     assert calls == ["abc"]
 
 
-def test_resume_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_manage_script_run_resume_delegates_to_script_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
 
     def fake_resume_script(run_id: str) -> dict:
@@ -1552,7 +1560,7 @@ def test_resume_script_delegates_to_script_runs(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(script_runs, "resume_script", fake_resume_script)
 
-    result = server.resume_script("abc")
+    result = await server.manage_script_run("abc", "resume")
 
     assert result == {"kind": "scriptResumed", "runId": "abc"}
     assert calls == ["abc"]
