@@ -687,99 +687,130 @@ async def run_script(
 # complex multi-step sequences (e.g. `capture_light_sequence`) get built.
 
 
-@mcp.tool()
-async def park(rig_id: str) -> ScriptRunStarted:
-    """Park the rig's mount — see `scripts/park.yaml` (INDIMCP-48)."""
-    return await script_runs.start_script("park", rig_id, {})
+_MOUNT_ACTION_PARAMS: dict[str, set[str]] = {
+    "park": set(),
+    "unpark": set(),
+    "track_off": set(),
+    "slew": {"ra", "dec"},
+    "set_track_mode": {"modeSwitchElement"},
+    "set_custom_tracking_rate": {"raRateArcsecPerSec", "decRateArcsecPerSec"},
+}
+"""`mount_action`'s per-`action` parameter set — every param here is required for its action
+(none are optional), so this doubles as both the allowed and the required set. Exposed as a
+module-level constant, rather than kept local to `mount_action`, so
+`test_wrapper_tool_signature_matches_the_scripts_own_parameters` can keep cross-checking each
+action's parameters against its underlying script's own declared parameters directly, the way
+it did for the standalone wrapper tools this replaces — a single source of truth instead of a
+second hardcoded expectations list drifting out of sync with either side.
+"""
 
 
 @mcp.tool()
-async def unpark(rig_id: str) -> ScriptRunStarted:
-    """Unpark the rig's mount — see `scripts/unpark.yaml` (INDIMCP-48)."""
-    return await script_runs.start_script("unpark", rig_id, {})
-
-
-@mcp.tool()
-async def slew(rig_id: str, ra: float, dec: float) -> ScriptRunStarted:
-    """Slew the rig's mount to a fixed RA/Dec — see `scripts/slew.yaml` (INDIMCP-8).
-
-    `ra` is in hours, `dec` in degrees. Slewing to a named object (e.g. "M101") isn't
-    supported yet (INDIMCP-29).
-    """
-    return await script_runs.start_script("slew", rig_id, {"ra": ra, "dec": dec})
-
-
-@mcp.tool()
-async def cool_camera(
-    rig_id: str, targetTempC: float = -10, timeoutSeconds: float = 300
-) -> ScriptRunStarted:
-    """Cool the rig's camera to `targetTempC` and wait for it to stabilize — see
-    `scripts/cool_camera.yaml` (INDIMCP-56)."""
-    return await script_runs.start_script(
-        "cool_camera", rig_id, {"targetTempC": targetTempC, "timeoutSeconds": timeoutSeconds}
-    )
-
-
-@mcp.tool()
-async def cooler_on(rig_id: str) -> ScriptRunStarted:
-    """Turn on the rig's camera cooler — see `scripts/cooler_on.yaml` (INDIMCP-84)."""
-    return await script_runs.start_script("cooler_on", rig_id, {})
-
-
-@mcp.tool()
-async def cooler_off(rig_id: str) -> ScriptRunStarted:
-    """Turn off the rig's camera cooler — see `scripts/cooler_off.yaml` (INDIMCP-84)."""
-    return await script_runs.start_script("cooler_off", rig_id, {})
-
-
-@mcp.tool()
-async def abort_exposure(rig_id: str) -> ScriptRunStarted:
-    """Abort the rig's camera's in-progress exposure — see `scripts/abort_exposure.yaml`
-    (INDIMCP-86)."""
-    return await script_runs.start_script("abort_exposure", rig_id, {})
-
-
-@mcp.tool()
-async def select_filter(rig_id: str, filterName: str) -> ScriptRunStarted:
-    """Select a filter on the rig's filter wheel by name — see `scripts/select_filter.yaml`
-    (INDIMCP-61).
-
-    Reconciles the rig's configured filter names against the driver's live state before
-    selecting (adopts the driver's names if the rig has none configured, fails fatally on a
-    real disagreement) — see `sync_filter_names`/`adopt_filter_names_from_driver` for how to
-    resolve a disagreement explicitly.
-    """
-    return await script_runs.start_script("select_filter", rig_id, {"filterName": filterName})
-
-
-@mcp.tool()
-async def set_focus_position(rig_id: str, position: int) -> ScriptRunStarted:
-    """Move the rig's focuser to an absolute position — see `scripts/set_focus_position.yaml`
-    (INDIMCP-62/63). Checked against the rig component's own `minPosition`/`maxPosition`,
-    if declared.
-    """
-    return await script_runs.start_script("set_focus_position", rig_id, {"position": position})
-
-
-@mcp.tool()
-async def connect(rig_id: str, role: str) -> ScriptRunStarted:
-    """Connect whichever device fills `role` in `rig_id` — see `scripts/connect.yaml`."""
-    return await script_runs.start_script("connect", rig_id, {"role": role})
-
-
-@mcp.tool()
-async def disconnect(rig_id: str, role: str) -> ScriptRunStarted:
-    """Disconnect whichever device fills `role` in `rig_id` — see `scripts/disconnect.yaml`."""
-    return await script_runs.start_script("disconnect", rig_id, {"role": role})
-
-
-@mcp.tool()
-async def capture_frame(
+async def mount_action(
     rig_id: str,
-    exposureSeconds: float,
-    frameType: FrameType = "Light",
-    binningX: int = 1,
-    binningY: int = 1,
+    action: Literal[
+        "park", "unpark", "slew", "track_off", "set_track_mode", "set_custom_tracking_rate"
+    ],
+    ra: float | None = None,
+    dec: float | None = None,
+    modeSwitchElement: str | None = None,
+    raRateArcsecPerSec: float | None = None,
+    decRateArcsecPerSec: float | None = None,
+) -> ScriptRunStarted:
+    """Park, unpark, slew, stop tracking, or set the rig's mount's tracking mode/rate —
+    replaces `park`/`unpark`/`slew`/`track_off`/`set_track_mode`/`set_custom_tracking_rate`
+    (INDIMCP-116). Each action starts the built-in script of the same name (e.g.
+    `action="park"` runs `scripts/park.yaml`) with exactly that action's own parameters.
+
+    `ra`/`dec` (`ra` in hours, `dec` in degrees) are required for, and only valid with,
+    `action="slew"` (INDIMCP-8) — slewing to a named object (e.g. "M101") isn't supported yet
+    (INDIMCP-29). `modeSwitchElement` is required for, and only valid with,
+    `action="set_track_mode"` (INDIMCP-49) — the INDI `TELESCOPE_TRACK_MODE` switch member to
+    enable, e.g. `"TRACK_SIDEREAL"`, `"TRACK_SOLAR"`, `"TRACK_LUNAR"`, or `"TRACK_CUSTOM"`
+    (pair the last with `action="set_custom_tracking_rate"` to also set a custom rate).
+    `raRateArcsecPerSec`/`decRateArcsecPerSec` are required for, and only valid with,
+    `action="set_custom_tracking_rate"` (INDIMCP-49), which also selects custom tracking on
+    the mount. `park`/`unpark`/`track_off` (INDIMCP-48/49) take no parameters at all — any
+    parameter above given alongside an action it doesn't belong to raises `ValueError`.
+    """
+    given = {
+        "ra": ra,
+        "dec": dec,
+        "modeSwitchElement": modeSwitchElement,
+        "raRateArcsecPerSec": raRateArcsecPerSec,
+        "decRateArcsecPerSec": decRateArcsecPerSec,
+    }
+    given_names = {name for name, value in given.items() if value is not None}
+    allowed = _MOUNT_ACTION_PARAMS[action]
+    if given_names != allowed:
+        raise ValueError(
+            f"action={action!r} requires exactly {sorted(allowed)}, got {sorted(given_names)}"
+        )
+    return await script_runs.start_script(action, rig_id, {name: given[name] for name in allowed})
+
+
+_CAMERA_ACTION_ALLOWED_PARAMS: dict[str, set[str]] = {
+    "cool": {"targetTempC", "timeoutSeconds"},
+    "cooler_on": set(),
+    "cooler_off": set(),
+    "abort_exposure": set(),
+    "capture_frame": {
+        "exposureSeconds",
+        "frameType",
+        "binningX",
+        "binningY",
+        "gain",
+        "offset",
+        "frameX",
+        "frameY",
+        "frameWidth",
+        "frameHeight",
+        "location_id",
+    },
+}
+_CAMERA_ACTION_REQUIRED_PARAMS: dict[str, set[str]] = {
+    "cool": set(),
+    "cooler_on": set(),
+    "cooler_off": set(),
+    "abort_exposure": set(),
+    "capture_frame": {"exposureSeconds"},
+}
+"""`camera_action`'s per-`action` allowed/required parameter sets, exposed as module-level
+constants for the same reason as `_MOUNT_ACTION_PARAMS` above. `cool`'s parameters are
+optional at the tool-schema level (see `docs/ToolSurfaceRedesign.md`'s conditional-defaults
+trade-off) but still real script parameters with real defaults once resolved — see
+`_CAMERA_ACTION_RESOLVED_DEFAULTS` below for the values `test_wrapper_tool_signature_matches_
+the_scripts_own_parameters` checks those resolve to.
+"""
+
+_CAMERA_ACTION_RESOLVED_DEFAULTS: dict[str, Any] = {
+    "targetTempC": -10,
+    "timeoutSeconds": 300,
+    "frameType": "Light",
+    "binningX": 1,
+    "binningY": 1,
+}
+"""The real default `camera_action` resolves each optional parameter to when omitted (matching
+the old `cool_camera`/`capture_frame` tools' own defaults) — not visible in `camera_action`'s
+own Python signature, where every parameter defaults to `None` as a sentinel meaning "omitted",
+since the same parameter's real default differs by `action` (`docs/ToolSurfaceRedesign.md`'s
+conditional-defaults trade-off). Exposed here purely so
+`test_wrapper_tool_signature_matches_the_scripts_own_parameters` can still check these against
+each script's own declared default, the same cross-check the old single-purpose wrapper tools
+got for free from their real (non-sentinel) Python defaults.
+"""
+
+
+@mcp.tool()
+async def camera_action(
+    rig_id: str,
+    action: Literal["cool", "cooler_on", "cooler_off", "abort_exposure", "capture_frame"],
+    targetTempC: float | None = None,
+    timeoutSeconds: float | None = None,
+    exposureSeconds: float | None = None,
+    frameType: FrameType | None = None,
+    binningX: int | None = None,
+    binningY: int | None = None,
     gain: float | None = None,
     offset: float | None = None,
     frameX: int | None = None,
@@ -788,22 +819,70 @@ async def capture_frame(
     frameHeight: int | None = None,
     location_id: str | None = None,
 ) -> ScriptRunStarted:
-    """Capture a single frame from the rig's camera — see `scripts/capture_frame.yaml`
-    (INDIMCP-44).
+    """Cool the rig's camera, toggle its cooler, abort an in-progress exposure, or capture a
+    frame — replaces `cool_camera`/`cooler_on`/`cooler_off`/`abort_exposure`/`capture_frame`
+    (INDIMCP-116).
 
-    `gain`/`offset` omitted (the default) leave the device's current setting alone rather
-    than sending a fixed number. `frameX`/`frameY`/`frameWidth`/`frameHeight` default to the
-    full sensor; set all four together for a sub-frame. `location_id` is passed straight
-    through to `run_script` for this script's own celestial-context FITS header enrichment.
+    `action="cool"` (INDIMCP-56) takes `targetTempC`/`timeoutSeconds`, both optional
+    (defaulting to `-10`/`300`, same as the old `cool_camera` tool's own defaults — omitted
+    here rather than given real parameter defaults, since a default only applies to this one
+    action; see `docs/ToolSurfaceRedesign.md`'s conditional-defaults trade-off). `action=
+    "cooler_on"`/`"cooler_off"`/`"abort_exposure"` (INDIMCP-84/86) take no parameters.
+    `action="capture_frame"` (INDIMCP-44) requires `exposureSeconds`; `frameType`/`binningX`/
+    `binningY` default to `"Light"`/`1`/`1` if omitted (same reasoning as `cool`'s defaults);
+    `gain`/`offset` omitted leave the device's current setting alone rather than sending a
+    fixed number; `frameX`/`frameY`/`frameWidth`/`frameHeight` default to the full sensor —
+    set all four together for a sub-frame; `location_id` is passed straight through to
+    `run_script` for this script's own celestial-context FITS header enrichment. Any parameter
+    given alongside an action it doesn't belong to, or a required parameter missing for the
+    action given, raises `ValueError`.
     """
+    given = {
+        "targetTempC": targetTempC,
+        "timeoutSeconds": timeoutSeconds,
+        "exposureSeconds": exposureSeconds,
+        "frameType": frameType,
+        "binningX": binningX,
+        "binningY": binningY,
+        "gain": gain,
+        "offset": offset,
+        "frameX": frameX,
+        "frameY": frameY,
+        "frameWidth": frameWidth,
+        "frameHeight": frameHeight,
+        "location_id": location_id,
+    }
+    given_names = {name for name, value in given.items() if value is not None}
+    allowed = _CAMERA_ACTION_ALLOWED_PARAMS[action]
+    required = _CAMERA_ACTION_REQUIRED_PARAMS[action]
+    if not given_names <= allowed:
+        raise ValueError(f"action={action!r} doesn't accept {sorted(given_names - allowed)}")
+    if not required <= given_names:
+        raise ValueError(f"action={action!r} requires {sorted(required)}")
+
+    defaults = _CAMERA_ACTION_RESOLVED_DEFAULTS
+    if action == "cool":
+        return await script_runs.start_script(
+            "cool_camera",
+            rig_id,
+            {
+                "targetTempC": targetTempC if targetTempC is not None else defaults["targetTempC"],
+                "timeoutSeconds": (
+                    timeoutSeconds if timeoutSeconds is not None else defaults["timeoutSeconds"]
+                ),
+            },
+        )
+    if action in ("cooler_on", "cooler_off", "abort_exposure"):
+        return await script_runs.start_script(action, rig_id, {})
+
     return await script_runs.start_script(
         "capture_frame",
         rig_id,
         {
             "exposureSeconds": exposureSeconds,
-            "frameType": frameType,
-            "binningX": binningX,
-            "binningY": binningY,
+            "frameType": frameType if frameType is not None else defaults["frameType"],
+            "binningX": binningX if binningX is not None else defaults["binningX"],
+            "binningY": binningY if binningY is not None else defaults["binningY"],
             "gain": gain,
             "offset": offset,
             "frameX": frameX,
@@ -812,6 +891,44 @@ async def capture_frame(
             "frameHeight": frameHeight,
         },
         location_id=location_id,
+    )
+
+
+@mcp.tool()
+async def filter_wheel_action(
+    rig_id: str, action: Literal["select"], filterName: str
+) -> ScriptRunStarted:
+    """Select a filter on the rig's filter wheel by name — replaces `select_filter`
+    (INDIMCP-116, INDIMCP-61).
+
+    Reconciles the rig's configured filter names against the driver's live state before
+    selecting (adopts the driver's names if the rig has none configured, fails fatally on a
+    real disagreement) — see `rig_diagnostics`'s `action="sync"` for how to resolve a
+    disagreement explicitly. `action` only ever takes `"select"` today — kept as an explicit
+    discriminator, matching every other `*_action` tool in this group, so a future filter
+    wheel action (e.g. a `"home"` action) doesn't need another tool-surface change.
+    """
+    return await script_runs.start_script("select_filter", rig_id, {"filterName": filterName})
+
+
+@mcp.tool()
+async def focuser_action(
+    rig_id: str, action: Literal["set_position"], position: int
+) -> ScriptRunStarted:
+    """Move the rig's focuser to an absolute position — replaces `set_focus_position`
+    (INDIMCP-116, INDIMCP-62/63). Checked against the rig component's own `minPosition`/
+    `maxPosition`, if declared. `action` only ever takes `"set_position"` today — kept as an
+    explicit discriminator for the same reason as `filter_wheel_action`'s.
+    """
+    return await script_runs.start_script("set_focus_position", rig_id, {"position": position})
+
+
+@mcp.tool()
+async def set_connection(rig_id: str, role: str, connected: bool) -> ScriptRunStarted:
+    """Connect or disconnect whichever device fills `role` in `rig_id` — replaces
+    `connect`/`disconnect` (INDIMCP-116)."""
+    return await script_runs.start_script(
+        "connect" if connected else "disconnect", rig_id, {"role": role}
     )
 
 
@@ -1008,41 +1125,6 @@ async def download_astrometry_index_files(
     if not index_numbers:
         raise ValueError(f"no known {catalog!r} scale covers {minArcmin}-{maxArcmin} arcmin")
     return await astrometry_index.download_index_files(index_numbers, catalog=catalog)
-
-
-@mcp.tool()
-async def track_off(rig_id: str) -> ScriptRunStarted:
-    """Turn off the rig's mount tracking — see `scripts/track_off.yaml` (INDIMCP-49)."""
-    return await script_runs.start_script("track_off", rig_id, {})
-
-
-@mcp.tool()
-async def set_track_mode(rig_id: str, modeSwitchElement: str) -> ScriptRunStarted:
-    """Select the rig's mount tracking mode — see `scripts/set_track_mode.yaml` (INDIMCP-49).
-
-    `modeSwitchElement` is the INDI `TELESCOPE_TRACK_MODE` switch member to enable, e.g.
-    `"TRACK_SIDEREAL"`, `"TRACK_SOLAR"`, `"TRACK_LUNAR"`, or `"TRACK_CUSTOM"` (pair the last
-    with `set_custom_tracking_rate` to also set a custom rate).
-    """
-    return await script_runs.start_script(
-        "set_track_mode", rig_id, {"modeSwitchElement": modeSwitchElement}
-    )
-
-
-@mcp.tool()
-async def set_custom_tracking_rate(
-    rig_id: str, raRateArcsecPerSec: float, decRateArcsecPerSec: float
-) -> ScriptRunStarted:
-    """Select custom tracking on the rig's mount and set its RA/Dec rate — see
-    `scripts/set_custom_tracking_rate.yaml` (INDIMCP-49)."""
-    return await script_runs.start_script(
-        "set_custom_tracking_rate",
-        rig_id,
-        {
-            "raRateArcsecPerSec": raRateArcsecPerSec,
-            "decRateArcsecPerSec": decRateArcsecPerSec,
-        },
-    )
 
 
 @mcp.tool()
