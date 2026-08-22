@@ -79,7 +79,7 @@ an embedded expression language.)
 | `id` | string | yes | Stable identifier for this script. Used by `run_script` calls (from the Client Computer or from another script's `run_script` step) to reference it. Must be unique across the whole library; a duplicate `id` is logged and skipped, keeping whichever file loaded first (files read in sorted filename order) — matching `load_rigs`'s policy. |
 | `name` | string | yes | Human-readable display name. |
 | `description` | string | no | Longer human-readable explanation, surfaced to clients listing available scripts. |
-| `pausable` | boolean | yes | Whether `pause_script` can succeed on a run of this script (see [Design.md § Calling scripts and script results](Design.md#calling-scripts-and-script-results)). Required, not defaulted — every script author must explicitly decide this rather than the schema silently picking a default that might be unsafe (e.g. pausing mid-slew). |
+| `pausable` | boolean | yes | Whether `manage_script_run`'s `action="pause"` can succeed on a run of this script (see [Design.md § Calling scripts and script results](Design.md#calling-scripts-and-script-results)). Required, not defaulted — every script author must explicitly decide this rather than the schema silently picking a default that might be unsafe (e.g. pausing mid-slew). |
 | `parameters` | map of string → [Parameter](#parameter-fields) | no | Named, typed inputs this script accepts — from a top-level `run_script` MCP call, or from a `run_script` step in another script. Omit if the script takes none. |
 | `steps` | list of [Step](#step-primitives) | yes (may be empty) | The script's body, executed in order (except where a step's own semantics say otherwise — `repeat`, `if`). |
 

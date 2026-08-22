@@ -1161,34 +1161,25 @@ async def download_astrometry_index_files(
 
 
 @mcp.tool()
-def get_script_status(run_id: str) -> ScriptRunStatus:
-    """Return the most recently known status for a run started by `run_script`."""
-    return script_runs.get_script_status(run_id)
+async def manage_script_run(
+    run_id: str, action: Literal["status", "cancel", "pause", "resume"]
+) -> ScriptRunStatus | ScriptRunPaused | ScriptRunResumed | ScriptRunPauseRejected:
+    """Check status, cancel, pause, or resume a run started by `run_script` — replaces
+    `get_script_status`/`cancel_script`/`pause_script`/`resume_script` (INDIMCP-117).
 
-
-@mcp.tool()
-async def cancel_script(run_id: str) -> ScriptRunStatus:
-    """Cancel a run started by `run_script`, waiting for it to actually stop.
-
-    Always applies, regardless of whether the run is pausable — unlike
-    `pause_script`/`resume_script`.
+    `action="status"` returns the most recently known status for the run. `action="cancel"`
+    waits for the run to actually stop, and always applies regardless of whether the run is
+    pausable — unlike `action="pause"`/`"resume"`. `action="pause"` pauses the run at its next
+    safe point, only if its script declared itself `pausable` — rejected (not queued or
+    silently ignored) if the script has no safe point to suspend at.
+    `action="resume"` resumes a run previously paused with `action="pause"`.
     """
-    return await script_runs.cancel_script(run_id)
-
-
-@mcp.tool()
-def pause_script(run_id: str) -> ScriptRunPaused | ScriptRunPauseRejected:
-    """Pause a run at its next safe point — only if its script declared itself `pausable`.
-
-    Rejected (not queued or silently ignored) if the script has no safe
-    point to suspend at.
-    """
-    return script_runs.pause_script(run_id)
-
-
-@mcp.tool()
-def resume_script(run_id: str) -> ScriptRunResumed | ScriptRunPauseRejected:
-    """Resume a run previously paused with `pause_script`."""
+    if action == "status":
+        return script_runs.get_script_status(run_id)
+    if action == "cancel":
+        return await script_runs.cancel_script(run_id)
+    if action == "pause":
+        return script_runs.pause_script(run_id)
     return script_runs.resume_script(run_id)
 
 

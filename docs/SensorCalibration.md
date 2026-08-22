@@ -119,8 +119,10 @@ async def run_sensor_calibration_sweep(
 ```
 
 Paired with `get_sensor_calibration_sweep_status(sweep_id)` and
-`cancel_sensor_calibration_sweep(sweep_id)`, mirroring `run_script`/`get_script_status`/
-`cancel_script`'s own three-tool shape. The flat side (INDIMCP-103) gets its own equivalent
+`cancel_sensor_calibration_sweep(sweep_id)`, mirroring `run_script`'s own start/status/cancel
+shape (`get_script_status`/`cancel_script` have since merged into `manage_script_run`'s
+`action="status"`/`"cancel"`, INDIMCP-117 — this sweep's own three tools are unaffected, still
+separate). The flat side (INDIMCP-103) gets its own equivalent
 tool once the flat script split and panel-staging design below are settled — two tools, not one
 with a branch, per the "Open items" resolution below.
 
@@ -188,13 +190,14 @@ Two consequences worth knowing, both accepted rather than mitigated:
   every combination's `scriptStarted`/`scriptProgress`/`scriptCompleted` events publish under
   the same id, so a client subscribing to `indi://mcp-server/scripts/{sweepId}` sees the whole sweep's
   blow-by-blow without this module needing its own event-publishing story.
-* **`get_script_status`/`cancel_script`/`pause_script` also resolve against a `sweepId`** — it's
-  a real key in `script_runs`'s own `_runs` dict for as long as a combination is in flight under
-  it. They just answer about whichever single combination currently occupies that slot, not the
-  sweep as a whole, so calling the wrong tool on a sweep id gives a differently-grained (if
-  plausible-looking) answer rather than an error. Not a correctness bug — `script_runs` and
-  `sensor_calibration_sweep` remain independent tracking systems that happen to share an id
-  value — but worth knowing before reaching for `get_script_status` out of habit.
+* **`manage_script_run`'s `action="status"`/`"cancel"`/`"pause"` also resolve against a
+  `sweepId`** — it's a real key in `script_runs`'s own `_runs` dict for as long as a
+  combination is in flight under it. They just answer about whichever single combination
+  currently occupies that slot, not the sweep as a whole, so calling the wrong tool on a sweep
+  id gives a differently-grained (if plausible-looking) answer rather than an error. Not a
+  correctness bug — `script_runs` and `sensor_calibration_sweep` remain independent tracking
+  systems that happen to share an id value — but worth knowing before reaching for
+  `manage_script_run` out of habit.
 
 Safe only because a sweep's combinations run strictly sequentially, never concurrently (see
 `start_script`'s own docstring for the collision this relies on not happening) — a design
