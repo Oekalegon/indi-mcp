@@ -371,6 +371,19 @@ async def _run_sweep(
         _evict_finished_sweeps()
 
 
+def sweep_exists(sweep_id: str) -> bool:
+    """Whether `sweep_id` is a flat calibration sweep tracked here.
+
+    Lets a caller juggling more than one sweep tracker (`server.py`'s `manage_calibration_sweep`,
+    which also has `sensor_calibration_sweep`'s own sweeps to consider) find the right one by
+    membership rather than by triggering and catching `_get_sweep`'s `ValueError` — the two
+    trackers' ids never overlap, but probing by exception would tie that caller's correctness to
+    `get_sweep_status`/`cancel_sweep` never raising `ValueError` for any other reason, which
+    isn't this function's contract to keep.
+    """
+    return sweep_id in _sweeps
+
+
 def get_sweep_status(sweep_id: str) -> FlatCalibrationSweepStatus:
     """Return the most recently recorded status for `sweep_id` — the reconnect story for sweeps,
     same as `script_runs.get_script_status` for individual runs."""

@@ -1277,6 +1277,9 @@ async def run_calibration_sweep(
         raise ValueError(f"kind={kind!r} requires {sorted(required)}")
 
     if kind == "sensor":
+        # Reached only when kind="sensor" and the required-params check above passed, so
+        # every one of these is guaranteed non-None. Asserted here purely for the type
+        # checker, matching download_astrometry_index_files's own convention.
         assert gains is not None
         assert offsets is not None
         assert flatExposureSecondsList is not None
@@ -1293,6 +1296,9 @@ async def run_calibration_sweep(
             location_id=location_id,
         )
 
+    # Reached only when kind="flat" and the required-params check above passed, so every
+    # one of these is guaranteed non-None. Asserted here purely for the type checker,
+    # matching download_astrometry_index_files's own convention.
     assert gains is not None
     assert offsets is not None
     assert exposureSecondsList is not None
@@ -1319,25 +1325,24 @@ async def manage_calibration_sweep(
     `get_sensor_calibration_sweep_status`/`cancel_sensor_calibration_sweep`/
     `get_flat_calibration_sweep_status`/`cancel_flat_calibration_sweep` (INDIMCP-118).
 
-    Whether `sweep_id` belongs to a sensor or flat sweep is resolved automatically: a sweep id
-    is only ever registered in one of the two underlying sweep trackers, never both, and each
-    tracker's own lookup raises `ValueError` immediately — before touching any state — if
-    asked about an id it doesn't recognize (`_get_sweep`, in both `sensor_calibration_sweep`
-    and `flat_calibration_sweep`), so trying the sensor tracker first and falling back to the
-    flat one on that specific failure can't return the wrong sweep's status or act on the
-    wrong sweep. `action="cancel"` waits for the sweep to actually stop, cancelling whichever
-    combination's capture run is currently in flight (if any) rather than letting it finish
-    first. Raises `ValueError` if `sweep_id` isn't recognized by either tracker.
+    Whether `sweep_id` belongs to a sensor or flat sweep is resolved via each tracker's own
+    `sweep_exists` — a sweep id is only ever registered in one of the two, never both — rather
+    than by triggering and catching a not-found error, so this doesn't depend on
+    `get_sweep_status`/`cancel_sweep` never raising `ValueError` for any other reason.
+    `action="cancel"` waits for the sweep to actually stop, cancelling whichever combination's
+    capture run is currently in flight (if any) rather than letting it finish first. Raises
+    `ValueError` if `sweep_id` isn't recognized by either tracker.
     """
+    if sensor_calibration_sweep.sweep_exists(sweep_id):
+        tracker = sensor_calibration_sweep
+    elif flat_calibration_sweep.sweep_exists(sweep_id):
+        tracker = flat_calibration_sweep
+    else:
+        raise ValueError(f"no calibration sweep found for sweepId {sweep_id!r}")
+
     if action == "status":
-        try:
-            return sensor_calibration_sweep.get_sweep_status(sweep_id)
-        except ValueError:
-            return flat_calibration_sweep.get_sweep_status(sweep_id)
-    try:
-        return await sensor_calibration_sweep.cancel_sweep(sweep_id)
-    except ValueError:
-        return await flat_calibration_sweep.cancel_sweep(sweep_id)
+        return tracker.get_sweep_status(sweep_id)
+    return await tracker.cancel_sweep(sweep_id)
 
 
 @mcp.resource("indi://mcp-server/scripts", mime_type="application/json")

@@ -1748,6 +1748,8 @@ async def test_run_calibration_sweep_flat_rejects_sensor_only_parameters() -> No
 async def test_manage_calibration_sweep_status_tries_sensor_then_flat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(sensor_calibration_sweep, "sweep_exists", lambda sweep_id: True)
+
     def fake_get_sweep_status(sweep_id: str) -> dict:
         return {"kind": "sensorCalibrationSweepProgress", "sweepId": sweep_id}
 
@@ -1761,8 +1763,10 @@ async def test_manage_calibration_sweep_status_tries_sensor_then_flat(
 async def test_manage_calibration_sweep_status_falls_back_to_flat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # No sensor sweep with this id exists, so the real sensor_calibration_sweep.get_sweep_status
-    # raises ValueError, and manage_calibration_sweep should fall back to the flat tracker.
+    # No sensor sweep with this id exists (sweep_exists genuinely False, unmocked), so
+    # manage_calibration_sweep should fall through to the flat tracker.
+    monkeypatch.setattr(flat_calibration_sweep, "sweep_exists", lambda sweep_id: True)
+
     def fake_get_sweep_status(sweep_id: str) -> dict:
         return {"kind": "flatCalibrationSweepProgress", "sweepId": sweep_id}
 
@@ -1774,13 +1778,15 @@ async def test_manage_calibration_sweep_status_falls_back_to_flat(
 
 
 async def test_manage_calibration_sweep_status_raises_if_neither_tracker_knows_it() -> None:
-    with pytest.raises(ValueError, match="no flat calibration sweep found"):
+    with pytest.raises(ValueError, match="no calibration sweep found"):
         await server.manage_calibration_sweep("nonexistent-sweep", "status")
 
 
 async def test_manage_calibration_sweep_cancel_tries_sensor_then_flat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(sensor_calibration_sweep, "sweep_exists", lambda sweep_id: True)
+
     async def fake_cancel_sweep(sweep_id: str) -> dict:
         return {"kind": "sensorCalibrationSweepCancelled", "sweepId": sweep_id}
 
@@ -1794,6 +1800,10 @@ async def test_manage_calibration_sweep_cancel_tries_sensor_then_flat(
 async def test_manage_calibration_sweep_cancel_falls_back_to_flat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # No sensor sweep with this id exists (sweep_exists genuinely False, unmocked), so
+    # manage_calibration_sweep should fall through to the flat tracker.
+    monkeypatch.setattr(flat_calibration_sweep, "sweep_exists", lambda sweep_id: True)
+
     async def fake_cancel_sweep(sweep_id: str) -> dict:
         return {"kind": "flatCalibrationSweepCancelled", "sweepId": sweep_id}
 
