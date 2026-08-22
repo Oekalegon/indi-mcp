@@ -1183,90 +1183,122 @@ async def manage_script_run(
     return script_runs.resume_script(run_id)
 
 
+_CALIBRATION_SWEEP_ALLOWED_PARAMS: dict[str, set[str]] = {
+    "sensor": {
+        "gains",
+        "offsets",
+        "flatExposureSecondsList",
+        "biasCount",
+        "darkCount",
+        "biasExposureSeconds",
+        "location_id",
+    },
+    "flat": {
+        "gains",
+        "offsets",
+        "exposureSecondsList",
+        "filterName",
+        "focusPosition",
+        "count",
+        "location_id",
+    },
+}
+_CALIBRATION_SWEEP_REQUIRED_PARAMS: dict[str, set[str]] = {
+    "sensor": {"gains", "offsets", "flatExposureSecondsList", "biasCount", "darkCount"},
+    "flat": {"gains", "offsets", "exposureSecondsList", "filterName", "focusPosition", "count"},
+}
+"""`run_calibration_sweep`'s per-`kind` allowed/required parameter sets — `biasExposureSeconds`
+(sensor, defaults to `0.0`) and `location_id` (both kinds) are the only optional entries;
+everything else is required for its own `kind`. Exposed as module-level constants for the same
+reason as `_MOUNT_ACTION_PARAMS`/`_CAMERA_ACTION_ALLOWED_PARAMS` (INDIMCP-116): a single source
+of truth for validation, not duplicated in a test's own expectations list.
+"""
+
+
 @mcp.tool()
-async def run_sensor_calibration_sweep(
+async def run_calibration_sweep(
+    kind: Literal["sensor", "flat"],
     rig_id: str,
-    gains: list[float],
-    offsets: list[float],
-    flatExposureSecondsList: list[float],
-    biasCount: int,
-    darkCount: int,
-    biasExposureSeconds: float = 0.0,
+    gains: list[float] | None = None,
+    offsets: list[float] | None = None,
+    flatExposureSecondsList: list[float] | None = None,
+    biasCount: int | None = None,
+    darkCount: int | None = None,
+    biasExposureSeconds: float | None = None,
+    exposureSecondsList: list[float] | None = None,
+    filterName: str | None = None,
+    focusPosition: int | None = None,
+    count: int | None = None,
     location_id: str | None = None,
-) -> SensorCalibrationSweepStarted:
-    """Run `capture_sensor_calibration_set` (bias + flat-dark) once per (gain, offset,
-    flatExposureSeconds) combination, returning immediately with a `sweepId`.
+) -> SensorCalibrationSweepStarted | FlatCalibrationSweepStarted:
+    """Run a sensor (bias + flat-dark) or flat calibration sweep across a cartesian product of
+    gain/offset/exposure settings, returning immediately with a `sweepId` — replaces
+    `run_sensor_calibration_sweep`/`run_flat_calibration_sweep` (INDIMCP-118).
 
-    Needed because a script's own `parameters` can't carry list-valued inputs — see
-    `docs/SensorCalibration.md` and `sensor_calibration_sweep`'s own module docstring for why
-    this is a dedicated tool rather than a new script step. Combinations are the cartesian
-    product of `gains`, `offsets`, and `flatExposureSecondsList` (in that nesting order); every
-    argument list must be non-empty. `biasCount`/`darkCount`/`biasExposureSeconds` are shared
-    across every combination in the sweep, matching what a single `capture_sensor_calibration_set`
-    invocation already takes.
+    `kind="sensor"` (INDIMCP-102) runs `capture_sensor_calibration_set` (bias + flat-dark) once
+    per (`gains`, `offsets`, `flatExposureSecondsList`) combination; `biasCount`/`darkCount`
+    are required, `biasExposureSeconds` defaults to `0.0` if omitted. Does not stage a flat
+    panel or capture flats itself — this is the bias/flat-dark half of a calibration set only;
+    the flat side is `kind="flat"`. `kind="flat"` (INDIMCP-103) runs `capture_flat_sequence`
+    once per (`gains`, `offsets`, `exposureSecondsList`) combination; `filterName`/
+    `focusPosition`/`count` are required and shared across every combination. Assumes the flat
+    panel is already staged before this is called — this tool has no way to prompt for or
+    verify that; the caller (typically a client app, having confirmed with its human operator)
+    is responsible for staging it first.
 
-    Never blocks until the sweep finishes — a full sweep can run far longer than any single
-    script (many combinations, each a real capture sequence) — poll
-    `get_sensor_calibration_sweep_status(sweepId)` for progress and the eventual terminal
-    outcome, or use `cancel_sensor_calibration_sweep` to stop it early. Does not stage a flat
-    panel or capture flats itself — this is the bias/flat-dark half of a calibration set only
-    (INDIMCP-102); the flat side is a separate sweep (INDIMCP-103).
+    `gains`/`offsets` are required for both kinds. List-valued arguments are needed because a
+    script's own `parameters` can't carry list-valued inputs — see `docs/SensorCalibration.md`
+    for why this is a dedicated tool rather than a script step; every list argument must be
+    non-empty. Never blocks until the sweep finishes — a full sweep can run far longer than any
+    single script (many combinations, each a real capture sequence) — poll
+    `manage_calibration_sweep`'s `action="status"` for progress and the eventual terminal
+    outcome, or `action="cancel"` to stop it early. Any parameter given that doesn't belong to
+    `kind`, or a required parameter missing for it, raises `ValueError`.
     """
-    return await sensor_calibration_sweep.start_sweep(
-        rig_id,
-        gains,
-        offsets,
-        flatExposureSecondsList,
-        biasCount,
-        darkCount,
-        bias_exposure_seconds=biasExposureSeconds,
-        location_id=location_id,
-    )
+    given = {
+        "gains": gains,
+        "offsets": offsets,
+        "flatExposureSecondsList": flatExposureSecondsList,
+        "biasCount": biasCount,
+        "darkCount": darkCount,
+        "biasExposureSeconds": biasExposureSeconds,
+        "exposureSecondsList": exposureSecondsList,
+        "filterName": filterName,
+        "focusPosition": focusPosition,
+        "count": count,
+        "location_id": location_id,
+    }
+    given_names = {name for name, value in given.items() if value is not None}
+    allowed = _CALIBRATION_SWEEP_ALLOWED_PARAMS[kind]
+    required = _CALIBRATION_SWEEP_REQUIRED_PARAMS[kind]
+    if not given_names <= allowed:
+        raise ValueError(f"kind={kind!r} doesn't accept {sorted(given_names - allowed)}")
+    if not required <= given_names:
+        raise ValueError(f"kind={kind!r} requires {sorted(required)}")
 
+    if kind == "sensor":
+        assert gains is not None
+        assert offsets is not None
+        assert flatExposureSecondsList is not None
+        assert biasCount is not None
+        assert darkCount is not None
+        return await sensor_calibration_sweep.start_sweep(
+            rig_id,
+            gains,
+            offsets,
+            flatExposureSecondsList,
+            biasCount,
+            darkCount,
+            bias_exposure_seconds=(biasExposureSeconds if biasExposureSeconds is not None else 0.0),
+            location_id=location_id,
+        )
 
-@mcp.tool()
-def get_sensor_calibration_sweep_status(sweep_id: str) -> SensorCalibrationSweepStatus:
-    """Return the most recently known status for a sweep started by
-    `run_sensor_calibration_sweep`."""
-    return sensor_calibration_sweep.get_sweep_status(sweep_id)
-
-
-@mcp.tool()
-async def cancel_sensor_calibration_sweep(sweep_id: str) -> SensorCalibrationSweepStatus:
-    """Cancel a sweep started by `run_sensor_calibration_sweep`, waiting for it to actually stop.
-
-    Cancels whichever combination's capture run is currently in flight (if any) rather than
-    letting it finish before stopping the sweep.
-    """
-    return await sensor_calibration_sweep.cancel_sweep(sweep_id)
-
-
-@mcp.tool()
-async def run_flat_calibration_sweep(
-    rig_id: str,
-    gains: list[float],
-    offsets: list[float],
-    exposureSecondsList: list[float],
-    filterName: str,
-    focusPosition: int,
-    count: int,
-    location_id: str | None = None,
-) -> FlatCalibrationSweepStarted:
-    """Run `capture_flat_sequence` once per (gain, offset, exposureSeconds) combination,
-    returning immediately with a `sweepId` — the flat-side counterpart to
-    `run_sensor_calibration_sweep` (INDIMCP-103).
-
-    `filterName`/`focusPosition`/`count` are shared across every combination in the sweep,
-    matching what a single `capture_flat_sequence` invocation already takes. Assumes the flat
-    panel is already staged before this is called — this tool has no way to prompt for or verify
-    that (see `flat_calibration_sweep`'s own module docstring and `docs/SensorCalibration.md`);
-    the caller (typically a client app, having confirmed with its human operator) is responsible
-    for staging it first.
-
-    Never blocks until the sweep finishes — poll `get_flat_calibration_sweep_status(sweepId)`
-    for progress and the eventual terminal outcome, or use `cancel_flat_calibration_sweep` to
-    stop it early.
-    """
+    assert gains is not None
+    assert offsets is not None
+    assert exposureSecondsList is not None
+    assert filterName is not None
+    assert focusPosition is not None
+    assert count is not None
     return await flat_calibration_sweep.start_sweep(
         rig_id,
         gains,
@@ -1280,20 +1312,32 @@ async def run_flat_calibration_sweep(
 
 
 @mcp.tool()
-def get_flat_calibration_sweep_status(sweep_id: str) -> FlatCalibrationSweepStatus:
-    """Return the most recently known status for a sweep started by
-    `run_flat_calibration_sweep`."""
-    return flat_calibration_sweep.get_sweep_status(sweep_id)
+async def manage_calibration_sweep(
+    sweep_id: str, action: Literal["status", "cancel"]
+) -> SensorCalibrationSweepStatus | FlatCalibrationSweepStatus:
+    """Check status or cancel a calibration sweep started by `run_calibration_sweep` — replaces
+    `get_sensor_calibration_sweep_status`/`cancel_sensor_calibration_sweep`/
+    `get_flat_calibration_sweep_status`/`cancel_flat_calibration_sweep` (INDIMCP-118).
 
-
-@mcp.tool()
-async def cancel_flat_calibration_sweep(sweep_id: str) -> FlatCalibrationSweepStatus:
-    """Cancel a sweep started by `run_flat_calibration_sweep`, waiting for it to actually stop.
-
-    Cancels whichever combination's capture run is currently in flight (if any) rather than
-    letting it finish before stopping the sweep.
+    Whether `sweep_id` belongs to a sensor or flat sweep is resolved automatically: a sweep id
+    is only ever registered in one of the two underlying sweep trackers, never both, and each
+    tracker's own lookup raises `ValueError` immediately — before touching any state — if
+    asked about an id it doesn't recognize (`_get_sweep`, in both `sensor_calibration_sweep`
+    and `flat_calibration_sweep`), so trying the sensor tracker first and falling back to the
+    flat one on that specific failure can't return the wrong sweep's status or act on the
+    wrong sweep. `action="cancel"` waits for the sweep to actually stop, cancelling whichever
+    combination's capture run is currently in flight (if any) rather than letting it finish
+    first. Raises `ValueError` if `sweep_id` isn't recognized by either tracker.
     """
-    return await flat_calibration_sweep.cancel_sweep(sweep_id)
+    if action == "status":
+        try:
+            return sensor_calibration_sweep.get_sweep_status(sweep_id)
+        except ValueError:
+            return flat_calibration_sweep.get_sweep_status(sweep_id)
+    try:
+        return await sensor_calibration_sweep.cancel_sweep(sweep_id)
+    except ValueError:
+        return await flat_calibration_sweep.cancel_sweep(sweep_id)
 
 
 @mcp.resource("indi://mcp-server/scripts", mime_type="application/json")

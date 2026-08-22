@@ -68,7 +68,7 @@ Grouped by device role rather than by verb — matches how a rig user already th
 |---|---|---|
 | `manage_script_run` | `get_script_status`, `cancel_script`, `pause_script`, `resume_script` | `(run_id, action: "status"\|"cancel"\|"pause"\|"resume")` |
 
-### Calibration sweeps (was 6 tools → 2)
+### Calibration sweeps (was 6 tools → 2) — implemented (INDIMCP-118)
 
 Sensor and flat sweeps are structurally identical (run / status / cancel) for two sweep types:
 
