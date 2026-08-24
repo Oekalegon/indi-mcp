@@ -271,13 +271,13 @@ async def start_sweep(
             filter_name,
             focus_position,
             count,
-            binning_x,
-            binning_y,
-            frame_x,
-            frame_y,
-            frame_width,
-            frame_height,
-            location_id,
+            binning_x=binning_x,
+            binning_y=binning_y,
+            frame_x=frame_x,
+            frame_y=frame_y,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            location_id=location_id,
         )
     )
     return started
@@ -332,6 +332,7 @@ async def _run_sweep(
     filter_name: str,
     focus_position: int,
     count: int,
+    *,
     binning_x: int,
     binning_y: int,
     frame_x: int | None,
