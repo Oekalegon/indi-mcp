@@ -489,6 +489,12 @@ def test_plate_solve_step_parses_with_defaults() -> None:
     assert step.toleranceArcsec is None
     assert step.maxAttempts == 3
     assert step.timeoutSeconds == 60
+    assert step.binningX == 1
+    assert step.binningY == 1
+    assert step.frameX is None
+    assert step.frameY is None
+    assert step.frameWidth is None
+    assert step.frameHeight is None
 
 
 def test_plate_solve_step_accepts_tolerance_arcsec_with_its_requirements_met() -> None:

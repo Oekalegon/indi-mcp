@@ -2578,6 +2578,12 @@ async def _execute_plate_solve(
     progress covers every attempt) — acceptable here since `plate_solve` is already the
     single unit of work a script author reasons about; not worth the complexity of threading
     a synthetic extra step per attempt through `_count_total_steps`/`_report_progress` for.
+
+    `step.binningX`/`binningY`/`frameX`/`frameY`/`frameWidth`/`frameHeight` (INDIMCP-127) are
+    substituted once up front (same "resolved unconditionally, safe no-op if unused" pattern
+    as `exposureSeconds`/`toleranceArcsec` above) and forwarded onto every attempt's
+    `CaptureFrameStep` — see `PlateSolveStep`'s own docstring for the binning-vs-ROI
+    reliability trade-off.
     """
     role = _substituted_role(step.role, params)
     device = _resolve_device(role, ctx)
@@ -2598,6 +2604,14 @@ async def _execute_plate_solve(
     exposure_seconds = float(exposure_seconds) if exposure_seconds is not None else None
     tolerance_arcsec = _substitute(step.toleranceArcsec, params)
     tolerance_arcsec = float(tolerance_arcsec) if tolerance_arcsec is not None else None
+    # Only meaningful when exposure_seconds triggers a fresh capture below — resolved
+    # unconditionally regardless, same "safe on an unused field" reasoning as above.
+    binning_x = _substitute(step.binningX, params)
+    binning_y = _substitute(step.binningY, params)
+    frame_x = _substitute(step.frameX, params) if step.frameX is not None else None
+    frame_y = _substitute(step.frameY, params) if step.frameY is not None else None
+    frame_width = _substitute(step.frameWidth, params) if step.frameWidth is not None else None
+    frame_height = _substitute(step.frameHeight, params) if step.frameHeight is not None else None
 
     target_ra_hours = target_dec_deg = None
     if tolerance_arcsec is not None:
@@ -2643,7 +2657,15 @@ async def _execute_plate_solve(
 
         if exposure_seconds is not None:
             capture_step = CaptureFrameStep(
-                step="capture_frame", role=step.role, exposureSeconds=exposure_seconds
+                step="capture_frame",
+                role=step.role,
+                exposureSeconds=exposure_seconds,
+                binningX=binning_x,
+                binningY=binning_y,
+                frameX=frame_x,
+                frameY=frame_y,
+                frameWidth=frame_width,
+                frameHeight=frame_height,
             )
             await _execute_capture_frame(capture_step, ctx, params, script_id, pausable)
 

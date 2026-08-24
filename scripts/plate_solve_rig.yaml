@@ -22,6 +22,13 @@ description: >
   (the plate_solve step's own constraint — a retry loop needs a fresh capture per attempt and
   can't converge without syncing between attempts; enforced by the step itself, not just this
   script, so a parameterized violation still fails clearly at execution time).
+
+  binningX/binningY/frameX/frameY/frameWidth/frameHeight (INDIMCP-127) only apply when
+  exposureSeconds triggers a fresh capture; same names/defaults as capture_frame.yaml.
+  Binning is the clearer win here — a binned capture is smaller and solves faster, useful on
+  every attempt of a toleranceArcsec retry loop. A sub-frame ROI trades solve reliability for
+  speed (too small a region may not contain enough stars to solve against) — see
+  docs/PlateSolve.md before setting one.
 pausable: false
 parameters:
   exposureSeconds:
@@ -57,6 +64,32 @@ parameters:
     required: false
     default: 60
     description: Maximum time to wait for solve-field to solve each attempt.
+  binningX:
+    type: integer
+    required: false
+    default: 1
+    description: Horizontal pixel binning for a fresh capture, if the camera supports it. Ignored when exposureSeconds is omitted.
+  binningY:
+    type: integer
+    required: false
+    default: 1
+    description: Vertical pixel binning for a fresh capture, if the camera supports it. Ignored when exposureSeconds is omitted.
+  frameX:
+    type: integer
+    required: false
+    description: Sub-frame left edge, in pixels, for a fresh capture. Set together with frameY/frameWidth/frameHeight, or omit all four for the full sensor. Ignored when exposureSeconds is omitted.
+  frameY:
+    type: integer
+    required: false
+    description: Sub-frame top edge, in pixels, for a fresh capture. Set together with frameX/frameWidth/frameHeight, or omit all four for the full sensor. Ignored when exposureSeconds is omitted.
+  frameWidth:
+    type: integer
+    required: false
+    description: Sub-frame width, in pixels, for a fresh capture. Set together with frameX/frameY/frameHeight, or omit all four for the full sensor. Ignored when exposureSeconds is omitted.
+  frameHeight:
+    type: integer
+    required: false
+    description: Sub-frame height, in pixels, for a fresh capture. Set together with frameX/frameY/frameWidth, or omit all four for the full sensor. Ignored when exposureSeconds is omitted.
 steps:
   - step: plate_solve
     role: camera
@@ -66,3 +99,9 @@ steps:
     toleranceArcsec: "{{ toleranceArcsec }}"
     maxAttempts: "{{ maxAttempts }}"
     timeoutSeconds: "{{ timeoutSeconds }}"
+    binningX: "{{ binningX }}"
+    binningY: "{{ binningY }}"
+    frameX: "{{ frameX }}"
+    frameY: "{{ frameY }}"
+    frameWidth: "{{ frameWidth }}"
+    frameHeight: "{{ frameHeight }}"
