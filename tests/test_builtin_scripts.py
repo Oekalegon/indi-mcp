@@ -544,12 +544,32 @@ def test_builtin_capture_dark_sequence_skips_mount_filter_and_focus() -> None:
     darks = script_store.get_script("capture_dark_sequence")
 
     assert darks.pausable is True
-    assert set(darks.parameters) == {"targetTempC", "exposureSeconds", "count", "gain", "offset"}
+    assert set(darks.parameters) == {
+        "targetTempC",
+        "exposureSeconds",
+        "count",
+        "gain",
+        "offset",
+        "binningX",
+        "binningY",
+        "frameX",
+        "frameY",
+        "frameWidth",
+        "frameHeight",
+    }
     assert darks.parameters["targetTempC"].default == -10
     assert darks.parameters["exposureSeconds"].required is True
     assert darks.parameters["count"].required is True
     assert darks.parameters["gain"].required is False
     assert darks.parameters["offset"].required is False
+    assert darks.parameters["binningX"].required is False
+    assert darks.parameters["binningX"].default == 1
+    assert darks.parameters["binningY"].required is False
+    assert darks.parameters["binningY"].default == 1
+    assert darks.parameters["frameX"].required is False
+    assert darks.parameters["frameY"].required is False
+    assert darks.parameters["frameWidth"].required is False
+    assert darks.parameters["frameHeight"].required is False
     assert len(darks.steps) == 2
     cool_step, repeat_step = darks.steps
     assert isinstance(cool_step, script_store.RunScriptStep)
@@ -561,6 +581,12 @@ def test_builtin_capture_dark_sequence_skips_mount_filter_and_focus() -> None:
     assert capture_step.frameType == "Dark"
     assert capture_step.gain == "{{ gain }}"
     assert capture_step.offset == "{{ offset }}"
+    assert capture_step.binningX == "{{ binningX }}"
+    assert capture_step.binningY == "{{ binningY }}"
+    assert capture_step.frameX == "{{ frameX }}"
+    assert capture_step.frameY == "{{ frameY }}"
+    assert capture_step.frameWidth == "{{ frameWidth }}"
+    assert capture_step.frameHeight == "{{ frameHeight }}"
 
 
 def test_builtin_capture_bias_sequence_has_no_setup_steps() -> None:
