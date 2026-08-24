@@ -269,8 +269,8 @@ Consequences:
    attempt count, and final separation if `toleranceArcsec` was set — this is the only place
    the result becomes visible to a client, consistent with the "no step returns a value the
    YAML layer can consume" constraint above; a client wanting the numeric result reads it off
-   `indi://mcp-server/scripts`, or off the frame's own FITS headers, downloadable via `list_frames`'s
-   returned `downloadUrl` (INDIMCP-89), once written.
+   `indi://mcp-server/scripts`, or off the frame's own FITS headers, downloadable via `frames`'s
+   `action="list"` returned `downloadUrl` (INDIMCP-89), once written.
 
 ## Plate-solving a client-uploaded frame (INDIMCP-76)
 
@@ -301,8 +301,8 @@ Differences from the `plate_solve` step, driven entirely by there being no rig/m
   `ScriptExecutionError`/`scriptFailed`.
 - **The frame is kept even if the solve fails.** Saved (`device="uploaded"`, `run_id=None`)
   before solving, not after, so a failed solve doesn't lose what was uploaded — the caller
-  can still retrieve it (without WCS headers) via `list_frames`'s returned `downloadUrl`
-  (INDIMCP-89), matching `frame_store`'s existing "ad hoc frame, no run" convention for a
+  can still retrieve it (without WCS headers) via `frames`'s `action="list"` returned
+  `downloadUrl` (INDIMCP-89), matching `frame_store`'s existing "ad hoc frame, no run" convention for a
   capture outside any script run.
 - **Base64 in, streamed HTTP out.** MCP tool-call arguments are JSON; there's no binary
   parameter type, so the FITS bytes travel as a base64 string on the way in — unlike the

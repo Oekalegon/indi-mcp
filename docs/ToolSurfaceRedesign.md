@@ -88,7 +88,7 @@ Sensor and flat sweeps are structurally identical (run / status / cancel) for tw
 
 The rig-based cases — old `plate_solve` and `plate_solve_until_precision` — are **dropped as tools entirely**, not merged. `script_store.py`'s `PlateSolveStep` already exists as a script step primitive and already implements retry-toward-a-tolerance internally (`toleranceArcsec`/`maxAttempts`, resolved server-side in `_execute_plate_solve` rather than via YAML `repeat`/`until` — see [PlateSolve.md](PlateSolve.md)). All of that step's fields (`role`, `mountRole`, `exposureSeconds`, `toleranceArcsec`, `maxAttempts`, ...) are plain scalars, so — unlike the calibration sweep case above — there's no list-valued-parameter obstacle to supplying them through `run_script`'s ordinary `parameters` mechanism. A canonical built-in script (e.g. `plate_solve_rig.yaml`) containing one `PlateSolveStep`, invoked via the already-kept `run_script`/`manage_script_run` tools, does everything the two dropped tools did — including the "until precision" retry loop, via `toleranceArcsec` — without a dedicated tool.
 
-### Frames (was 5 tools → 2)
+### Frames (was 5 tools → 2) — implemented (INDIMCP-120)
 
 | Tool | Replaces | Signature |
 |---|---|---|

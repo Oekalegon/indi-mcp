@@ -1479,81 +1479,174 @@ def _to_frame_response(metadata: FrameMetadata) -> FrameMetadataResponse:
     }
 
 
+_FRAMES_ALLOWED_PARAMS: dict[str, set[str]] = {
+    "list": {"run_id", "device", "since", "transferred"},
+    "get": {"frame_id"},
+}
+_FRAMES_REQUIRED_PARAMS: dict[str, set[str]] = {
+    "list": set(),
+    "get": {"frame_id"},
+}
+"""`frames`'s per-`action` allowed/required parameter sets — every `action="list"` filter is
+optional; `frame_id` is the only, required, parameter for `action="get"`. Exposed as
+module-level constants for the same reason as `_MOUNT_ACTION_PARAMS` (INDIMCP-116).
+"""
+
+
 @mcp.tool()
-async def list_frames(
+async def frames(
+    action: Annotated[
+        Literal["list", "get"],
+        Field(
+            json_schema_extra={
+                "requiredParamsByAction": {
+                    name: sorted(params) for name, params in _FRAMES_REQUIRED_PARAMS.items()
+                }
+            }
+        ),
+    ],
+    frame_id: str | None = None,
     run_id: str | None = None,
     device: str | None = None,
     since: str | None = None,
     transferred: bool | None = None,
-) -> list[FrameMetadataResponse]:
-    """List captured frame metadata, most recently captured first, with optional filters.
+) -> list[FrameMetadataResponse] | FrameMetadataResponse:
+    """List captured frame metadata, or fetch metadata for a single frame — replaces
+    `list_frames`/`get_frame_metadata` (INDIMCP-120).
 
-    `transferred` is a tri-state: omitted/`None` returns every frame,
-    `true` only ones this call has already confirmed received
-    (`confirm_frame_transfer`), `false` only ones still waiting to be
-    retrieved — useful for checking what's left to download before
-    running `purge_transferred_frames`. Never returns a frame's on-disk
-    path; each frame's `downloadUrl` is a `GET`-able HTTP URL for its raw
-    bytes (INDIMCP-89), `None` if this server has no HTTP listener to
-    build one from (`stdio` transport). See `FrameMetadataResponse` for
-    `issues`.
+    `action="list"` returns every frame's metadata, most recently captured first, filtered by
+    `run_id`/`device`/`since`/`transferred` (all optional). `transferred` is a tri-state:
+    omitted/`None` returns every frame, `true` only ones already confirmed received
+    (`manage_frame`'s `action="confirm_transfer"`), `false` only ones still waiting to be
+    retrieved — useful for checking what's left to download before `manage_frame`'s
+    `action="purge"`. `action="get"` requires `frame_id`, and rejects the list filters. Never
+    returns a frame's on-disk path; each frame's `downloadUrl` is a `GET`-able HTTP URL for its
+    raw bytes (INDIMCP-89), `None` if this server has no HTTP listener to build one from
+    (`stdio` transport). See `FrameMetadataResponse` for `issues`. Any parameter given
+    alongside an action it doesn't belong to, or a required parameter missing for it, raises
+    `ValueError`. `frame_id` is optional at the schema level regardless of `action`, despite
+    having no fallback if omitted for `action="get"` — `action`'s own schema carries the real
+    per-`action` required set under `requiredParamsByAction` for a schema-reading caller (see
+    `_FRAMES_REQUIRED_PARAMS`).
     """
-    metadata = await asyncio.to_thread(
+    given = {
+        "frame_id": frame_id,
+        "run_id": run_id,
+        "device": device,
+        "since": since,
+        "transferred": transferred,
+    }
+    given_names = {name for name, value in given.items() if value is not None}
+    allowed = _FRAMES_ALLOWED_PARAMS[action]
+    required = _FRAMES_REQUIRED_PARAMS[action]
+    if not given_names <= allowed:
+        raise ValueError(f"action={action!r} doesn't accept {sorted(given_names - allowed)}")
+    if not required <= given_names:
+        raise ValueError(f"action={action!r} requires {sorted(required)}")
+
+    if action == "get":
+        # Reached only when action="get" and the required-params check above passed, so
+        # frame_id is guaranteed non-None. Asserted here purely for the type checker,
+        # matching download_astrometry_index_files's own convention.
+        assert frame_id is not None
+        metadata = await asyncio.to_thread(frame_store.get_frame_metadata, frame_id)
+        return _to_frame_response(metadata)
+
+    metadata_list = await asyncio.to_thread(
         frame_store.list_frames, run_id=run_id, device=device, since=since, transferred=transferred
     )
-    return [_to_frame_response(m) for m in metadata]
+    return [_to_frame_response(m) for m in metadata_list]
+
+
+_MANAGE_FRAME_ALLOWED_PARAMS: dict[str, set[str]] = {
+    "confirm_transfer": {"frame_id"},
+    "delete": {"frame_id", "require_transferred"},
+    "purge": {"older_than_days"},
+}
+_MANAGE_FRAME_REQUIRED_PARAMS: dict[str, set[str]] = {
+    "confirm_transfer": {"frame_id"},
+    "delete": {"frame_id"},
+    "purge": {"older_than_days"},
+}
+"""`manage_frame`'s per-`action` allowed/required parameter sets — `require_transferred`
+(`action="delete"` only) is the sole optional entry, defaulting to `True` if omitted (matching
+the old `delete_frame` tool's own default; see `docs/ToolSurfaceRedesign.md`'s
+conditional-defaults trade-off). Exposed as module-level constants for the same reason as
+`_MOUNT_ACTION_PARAMS` (INDIMCP-116).
+"""
 
 
 @mcp.tool()
-async def get_frame_metadata(frame_id: str) -> FrameMetadataResponse:
-    """Return the metadata for a single captured frame identified by `frame_id`.
+async def manage_frame(
+    action: Annotated[
+        Literal["confirm_transfer", "delete", "purge"],
+        Field(
+            json_schema_extra={
+                "requiredParamsByAction": {
+                    name: sorted(params) for name, params in _MANAGE_FRAME_REQUIRED_PARAMS.items()
+                }
+            }
+        ),
+    ],
+    frame_id: str | None = None,
+    require_transferred: bool | None = None,
+    older_than_days: float | None = None,
+) -> FrameMetadata | list[FrameMetadata]:
+    """Confirm a frame's transfer, delete a single frame, or bulk-purge already-transferred
+    frames — replaces `confirm_frame_transfer`/`delete_frame`/`purge_transferred_frames`
+    (INDIMCP-120).
 
-    See `FrameMetadataResponse` for `downloadUrl`/`issues`.
+    `action="confirm_transfer"` requires `frame_id` and sets `transferredAt` — call this only
+    after actually verifying the bytes downloaded via `frames`'s `downloadUrl` were received
+    intact; this is what makes a frame eligible for `action="delete"`/`"purge"` later, so
+    confirming a transfer that didn't really complete risks losing the only copy of that
+    frame. `action="delete"` requires `frame_id`, deletes a single frame's file and metadata,
+    and returns its metadata as it was — refuses to delete a frame that hasn't been confirmed
+    transferred yet unless `require_transferred` is explicitly set to `false` (defaults to
+    `true` if omitted) — this is a destructive action on the actual science data this server
+    exists to capture, so it's safe by default rather than trusting every caller to check
+    first. `action="purge"` requires `older_than_days`, bulk-deletes every already-transferred
+    frame captured more than that many days ago, and returns the metadata of every frame
+    actually deleted — never runs automatically, this is the only way old frames get cleaned
+    up, since the INDI Device's own storage is limited; only ever considers frames already
+    confirmed transferred, regardless of age, so a frame the Client Computer hasn't confirmed
+    receiving yet is never deleted by this call. Any parameter given alongside an action it
+    doesn't belong to, or a required parameter missing for it, raises `ValueError`. `frame_id`/
+    `older_than_days` are optional at the schema level regardless of `action`, despite having
+    no fallback if omitted for the actions that need them — `action`'s own schema carries the
+    real per-`action` required set under `requiredParamsByAction` for a schema-reading caller
+    (see `_MANAGE_FRAME_REQUIRED_PARAMS`).
     """
-    metadata = await asyncio.to_thread(frame_store.get_frame_metadata, frame_id)
-    return _to_frame_response(metadata)
+    given = {
+        "frame_id": frame_id,
+        "require_transferred": require_transferred,
+        "older_than_days": older_than_days,
+    }
+    given_names = {name for name, value in given.items() if value is not None}
+    allowed = _MANAGE_FRAME_ALLOWED_PARAMS[action]
+    required = _MANAGE_FRAME_REQUIRED_PARAMS[action]
+    if not given_names <= allowed:
+        raise ValueError(f"action={action!r} doesn't accept {sorted(given_names - allowed)}")
+    if not required <= given_names:
+        raise ValueError(f"action={action!r} requires {sorted(required)}")
 
+    # Reached only when the required-params check above passed for the given action, so
+    # frame_id/older_than_days are guaranteed non-None below wherever each is used.
+    # Asserted here purely for the type checker, matching download_astrometry_index_files's
+    # own convention.
+    if action == "confirm_transfer":
+        assert frame_id is not None
+        return await asyncio.to_thread(frame_store.confirm_frame_transfer, frame_id)
 
-@mcp.tool()
-async def confirm_frame_transfer(frame_id: str) -> FrameMetadata:
-    """Confirm the Client Computer has safely saved a copy of `frame_id`.
+    if action == "delete":
+        assert frame_id is not None
+        return await asyncio.to_thread(
+            frame_store.delete_frame,
+            frame_id,
+            require_transferred=(require_transferred if require_transferred is not None else True),
+        )
 
-    Sets `transferredAt`. Call this only after actually verifying the
-    bytes downloaded via `list_frames`'s/`get_frame_metadata`'s
-    `downloadUrl` were received intact — this is what makes a frame
-    eligible for `delete_frame`/`purge_transferred_frames` later, so
-    confirming a transfer that didn't really complete risks losing the
-    only copy of that frame.
-    """
-    return await asyncio.to_thread(frame_store.confirm_frame_transfer, frame_id)
-
-
-@mcp.tool()
-async def delete_frame(frame_id: str, require_transferred: bool = True) -> FrameMetadata:
-    """Delete a single captured frame's file and metadata, returning its metadata as it was.
-
-    Refuses to delete a frame that hasn't been confirmed transferred yet
-    (via `confirm_frame_transfer`) unless `require_transferred` is
-    explicitly set to `false` — this is a destructive action on the
-    actual science data this server exists to capture, so it's safe by
-    default rather than trusting every caller to check first.
-    """
-    return await asyncio.to_thread(
-        frame_store.delete_frame, frame_id, require_transferred=require_transferred
-    )
-
-
-@mcp.tool()
-async def purge_transferred_frames(older_than_days: float) -> list[FrameMetadata]:
-    """Bulk-delete every already-transferred frame captured more than `older_than_days` ago.
-
-    Never runs automatically — this is the only way old frames get
-    cleaned up, since the INDI Device's own storage is limited. Only ever
-    considers frames already confirmed transferred (see
-    `confirm_frame_transfer`), regardless of age; a frame the Client
-    Computer hasn't confirmed receiving yet is never deleted by this call.
-    Returns the metadata of every frame actually deleted.
-    """
+    assert older_than_days is not None
     return await asyncio.to_thread(
         frame_store.purge_transferred_frames, older_than=timedelta(days=older_than_days)
     )

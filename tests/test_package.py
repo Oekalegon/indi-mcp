@@ -60,18 +60,25 @@ async def test_configuration_config_schema_exposes_the_real_per_kind_shape() -> 
 
 @pytest.mark.parametrize(
     ("tool_name", "required_params_by_action_constant_name"),
-    [("mount_action", "_MOUNT_ACTION_PARAMS"), ("camera_action", "_CAMERA_ACTION_REQUIRED_PARAMS")],
+    [
+        ("mount_action", "_MOUNT_ACTION_PARAMS"),
+        ("camera_action", "_CAMERA_ACTION_REQUIRED_PARAMS"),
+        ("frames", "_FRAMES_REQUIRED_PARAMS"),
+        ("manage_frame", "_MANAGE_FRAME_REQUIRED_PARAMS"),
+    ],
 )
 async def test_action_tool_schema_exposes_required_params_by_action(
     tool_name: str, required_params_by_action_constant_name: str
 ) -> None:
-    """`mount_action`/`camera_action` (INDIMCP-116) can't express a parameter's required-ness
-    conditional on `action` in the tool's top-level `required` list -- e.g. `exposureSeconds`
-    is required only for `action="capture_frame"`, but is optional at the schema level
-    regardless of `action`, with no fallback default if omitted (PR review of #91). The real
-    per-`action` required set is instead attached to `action`'s own schema under
-    `requiredParamsByAction`, restoring the visibility a schema-reading caller lost when these
-    tools were merged from one-tool-per-script wrappers.
+    """Every `*_action`/discriminated tool merged from several single-purpose tools hits the
+    same schema gap: a parameter required only for one `action` value can't express that
+    conditional required-ness in the tool's top-level `required` list, so it's optional at the
+    schema level regardless of `action`, with no fallback default if omitted (first found in
+    `mount_action`/`camera_action`, INDIMCP-116, PR review of #91; recurred in `frames`/
+    `manage_frame`, INDIMCP-120, PR review of #94). The real per-`action` required set is
+    instead attached to `action`'s own schema under `requiredParamsByAction`, restoring the
+    visibility a schema-reading caller lost when these tools were merged from one-tool-per-
+    action/script wrappers.
     """
     import indi_mcp.server as server_module
 
