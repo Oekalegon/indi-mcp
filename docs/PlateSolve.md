@@ -52,25 +52,28 @@ No API key needed for the local-only design.
 `solve-field` needs local index files installed before it can solve anything — a one-time
 setup cost, not something indi-mcp can do without (see [Deployment.md](Deployment.md)).
 Checking what's installed and downloading what's missing is `astrometry_index.py`'s job,
-exposed as two MCP tools:
+exposed as a single `action`-discriminated MCP tool, `manage_astrometry_index` (INDIMCP-77;
+merged from two separate tools, `list_astrometry_index_files`/`download_astrometry_index_files`,
+into this one by the INDIMCP-119 tool-surface redesign — see
+[ToolSurfaceRedesign.md](ToolSurfaceRedesign.md)):
 
-- **`list_astrometry_index_files(catalog="tycho2", rig_id=None, minArcmin=None,
+- **`manage_astrometry_index(action="list", catalog="tycho2", rig_id=None, minArcmin=None,
   maxArcmin=None)`** — every scale `catalog` publishes and whether it's installed under
   `INDI_MCP_ASTROMETRY_INDEX_DIR`. Pass **at most one** of `rig_id` or `minArcmin`/
   `maxArcmin` together to also get a `needed` flag per entry, computed either from that
   rig's own configured optics (`telescope.focalLengthMm` + `camera.pixelSizeMicron`/
-  `pixelsX`/`pixelsY` — the same numbers `plate_solve`'s own scale hint already uses), padded
-  by `DEFAULT_RIG_MARGIN_SCALES` extra scales on each side (see below), or from an explicit
-  field-of-view range given directly, no padding — so "missing but irrelevant to this field
-  of view" can be told apart from "missing and actually needed." This doubles as a way to
-  preview which files a field of view (or rig) would need *without downloading anything*:
-  call it with `minArcmin`/`maxArcmin` or `rig_id` and filter the result for `needed: true`
-  — nothing is written to disk or fetched over the network by this tool regardless of what's
-  passed.
-- **`download_astrometry_index_files(catalog="tycho2", indexNumbers=None, minArcmin=None,
-  maxArcmin=None, rig_id=None)`** — downloads whichever aren't already installed. Pass
-  exactly one selector: explicit scale numbers, an explicit field-of-view range, or a
-  `rig_id` (computes the range from its optics, same as `list_astrometry_index_files`'s
+  `pixelsX`/`pixelsY` — the same numbers the `plate_solve` step's own scale hint already
+  uses), padded by `DEFAULT_RIG_MARGIN_SCALES` extra scales on each side (see below), or from
+  an explicit field-of-view range given directly, no padding — so "missing but irrelevant to
+  this field of view" can be told apart from "missing and actually needed." This doubles as a
+  way to preview which files a field of view (or rig) would need *without downloading
+  anything*: call it with `minArcmin`/`maxArcmin` or `rig_id` and filter the result for
+  `needed: true` — nothing is written to disk or fetched over the network by `action="list"`
+  regardless of what's passed.
+- **`manage_astrometry_index(action="download", catalog="tycho2", indexNumbers=None,
+  minArcmin=None, maxArcmin=None, rig_id=None)`** — downloads whichever aren't already
+  installed. Pass exactly one selector: explicit scale numbers, an explicit field-of-view
+  range, or a `rig_id` (computes the range from its optics, same as `action="list"`'s
   `needed`, margin included). Streamed to disk in chunks (never buffered whole in
   memory — files run up to ~165 MB) to a `.part` temp name, renamed only once complete, so
   an interrupted download is never mistaken for a valid index the next time it's checked;
@@ -366,10 +369,13 @@ rather than a separate script/tool. The "clearest separation" argument above was
 *tool*-level discoverability under the old one-tool-per-script convention; once the tool
 surface consolidates to `kind`/`action`-discriminated tools generally (INDIMCP-114 through
 120), that convention no longer holds, so the reason for the split no longer applies —
-`plate_solve.yaml`/`plate_solve_until_precision.yaml` themselves are untouched for now (still
-what the *current*, not-yet-removed `plate_solve`/`plate_solve_until_precision` tools run), but
-have no reason to keep existing once INDIMCP-119 removes those tools in favor of
-`plate_solve_rig.yaml`.
+`plate_solve.yaml`/`plate_solve_until_precision.yaml` themselves were left untouched at the
+time (still what the standalone `plate_solve`/`plate_solve_until_precision` tools ran), on the
+reasoning that they'd have no reason to keep existing once INDIMCP-119 removed those tools in
+favor of `plate_solve_rig.yaml`. **Done:** INDIMCP-119 has since removed both tools and deleted
+both script files — rig-based plate solving is now reached exclusively via
+`run_script`/`manage_script_run` against `plate_solve_rig`; only `plate_solve_uploaded_frame`
+remains a dedicated tool (see [ToolSurfaceRedesign.md](ToolSurfaceRedesign.md)).
 
 ## Open items resolved during implementation
 
@@ -379,7 +385,8 @@ have no reason to keep existing once INDIMCP-119 removes those tools in favor of
   `PlateSolveStep`'s own docstring for why.
 - `scripts/plate_solve.yaml` and `scripts/plate_solve_until_precision.yaml`, plus typed
   `@mcp.tool()` wrappers and wrapper/script parameter-parity test coverage (`89f7271`'s
-  pattern), all shipped.
+  pattern), all shipped. (Both tools and both script files were later removed by
+  INDIMCP-119 in favor of `plate_solve_rig.yaml` — see above.)
 - `docs/ScriptSchema.md` updated with the step's full reference table.
 
 ## Bug found and fixed during INDIMCP-121 (`_execute_plate_solve`)
@@ -408,5 +415,6 @@ checking for `None` (`_substitute` is a safe no-op on an already-literal value, 
 correct for every case: hardcoded, referenced, or the field never set at all), and adding the
 missing `toleranceArcsec`-requires-`exposureSeconds` runtime check alongside the existing
 `syncMount`/`TARGET_EOD_COORD` ones. Regression tests added in `tests/test_script_engine.py`
-cover both the generic engine behavior and end-to-end runs of the real shipped
-`plate_solve.yaml`/`plate_solve_rig.yaml` files.
+cover both the generic engine behavior and an end-to-end run of the real shipped
+`plate_solve.yaml` file (at the time; that script and its own test coverage were later
+dropped along with it by INDIMCP-119) and of `plate_solve_rig.yaml`, which remains.

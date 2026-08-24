@@ -31,13 +31,14 @@ These steps assume the Pi already has the `indiserver` binary and its drivers
 installed (see the [Design Document](Design.md)), and that `uv` is available.
 
 `solve-field` (astrometry.net) itself is a separate prerequisite for plate-solving
-(`plate_solve`/`plate_solve_uploaded_frame`, see [PlateSolve.md](PlateSolve.md)) — install
-the package providing it (e.g. `astrometry.net` on Debian/Raspberry Pi OS) the same way as
-`indiserver`'s own driver packages. Index files themselves don't need to be pre-installed:
-set `INDI_MCP_ASTROMETRY_INDEX_DIR` to wherever you want them kept, then use the
-`list_astrometry_index_files`/`download_astrometry_index_files` MCP tools to check what's
-there and fetch what's missing for your rig's actual field of view (INDIMCP-77) —
-self-service, no manual `astrometry.cfg` editing needed.
+(rig-based solving via `run_script`/`manage_script_run` against the built-in
+`plate_solve_rig` script, or `plate_solve_uploaded_frame` for a client-uploaded frame — see
+[PlateSolve.md](PlateSolve.md)) — install the package providing it (e.g. `astrometry.net` on
+Debian/Raspberry Pi OS) the same way as `indiserver`'s own driver packages. Index files
+themselves don't need to be pre-installed: set `INDI_MCP_ASTROMETRY_INDEX_DIR` to wherever you
+want them kept, then use the `manage_astrometry_index` MCP tool (`action="list"`/`"download"`)
+to check what's there and fetch what's missing for your rig's actual field of view
+(INDIMCP-77) — self-service, no manual `astrometry.cfg` editing needed.
 
 1. Create a dedicated system user and install directory:
 

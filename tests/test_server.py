@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import inspect
 import json
 import threading
 import time
@@ -1133,46 +1132,7 @@ async def test_set_connection_false_delegates_to_disconnect_script(
     assert calls == [("disconnect", "test-rig", {"role": "mount"}, None)]
 
 
-async def test_plate_solve_delegates_to_start_script(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _fake_start_script(monkeypatch)
-
-    await server.plate_solve("test-rig", exposureSeconds=5.0, syncMount=False, timeoutSeconds=30)
-
-    assert calls == [
-        (
-            "plate_solve",
-            "test-rig",
-            {"exposureSeconds": 5.0, "syncMount": False, "timeoutSeconds": 30},
-            None,
-        )
-    ]
-
-
-async def test_plate_solve_until_precision_delegates_to_start_script(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = _fake_start_script(monkeypatch)
-
-    await server.plate_solve_until_precision(
-        "test-rig", exposureSeconds=5.0, toleranceArcsec=15, maxAttempts=5, timeoutSeconds=30
-    )
-
-    assert calls == [
-        (
-            "plate_solve_until_precision",
-            "test-rig",
-            {
-                "exposureSeconds": 5.0,
-                "toleranceArcsec": 15,
-                "maxAttempts": 5,
-                "timeoutSeconds": 30,
-            },
-            None,
-        )
-    ]
-
-
-async def test_list_astrometry_index_files_delegates_without_a_rig(
+async def test_manage_astrometry_index_list_delegates_without_a_rig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, rig_store.Rig | None, float | None, float | None]] = []
@@ -1185,13 +1145,13 @@ async def test_list_astrometry_index_files_delegates_without_a_rig(
 
     monkeypatch.setattr(astrometry_index, "list_index_files", fake_list_index_files)
 
-    result = await server.list_astrometry_index_files()
+    result = await server.manage_astrometry_index(action="list")
 
     assert result == [{"indexNumber": 7, "installed": True}]
     assert calls == [("tycho2", None, None, None)]
 
 
-async def test_list_astrometry_index_files_passes_catalog_and_rig(
+async def test_manage_astrometry_index_list_passes_catalog_and_rig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(id="test-rig", name="Test rig", components=[])
@@ -1205,12 +1165,12 @@ async def test_list_astrometry_index_files_passes_catalog_and_rig(
         ),
     )
 
-    await server.list_astrometry_index_files(catalog="2mass", rig_id="test-rig")
+    await server.manage_astrometry_index(action="list", catalog="2mass", rig_id="test-rig")
 
     assert calls == [("2mass", rig, None, None)]
 
 
-async def test_list_astrometry_index_files_passes_explicit_arcmin_range(
+async def test_manage_astrometry_index_list_passes_explicit_arcmin_range(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, rig_store.Rig | None, float | None, float | None]] = []
@@ -1222,22 +1182,29 @@ async def test_list_astrometry_index_files_passes_explicit_arcmin_range(
         ),
     )
 
-    await server.list_astrometry_index_files(minArcmin=23.0, maxArcmin=29.0)
+    await server.manage_astrometry_index(action="list", minArcmin=23.0, maxArcmin=29.0)
 
     assert calls == [("tycho2", None, 23.0, 29.0)]
 
 
-async def test_list_astrometry_index_files_rejects_rig_and_arcmin_range_together() -> None:
+async def test_manage_astrometry_index_list_rejects_rig_and_arcmin_range_together() -> None:
     with pytest.raises(ValueError, match="not both"):
-        await server.list_astrometry_index_files(rig_id="test-rig", minArcmin=23.0, maxArcmin=29.0)
+        await server.manage_astrometry_index(
+            action="list", rig_id="test-rig", minArcmin=23.0, maxArcmin=29.0
+        )
 
 
-async def test_list_astrometry_index_files_rejects_partial_arcmin_range() -> None:
+async def test_manage_astrometry_index_list_rejects_partial_arcmin_range() -> None:
     with pytest.raises(ValueError, match="pass both minArcmin and maxArcmin"):
-        await server.list_astrometry_index_files(minArcmin=23.0)
+        await server.manage_astrometry_index(action="list", minArcmin=23.0)
 
 
-async def test_download_astrometry_index_files_with_explicit_index_numbers(
+async def test_manage_astrometry_index_list_rejects_index_numbers() -> None:
+    with pytest.raises(ValueError, match="does not accept"):
+        await server.manage_astrometry_index(action="list", indexNumbers=[7])
+
+
+async def test_manage_astrometry_index_download_with_explicit_index_numbers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[list[int], str]] = []
@@ -1250,13 +1217,15 @@ async def test_download_astrometry_index_files_with_explicit_index_numbers(
 
     monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
 
-    result = await server.download_astrometry_index_files(indexNumbers=[7, 8], catalog="2mass")
+    result = await server.manage_astrometry_index(
+        action="download", indexNumbers=[7, 8], catalog="2mass"
+    )
 
     assert result == [7, 8]
     assert calls == [([7, 8], "2mass")]
 
 
-async def test_download_astrometry_index_files_with_explicit_arcmin_range(
+async def test_manage_astrometry_index_download_with_explicit_arcmin_range(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[list[int]] = []
@@ -1269,13 +1238,13 @@ async def test_download_astrometry_index_files_with_explicit_arcmin_range(
 
     monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
 
-    result = await server.download_astrometry_index_files(minArcmin=23.0, maxArcmin=29.0)
+    result = await server.manage_astrometry_index(action="download", minArcmin=23.0, maxArcmin=29.0)
 
     assert result == [7]
     assert calls == [[7]]
 
 
-async def test_download_astrometry_index_files_with_rig_id_computes_the_range_with_margin(
+async def test_manage_astrometry_index_download_with_rig_id_computes_the_range_with_margin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = rig_store.Rig(
@@ -1304,7 +1273,7 @@ async def test_download_astrometry_index_files_with_rig_id_computes_the_range_wi
 
     monkeypatch.setattr(astrometry_index, "download_index_files", fake_download)
 
-    await server.download_astrometry_index_files(rig_id="test-rig")
+    await server.manage_astrometry_index(action="download", rig_id="test-rig")
 
     min_arcmin, max_arcmin = astrometry_index.field_of_view_arcmin_for_rig(rig)
     expected = astrometry_index.index_numbers_for_field_of_view(
@@ -1314,25 +1283,25 @@ async def test_download_astrometry_index_files_with_rig_id_computes_the_range_wi
     assert len(expected) > 1  # confirms the margin actually widened the exact bracket
 
 
-async def test_download_astrometry_index_files_requires_one_selector() -> None:
+async def test_manage_astrometry_index_download_requires_one_selector() -> None:
     with pytest.raises(ValueError, match="pass exactly one of"):
-        await server.download_astrometry_index_files()
+        await server.manage_astrometry_index(action="download")
 
 
-async def test_download_astrometry_index_files_rejects_more_than_one_selector() -> None:
+async def test_manage_astrometry_index_download_rejects_more_than_one_selector() -> None:
     with pytest.raises(ValueError, match="pass exactly one of"):
-        await server.download_astrometry_index_files(indexNumbers=[7], rig_id="test-rig")
+        await server.manage_astrometry_index(action="download", indexNumbers=[7], rig_id="test-rig")
 
 
-async def test_download_astrometry_index_files_rejects_partial_arcmin_range() -> None:
+async def test_manage_astrometry_index_download_rejects_partial_arcmin_range() -> None:
     with pytest.raises(ValueError, match="pass both minArcmin and maxArcmin"):
-        await server.download_astrometry_index_files(minArcmin=23.0)
+        await server.manage_astrometry_index(action="download", minArcmin=23.0)
 
 
-async def test_download_astrometry_index_files_rejects_a_range_no_scale_covers() -> None:
+async def test_manage_astrometry_index_download_rejects_a_range_no_scale_covers() -> None:
     # tycho2 only publishes scales 7-19 (22 arcmin+) -- a narrower range matches nothing
     with pytest.raises(ValueError, match="no known 'tycho2' scale covers"):
-        await server.download_astrometry_index_files(minArcmin=1.0, maxArcmin=2.0)
+        await server.manage_astrometry_index(action="download", minArcmin=1.0, maxArcmin=2.0)
 
 
 async def test_plate_solve_uploaded_frame_decodes_base64_and_delegates(
@@ -1366,57 +1335,6 @@ async def test_plate_solve_uploaded_frame_decodes_base64_and_delegates(
         "scale_high_arcsec": 2.0,
         "timeout_seconds": 30,
     }
-
-
-_WRAPPER_TOOLS_BY_SCRIPT_ID = {
-    "plate_solve": server.plate_solve,
-    "plate_solve_until_precision": server.plate_solve_until_precision,
-}
-
-
-@pytest.mark.parametrize("script_id", sorted(_WRAPPER_TOOLS_BY_SCRIPT_ID))
-def test_wrapper_tool_signature_matches_the_scripts_own_parameters(script_id: str) -> None:
-    """Each remaining one-tool-per-script convenience wrapper hand-encodes its script's own
-    `parameters:` block as Python parameter names/required-ness/defaults — nothing else keeps
-    the two in sync, so this cross-checks the wrapper's actual signature against the loaded
-    script's declared `Parameter`s directly, rather than against a third hardcoded expectations
-    list, turning a future YAML/Python desync into a fast, specific test failure instead of a
-    confusing `scriptFailed` at call time.
-
-    `park`/`unpark`/`slew`/`cool_camera`/`select_filter`/`set_focus_position`/`connect`/
-    `disconnect`/`capture_frame`/`track_off`/`set_track_mode`/`set_custom_tracking_rate` used
-    to be covered here too (INDIMCP-49), before INDIMCP-116 grouped them into `mount_action`/
-    `camera_action`/`filter_wheel_action`/`focuser_action`/`set_connection` — see
-    `test_merged_action_tool_params_match_the_scripts_own_parameters` below for their
-    replacement coverage; a single tool's signature spanning several scripts' worth of
-    parameters can't be introspected this same way (every parameter is optional at the Python
-    level regardless of which action actually requires it, so `inspect.signature` alone can no
-    longer tell required from optional per action).
-    """
-    script_store.load_scripts(SCRIPTS_DIR)
-    script = script_store.get_script(script_id)
-    signature = inspect.signature(_WRAPPER_TOOLS_BY_SCRIPT_ID[script_id])
-
-    # rig_id and (capture_frame's) location_id are wrapper-only, not script parameters.
-    wrapper_param_names = {
-        name for name in signature.parameters if name not in ("rig_id", "location_id")
-    }
-    assert wrapper_param_names == set(script.parameters), (
-        f"{script_id}'s wrapper parameters {sorted(wrapper_param_names)} don't match its "
-        f"script's declared parameters {sorted(script.parameters)}"
-    )
-    for name, parameter in script.parameters.items():
-        wrapper_default = signature.parameters[name].default
-        wrapper_has_default = wrapper_default is not inspect.Parameter.empty
-        assert wrapper_has_default != parameter.required, (
-            f"{script_id}.{name}: script declares required={parameter.required}, but the "
-            f"wrapper {'has' if wrapper_has_default else 'has no'} a default"
-        )
-        if wrapper_has_default:
-            assert wrapper_default == parameter.default, (
-                f"{script_id}.{name}: wrapper default {wrapper_default!r} != script "
-                f"default {parameter.default!r}"
-            )
 
 
 _MERGED_ACTION_SCRIPT_PARAMS: dict[str, set[str]] = {
@@ -1461,9 +1379,11 @@ _MERGED_ACTION_SCRIPT_RESOLVED_DEFAULTS: dict[str, dict[str, object]] = {
 
 @pytest.mark.parametrize("script_id", sorted(_MERGED_ACTION_SCRIPT_PARAMS))
 def test_merged_action_tool_params_match_the_scripts_own_parameters(script_id: str) -> None:
-    """Same cross-check as `test_wrapper_tool_signature_matches_the_scripts_own_parameters`,
-    adapted for the `*_action` tools (INDIMCP-116) that replaced the old one-tool-per-script
-    wrappers for mount/camera/filter-wheel/focuser/connection scripts. Their Python signature
+    """Cross-checks each `*_action` tool's (INDIMCP-116) per-action parameter expectations
+    against its underlying script's own declared `Parameter`s — the same kind of check the old
+    one-tool-per-script wrappers this replaced used to get for free from their real
+    (non-sentinel) Python defaults, before INDIMCP-119 removed the last of those wrappers
+    (`plate_solve`/`plate_solve_until_precision`). Their Python signature
     spans every action the tool supports, not just one script's parameters, and every
     parameter defaults to `None` in the signature regardless of whether the particular action
     actually requires it — so `inspect.signature` alone can no longer distinguish required

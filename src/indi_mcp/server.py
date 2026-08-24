@@ -966,32 +966,6 @@ async def set_connection(rig_id: str, role: str, connected: bool) -> ScriptRunSt
 
 
 @mcp.tool()
-async def plate_solve(
-    rig_id: str,
-    exposureSeconds: float | None = None,
-    syncMount: bool = True,
-    timeoutSeconds: float = 60,
-) -> ScriptRunStarted:
-    """Plate-solve a frame via astrometry.net's local solve-field — see
-    `scripts/plate_solve.yaml` (INDIMCP-27/45).
-
-    `exposureSeconds` captures a fresh frame first; omit it to solve whichever frame was
-    most recently captured in this run. `syncMount` (default `True`) syncs the mount's
-    coordinates to the solved position. Does not retry toward a target tolerance — see
-    `plate_solve_until_precision` (INDIMCP-47) for that.
-    """
-    return await script_runs.start_script(
-        "plate_solve",
-        rig_id,
-        {
-            "exposureSeconds": exposureSeconds,
-            "syncMount": syncMount,
-            "timeoutSeconds": timeoutSeconds,
-        },
-    )
-
-
-@mcp.tool()
 async def plate_solve_uploaded_frame(
     fitsDataBase64: str,
     raHintHours: float | None = None,
@@ -1014,8 +988,9 @@ async def plate_solve_uploaded_frame(
     doesn't lose the upload.
 
     There's no rig/mount to derive a position or plate-scale hint from automatically (unlike
-    `plate_solve`, which reads both off the rig's own configuration and the mount's live
-    coordinates) — pass `raHintHours`/`decHintDeg` and/or `scaleLowArcsecPerPixel`/
+    plate-solving a rig's own camera via `run_script`/`manage_script_run` against the built-in
+    `plate_solve_rig` script, which reads both off the rig's own configuration and the mount's
+    live coordinates) — pass `raHintHours`/`decHintDeg` and/or `scaleLowArcsecPerPixel`/
     `scaleHighArcsecPerPixel` directly if known, to narrow and speed up the search; omit
     either pair for an unhinted solve (slower, still valid).
 
@@ -1034,102 +1009,95 @@ async def plate_solve_uploaded_frame(
     )
 
 
-@mcp.tool()
-async def plate_solve_until_precision(
-    rig_id: str,
-    exposureSeconds: float,
-    toleranceArcsec: float = 30,
-    maxAttempts: int = 3,
-    timeoutSeconds: float = 60,
-) -> ScriptRunStarted:
-    """Repeatedly plate-solve, sync, and re-slew toward the rig's mount's own commanded
-    target until within `toleranceArcsec`, or `maxAttempts` is exhausted — see
-    `scripts/plate_solve_until_precision.yaml` (INDIMCP-27/47).
-
-    Requires a prior slew (so the mount's `TARGET_EOD_COORD` — the last commanded slew
-    target — is actually set to something meaningful); fails immediately if it isn't.
-    """
-    return await script_runs.start_script(
-        "plate_solve_until_precision",
-        rig_id,
-        {
-            "exposureSeconds": exposureSeconds,
-            "toleranceArcsec": toleranceArcsec,
-            "maxAttempts": maxAttempts,
-            "timeoutSeconds": timeoutSeconds,
-        },
-    )
+_ASTROMETRY_INDEX_ACTION_ALLOWED_PARAMS: dict[str, set[str]] = {
+    "list": {"rig_id", "minArcmin", "maxArcmin"},
+    "download": {"indexNumbers", "rig_id", "minArcmin", "maxArcmin"},
+}
+"""Allowed selector parameters per `manage_astrometry_index` action — `catalog` is common to
+both actions and always valid, so it's excluded from this map. Unlike `_MOUNT_ACTION_PARAMS`,
+this doesn't double as a required set: each action's own rule is combinatorial (at most one
+selector for `list`, exactly one for `download`), not a fixed required-parameter set, so it
+can't be expressed via `requiredParamsByAction` schema metadata — the rule is documented in
+`manage_astrometry_index`'s own docstring and enforced in its body instead.
+"""
 
 
 @mcp.tool()
-async def list_astrometry_index_files(
-    catalog: astrometry_index.Catalog = "tycho2",
-    rig_id: str | None = None,
-    minArcmin: float | None = None,
-    maxArcmin: float | None = None,
-) -> list[astrometry_index.IndexFileStatus]:
-    """List every scale `catalog` publishes and whether it's installed under
-    `INDI_MCP_ASTROMETRY_INDEX_DIR` (INDIMCP-77) — see `docs/PlateSolve.md`.
-
-    `catalog` is `"tycho2"` (wide fields, 22 arcmin-33deg) or `"2mass"` (the full 2-2000
-    arcmin range) — the same two choices Ekos's own index-file downloader offers.
-
-    Pass **at most one** of `rig_id` or `minArcmin`/`maxArcmin` together to also get a
-    `needed` flag per entry (`None` throughout otherwise) — this is also how to preview which
-    files a field of view would need *without downloading anything*: pass the range (or a
-    rig) here, then filter the result for `needed: true`; nothing is written to disk or
-    fetched over the network by this tool regardless. `rig_id` computes the field of view
-    from that rig's own configured optics (its `telescope` component's `focalLengthMm` and
-    `camera` component's `pixelSizeMicron`/`pixelsX`/`pixelsY`) and pads it by
-    `astrometry_index.DEFAULT_RIG_MARGIN_SCALES` extra scales on each side, since a rig's
-    computed field of view is only ever an estimate; `minArcmin`/`maxArcmin` given directly is
-    used exactly as given, no padding — for a caller who already knows precisely what range
-    they want, e.g. previewing coverage for a setup with no saved rig at all. `needed` is
-    `None` throughout if neither is given, or if `rig_id` is given but that rig doesn't have
-    enough optics configured to compute a field of view from. Raises `ValueError` if both
-    `rig_id` and an arcmin range are given, or if only one of `minArcmin`/`maxArcmin` is
-    given.
-    """
-    if rig_id is not None and (minArcmin is not None or maxArcmin is not None):
-        raise ValueError("pass rig_id or minArcmin/maxArcmin, not both")
-    if (minArcmin is None) != (maxArcmin is None):
-        raise ValueError("pass both minArcmin and maxArcmin together, not just one")
-    rig = rig_store.get_rig(rig_id) if rig_id is not None else None
-    return await asyncio.to_thread(
-        astrometry_index.list_index_files,
-        catalog=catalog,
-        rig=rig,
-        min_arcmin=minArcmin,
-        max_arcmin=maxArcmin,
-    )
-
-
-@mcp.tool()
-async def download_astrometry_index_files(
+async def manage_astrometry_index(
+    action: Literal["list", "download"],
     catalog: astrometry_index.Catalog = "tycho2",
     indexNumbers: list[int] | None = None,
+    rig_id: str | None = None,
     minArcmin: float | None = None,
     maxArcmin: float | None = None,
-    rig_id: str | None = None,
-) -> list[int]:
-    """Download whichever `catalog` index files aren't already installed under
-    `INDI_MCP_ASTROMETRY_INDEX_DIR` (INDIMCP-77) — see `docs/PlateSolve.md`.
+) -> list[astrometry_index.IndexFileStatus] | list[int]:
+    """List or download astrometry.net index files for `catalog` under
+    `INDI_MCP_ASTROMETRY_INDEX_DIR` (INDIMCP-77) — replaces `list_astrometry_index_files`/
+    `download_astrometry_index_files` (INDIMCP-119) — see `docs/PlateSolve.md`.
 
     `catalog` is `"tycho2"` (wide fields, 22 arcmin-33deg) or `"2mass"` (the full 2-2000
-    arcmin range) — the same two choices Ekos's own index-file downloader offers.
+    arcmin range) — the same two choices Ekos's own index-file downloader offers. Valid with
+    either action.
 
-    Pass **exactly one** of: `indexNumbers` (explicit scale numbers `catalog` publishes),
-    `minArcmin`/`maxArcmin` together (every scale covering that exact field-of-view range),
-    or `rig_id` (computes `minArcmin`/`maxArcmin` from that rig's own configured optics, then
-    pads by `astrometry_index.DEFAULT_RIG_MARGIN_SCALES` extra scales on each side — the same
-    way `list_astrometry_index_files`'s `needed` does, and for the same reason: a rig's
-    computed field of view is only ever an estimate, so this installs a little headroom
-    rather than exactly one bracket that might just miss) — rejected if none or more than one
-    is given, rather than silently prioritizing one, so a call that accidentally passes two
-    (e.g. `rig_id` alongside explicit `indexNumbers`) fails loudly instead of quietly
-    ignoring one of them. Returns the scale numbers that had at least one file actually
-    downloaded — already-fully-installed ones are left alone.
+    `action="list"`: returns every scale `catalog` publishes and whether it's installed. Pass
+    **at most one** of `rig_id` or `minArcmin`/`maxArcmin` together to also get a `needed`
+    flag per entry (`None` throughout otherwise) — this is also how to preview which files a
+    field of view would need *without downloading anything*: pass the range (or a rig) here,
+    then filter the result for `needed: true`; nothing is written to disk or fetched over the
+    network for this action regardless. `rig_id` computes the field of view from that rig's
+    own configured optics (its `telescope` component's `focalLengthMm` and `camera`
+    component's `pixelSizeMicron`/`pixelsX`/`pixelsY`) and pads it by
+    `astrometry_index.DEFAULT_RIG_MARGIN_SCALES` extra scales on each side, since a rig's
+    computed field of view is only ever an estimate; `minArcmin`/`maxArcmin` given directly is
+    used exactly as given, no padding. `needed` is `None` throughout if neither is given, or
+    if `rig_id` is given but that rig doesn't have enough optics configured to compute a field
+    of view from. `indexNumbers` isn't a valid parameter with this action. Raises `ValueError`
+    if both `rig_id` and an arcmin range are given, or if only one of `minArcmin`/`maxArcmin`
+    is given.
+
+    `action="download"`: downloads whichever index files aren't already installed and returns
+    the scale numbers that had at least one file actually downloaded (already-fully-installed
+    ones are left alone). Pass **exactly one** of: `indexNumbers` (explicit scale numbers
+    `catalog` publishes), `minArcmin`/`maxArcmin` together (every scale covering that exact
+    field-of-view range), or `rig_id` (computes `minArcmin`/`maxArcmin` from that rig's own
+    configured optics the same way `action="list"`'s `needed` does, then pads the same way) —
+    rejected if none or more than one is given, rather than silently prioritizing one, so a
+    call that accidentally passes two (e.g. `rig_id` alongside explicit `indexNumbers`) fails
+    loudly instead of quietly ignoring one of them. Raises `ValueError` if selectors are
+    miscombined, or if no known `catalog` scale covers a derived arcmin range.
+
+    Each action only accepts its own selector parameters (`_ASTROMETRY_INDEX_ACTION_
+    ALLOWED_PARAMS`) — passing a parameter the other action doesn't recognize (e.g.
+    `indexNumbers` with `action="list"`) raises `ValueError`.
     """
+    given_names = {
+        name
+        for name, value in {
+            "indexNumbers": indexNumbers,
+            "rig_id": rig_id,
+            "minArcmin": minArcmin,
+            "maxArcmin": maxArcmin,
+        }.items()
+        if value is not None
+    }
+    disallowed = given_names - _ASTROMETRY_INDEX_ACTION_ALLOWED_PARAMS[action]
+    if disallowed:
+        raise ValueError(f"action={action!r} does not accept {sorted(disallowed)}")
+
+    if action == "list":
+        if rig_id is not None and (minArcmin is not None or maxArcmin is not None):
+            raise ValueError("pass rig_id or minArcmin/maxArcmin, not both")
+        if (minArcmin is None) != (maxArcmin is None):
+            raise ValueError("pass both minArcmin and maxArcmin together, not just one")
+        rig = rig_store.get_rig(rig_id) if rig_id is not None else None
+        return await asyncio.to_thread(
+            astrometry_index.list_index_files,
+            catalog=catalog,
+            rig=rig,
+            min_arcmin=minArcmin,
+            max_arcmin=maxArcmin,
+        )
+
     arcmin_range_given = minArcmin is not None or maxArcmin is not None
     selectors_given = sum([indexNumbers is not None, rig_id is not None, arcmin_range_given])
     if selectors_given != 1:
@@ -1279,7 +1247,7 @@ async def run_calibration_sweep(
     if kind == "sensor":
         # Reached only when kind="sensor" and the required-params check above passed, so
         # every one of these is guaranteed non-None. Asserted here purely for the type
-        # checker, matching download_astrometry_index_files's own convention.
+        # checker, matching manage_astrometry_index's own convention.
         assert gains is not None
         assert offsets is not None
         assert flatExposureSecondsList is not None
@@ -1298,7 +1266,7 @@ async def run_calibration_sweep(
 
     # Reached only when kind="flat" and the required-params check above passed, so every
     # one of these is guaranteed non-None. Asserted here purely for the type checker,
-    # matching download_astrometry_index_files's own convention.
+    # matching manage_astrometry_index's own convention.
     assert gains is not None
     assert offsets is not None
     assert exposureSecondsList is not None
@@ -1547,7 +1515,7 @@ async def frames(
     if action == "get":
         # Reached only when action="get" and the required-params check above passed, so
         # frame_id is guaranteed non-None. Asserted here purely for the type checker,
-        # matching download_astrometry_index_files's own convention.
+        # matching manage_astrometry_index's own convention.
         assert frame_id is not None
         metadata = await asyncio.to_thread(frame_store.get_frame_metadata, frame_id)
         return _to_frame_response(metadata)
@@ -1632,7 +1600,7 @@ async def manage_frame(
 
     # Reached only when the required-params check above passed for the given action, so
     # frame_id/older_than_days are guaranteed non-None below wherever each is used.
-    # Asserted here purely for the type checker, matching download_astrometry_index_files's
+    # Asserted here purely for the type checker, matching manage_astrometry_index's
     # own convention.
     if action == "confirm_transfer":
         assert frame_id is not None
