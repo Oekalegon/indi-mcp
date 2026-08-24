@@ -207,6 +207,6 @@ session — dark current's strong temperature dependence otherwise contaminates 
 between frames.
 
 The analysis itself is deliberately **not** implemented in this server: the server captures and
-stores the frames (they're ordinary FITS files, retrievable via `list_frames` and each frame's
+stores the frames (they're ordinary FITS files, retrievable via `frames`'s `action="list"` and each frame's
 `downloadUrl` — see [Design.md § Retrieving frames](Design.md#retrieving-frames)); the
 statistics above are a client-side/offline computation over those files.

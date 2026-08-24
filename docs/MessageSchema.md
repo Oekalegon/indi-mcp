@@ -153,7 +153,7 @@ payload if you need it" split already used for scripts (`scriptCompleted.result`
 a frame listing; see [Design.md § Calling scripts and script results](Design.md#calling-scripts-and-script-results)).
 For a `propertyUpdate` seen live on the messaging stream, that's a `get_latest_blob(device, name)`
 call, keyed by the same `(device, name)` pair and returning the most recent raw bytes received;
-for a BLOB captured by a script, it's `list_frames`/frame retrieval, per
+for a BLOB captured by a script, it's `frames`'s `action="list"`/frame retrieval, per
 [Design.md § Retrieving frames](Design.md#retrieving-frames).
 
 ### `propertyDeleted`

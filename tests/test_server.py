@@ -1825,7 +1825,7 @@ _FRAME_METADATA: frame_store.FrameMetadata = {
 }
 
 
-async def test_list_frames_delegates_to_frame_store_with_all_filters(
+async def test_frames_list_delegates_to_frame_store_with_all_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple] = []
@@ -1838,17 +1838,15 @@ async def test_list_frames_delegates_to_frame_store_with_all_filters(
 
     monkeypatch.setattr(frame_store, "list_frames", fake_list_frames)
 
-    result = await server.list_frames(
-        run_id="run-1", device="cam", since="2026-07-19T00:00:00+00:00", transferred=False
+    result = await server.frames(
+        "list", run_id="run-1", device="cam", since="2026-07-19T00:00:00+00:00", transferred=False
     )
 
     assert result == [{**_FRAME_METADATA, "downloadUrl": None, "issues": []}]
     assert calls == [("run-1", "cam", "2026-07-19T00:00:00+00:00", False)]
 
 
-async def test_get_frame_metadata_delegates_to_frame_store(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_frames_get_delegates_to_frame_store(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
     def fake_get_frame_metadata(frame_id: str) -> frame_store.FrameMetadata:
@@ -1857,13 +1855,28 @@ async def test_get_frame_metadata_delegates_to_frame_store(
 
     monkeypatch.setattr(frame_store, "get_frame_metadata", fake_get_frame_metadata)
 
-    result = await server.get_frame_metadata("frame-1")
+    result = await server.frames("get", frame_id="frame-1")
 
     assert result == {**_FRAME_METADATA, "downloadUrl": None, "issues": []}
     assert calls == ["frame-1"]
 
 
-async def test_get_frame_metadata_warns_when_checksum_is_missing(
+async def test_frames_get_requires_frame_id() -> None:
+    with pytest.raises(ValueError, match="requires"):
+        await server.frames("get")
+
+
+async def test_frames_get_rejects_list_filters() -> None:
+    with pytest.raises(ValueError, match="doesn't accept"):
+        await server.frames("get", frame_id="frame-1", device="cam")
+
+
+async def test_frames_list_rejects_frame_id() -> None:
+    with pytest.raises(ValueError, match="doesn't accept"):
+        await server.frames("list", frame_id="frame-1")
+
+
+async def test_frames_get_warns_when_checksum_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A `None` `checksumSha256` (INDIMCP-95 predates the frame) isn't an error — the frame
@@ -1871,7 +1884,7 @@ async def test_get_frame_metadata_warns_when_checksum_is_missing(
     legacy_frame = {**_FRAME_METADATA, "checksumSha256": None}
     monkeypatch.setattr(frame_store, "get_frame_metadata", lambda frame_id: legacy_frame)
 
-    result = await server.get_frame_metadata("frame-1")
+    result = await server.frames("get", frame_id="frame-1")
 
     assert result["issues"] == [
         {
@@ -1888,17 +1901,17 @@ async def test_get_frame_metadata_warns_when_checksum_is_missing(
     ]
 
 
-async def test_list_frames_does_not_warn_when_checksum_is_present(
+async def test_frames_list_does_not_warn_when_checksum_is_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(frame_store, "list_frames", lambda **_kwargs: [_FRAME_METADATA])
 
-    result = await server.list_frames()
+    result = await server.frames("list")
 
     assert result[0]["issues"] == []
 
 
-async def test_list_frames_warns_per_frame_independently(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_frames_list_warns_per_frame_independently(monkeypatch: pytest.MonkeyPatch) -> None:
     """A directory spanning the INDIMCP-95 migration boundary has both kinds of frame at once —
     `issues` must be computed per frame, not decided once for the whole batch."""
     legacy_frame = {**_FRAME_METADATA, "frameId": "frame-legacy", "checksumSha256": None}
@@ -1906,13 +1919,13 @@ async def test_list_frames_warns_per_frame_independently(monkeypatch: pytest.Mon
         frame_store, "list_frames", lambda **_kwargs: [_FRAME_METADATA, legacy_frame]
     )
 
-    result = await server.list_frames()
+    result = await server.frames("list")
 
     assert result[0]["issues"] == []
     assert [issue["code"] for issue in result[1]["issues"]] == ["frameChecksumMissing"]
 
 
-async def test_get_frame_metadata_includes_download_url_when_an_http_listener_exists(
+async def test_frames_get_includes_download_url_when_an_http_listener_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(frame_store, "get_frame_metadata", lambda frame_id: _FRAME_METADATA)
@@ -1920,7 +1933,7 @@ async def test_get_frame_metadata_includes_download_url_when_an_http_listener_ex
     monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
     monkeypatch.setattr(server.mcp.settings, "port", 8000)
 
-    result = await server.get_frame_metadata("frame-1")
+    result = await server.frames("get", frame_id="frame-1")
 
     assert result["downloadUrl"] == "http://indi-mcp-pi:8000/frames/frame-1"
 
@@ -1957,7 +1970,7 @@ def test_frame_download_url_percent_encodes_the_frame_id(monkeypatch: pytest.Mon
     assert url == "http://indi-mcp-pi:8000/frames/frame%2Fwith%20slash"
 
 
-async def test_list_frames_includes_download_url_when_an_http_listener_exists(
+async def test_frames_list_includes_download_url_when_an_http_listener_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(frame_store, "list_frames", lambda **_kwargs: [_FRAME_METADATA])
@@ -1965,14 +1978,14 @@ async def test_list_frames_includes_download_url_when_an_http_listener_exists(
     monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
     monkeypatch.setattr(server.mcp.settings, "port", 8000)
 
-    result = await server.list_frames()
+    result = await server.frames("list")
 
     assert result == [
         {**_FRAME_METADATA, "downloadUrl": "http://indi-mcp-pi:8000/frames/frame-1", "issues": []}
     ]
 
 
-async def test_confirm_frame_transfer_delegates_to_frame_store(
+async def test_manage_frame_confirm_transfer_delegates_to_frame_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -1983,13 +1996,18 @@ async def test_confirm_frame_transfer_delegates_to_frame_store(
 
     monkeypatch.setattr(frame_store, "confirm_frame_transfer", fake_confirm_frame_transfer)
 
-    result = await server.confirm_frame_transfer("frame-1")
+    result = await server.manage_frame("confirm_transfer", frame_id="frame-1")
 
     assert result["transferredAt"] == "2026-07-20T00:05:00.000000+00:00"
     assert calls == ["frame-1"]
 
 
-async def test_delete_frame_delegates_to_frame_store_with_the_require_transferred_flag(
+async def test_manage_frame_confirm_transfer_requires_frame_id() -> None:
+    with pytest.raises(ValueError, match="requires"):
+        await server.manage_frame("confirm_transfer")
+
+
+async def test_manage_frame_delete_delegates_to_frame_store_with_the_require_transferred_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple] = []
@@ -2002,13 +2020,36 @@ async def test_delete_frame_delegates_to_frame_store_with_the_require_transferre
 
     monkeypatch.setattr(frame_store, "delete_frame", fake_delete_frame)
 
-    result = await server.delete_frame("frame-1", require_transferred=False)
+    result = await server.manage_frame("delete", frame_id="frame-1", require_transferred=False)
 
     assert result == _FRAME_METADATA
     assert calls == [("frame-1", False)]
 
 
-async def test_purge_transferred_frames_delegates_to_frame_store_with_a_timedelta(
+async def test_manage_frame_delete_defaults_require_transferred_to_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bool] = []
+
+    def fake_delete_frame(
+        frame_id: str, *, require_transferred: bool = True
+    ) -> frame_store.FrameMetadata:
+        calls.append(require_transferred)
+        return _FRAME_METADATA
+
+    monkeypatch.setattr(frame_store, "delete_frame", fake_delete_frame)
+
+    await server.manage_frame("delete", frame_id="frame-1")
+
+    assert calls == [True]
+
+
+async def test_manage_frame_delete_requires_frame_id() -> None:
+    with pytest.raises(ValueError, match="requires"):
+        await server.manage_frame("delete")
+
+
+async def test_manage_frame_purge_delegates_to_frame_store_with_a_timedelta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[timedelta] = []
@@ -2019,10 +2060,20 @@ async def test_purge_transferred_frames_delegates_to_frame_store_with_a_timedelt
 
     monkeypatch.setattr(frame_store, "purge_transferred_frames", fake_purge_transferred_frames)
 
-    result = await server.purge_transferred_frames(older_than_days=7)
+    result = await server.manage_frame("purge", older_than_days=7)
 
     assert result == [_FRAME_METADATA]
     assert calls == [timedelta(days=7)]
+
+
+async def test_manage_frame_purge_requires_older_than_days() -> None:
+    with pytest.raises(ValueError, match="requires"):
+        await server.manage_frame("purge")
+
+
+async def test_manage_frame_purge_rejects_frame_id() -> None:
+    with pytest.raises(ValueError, match="doesn't accept"):
+        await server.manage_frame("purge", frame_id="frame-1", older_than_days=7)
 
 
 async def test_get_events_delegates_to_event_log_with_all_filters(

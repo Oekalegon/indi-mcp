@@ -98,8 +98,8 @@ letting the caller choose the gain/offset/exposure range per invocation.
 
 ## Decision: a dedicated MCP tool, not a script step
 
-**Decision:** implement the sweep as a plain MCP tool (like `list_frames` or
-`purge_transferred_frames` — see [server.py](../src/indi_mcp/server.py)), not as a new script
+**Decision:** implement the sweep as a plain MCP tool (like `frames` or `manage_frame`'s
+`action="purge"` — see [server.py](../src/indi_mcp/server.py)), not as a new script
 step or a new script. Implemented for the bias/flat-dark side as
 `run_sensor_calibration_sweep` (INDIMCP-102; `server.py` + `sensor_calibration_sweep.py`) —
 later merged with its flat counterpart into `run_calibration_sweep(kind="sensor", ...)`
@@ -186,9 +186,9 @@ sweep for free anyway.
 override added to `script_runs.start_script`), not a fresh `run_id` per combination. Since every
 frame `capture_frame` saves is tagged with whatever `run_id` its enclosing script run was given,
 this means every frame captured anywhere in a sweep — across every gain/offset/exposure
-combination — shares one `run_id`, and `list_frames(run_id=sweepId)` retrieves all of them in a
-single call. No `frame_store` schema change, no new `sweepId` column, no new `list_frames`
-filter parameter.
+combination — shares one `run_id`, and `frames("list", run_id=sweepId)` retrieves all of them in
+a single call. No `frame_store` schema change, no new `sweepId` column, no new `frames` filter
+parameter.
 
 This was a deliberate id-space unification, not an overload of an unrelated field — it was
 seriously considered and rejected first: a caller passing an arbitrary UUID that could mean
@@ -196,7 +196,7 @@ seriously considered and rejected first: a caller passing an arbitrary UUID that
 exactly the kind of ambiguity this codebase's `kind`/`type`-tagged envelope convention exists to
 avoid — a stale or mistyped id would silently resolve against the wrong thing instead of failing
 clearly. Sharing `run_id` across a sweep's combinations is different: there's no guessing
-involved, `list_frames(run_id=...)` keeps meaning exactly what it always has (frames from the
+involved, `frames("list", run_id=...)` keeps meaning exactly what it always has (frames from the
 run(s) tagged with this id), a sweep's combinations just legitimately share one id by
 construction. No information is lost by giving up *per-combination* `run_id` granularity either
 — a frame's own FITS headers (`CCD_GAIN`/`CCD_OFFSET`/`CCD_EXPOSURE`) already record which
@@ -222,7 +222,7 @@ Safe only because a sweep's combinations run strictly sequentially, never concur
 constraint this module already had for the `sweepId`-vs-bare-`runId`-list reason above.
 
 INDIMCPKit's own frame-retrieval wrapper for a sweep (tracked alongside IMCPKIT-32/33) is just
-`list_frames(runId: sweepId)` under the hood — no new server-side tool needed for it.
+`frames(action: "list", runId: sweepId)` under the hood — no new server-side tool needed for it.
 
 **Also resolved: fail-fast, not best-effort.** If one combination's run doesn't end in
 `scriptCompleted`, the sweep stops rather than continuing to later combinations — a failure
