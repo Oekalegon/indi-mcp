@@ -15,6 +15,12 @@ description: >
   current setting alone" convention as capture_flat_sequence's gain/offset
   (INDIMCP-103) — a dark frame's gain/offset must match the light frames
   it calibrates.
+
+  binningX/binningY/frameX/frameY/frameWidth/frameHeight (INDIMCP-123) are
+  optional, same defaults/omit convention as capture_frame.yaml itself:
+  binning defaults to 1x1, and the sub-frame fields default to omitted
+  (full sensor) — set all four together, or omit all four. A dark frame's
+  binning/ROI must match the light frames it calibrates.
 pausable: true
 parameters:
   targetTempC:
@@ -45,6 +51,32 @@ parameters:
       matching the light frames this calibrates. Omit to leave the
       device's current setting alone, same "normally omitted" convention
       as gain.
+  binningX:
+    type: integer
+    required: false
+    default: 1
+    description: Horizontal pixel binning, if the camera supports it.
+  binningY:
+    type: integer
+    required: false
+    default: 1
+    description: Vertical pixel binning, if the camera supports it.
+  frameX:
+    type: integer
+    required: false
+    description: Sub-frame left edge, in pixels. Set together with frameY/frameWidth/frameHeight, or omit all four for the full sensor.
+  frameY:
+    type: integer
+    required: false
+    description: Sub-frame top edge, in pixels. Set together with frameX/frameWidth/frameHeight, or omit all four for the full sensor.
+  frameWidth:
+    type: integer
+    required: false
+    description: Sub-frame width, in pixels. Set together with frameX/frameY/frameHeight, or omit all four for the full sensor.
+  frameHeight:
+    type: integer
+    required: false
+    description: Sub-frame height, in pixels. Set together with frameX/frameY/frameWidth, or omit all four for the full sensor.
 steps:
   - step: run_script
     script: cool_camera
@@ -58,3 +90,9 @@ steps:
         frameType: Dark
         gain: "{{ gain }}"
         offset: "{{ offset }}"
+        binningX: "{{ binningX }}"
+        binningY: "{{ binningY }}"
+        frameX: "{{ frameX }}"
+        frameY: "{{ frameY }}"
+        frameWidth: "{{ frameWidth }}"
+        frameHeight: "{{ frameHeight }}"
