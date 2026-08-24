@@ -123,7 +123,8 @@ no user documentation yet.*
 - [x] Park / unpark
 - [x] Slew to RA/Dec coordinates — 📖 [ScriptSchema.md](ScriptSchema.md)
 - [x] Tracking control: `track_off`, `set_track_mode`, `set_custom_tracking_rate`
-- [x] Precise pointing via `plate_solve_until_precision` (iterative solve-and-refine)
+- [x] Precise pointing via iterative solve-and-refine (`plate_solve_rig` script's
+      `toleranceArcsec`, run via `run_script`/`manage_script_run`)
 - [ ] Guiding: design how to connect the PHD2 guiding API to the MCP server
       (INDIMCP-26)
 - [ ] Meridian-flip handling (design first) (INDIMCP-33)
@@ -141,11 +142,13 @@ no user documentation yet.*
 
 ## Plate solving & astrometry
 
-- [x] Capture-and-solve on the rig's camera (`plate_solve`)
+- [x] Capture-and-solve on the rig's camera (`plate_solve_rig` script, run via
+      `run_script`/`manage_script_run`)
 - [x] Solve an uploaded frame (`plate_solve_uploaded_frame`)
 - [x] Iterative solving until a pointing precision is reached
-      (`plate_solve_until_precision`)
+      (`plate_solve_rig`'s `toleranceArcsec`)
 - [x] Astrometry index file management: list and download index files
+      (`manage_astrometry_index`)
 
 *Covered by [PlateSolve.md](PlateSolve.md), but that is a design document — no user
 documentation yet.*

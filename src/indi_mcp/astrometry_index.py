@@ -81,7 +81,7 @@ captured frames, INDIMCP-89, just applied to a download instead of an upload/rea
 
 DEFAULT_RIG_MARGIN_SCALES = 1
 """Default `index_numbers_for_field_of_view`'s `margin_scales` for a rig-derived field of
-view (`list_index_files`'/`server.download_astrometry_index_files`'s `rig`/`rig_id` path) —
+view (`list_index_files`'/`server.manage_astrometry_index`'s `rig`/`rig_id` path) —
 one extra scale on each side of the exact bracket, covering a rig's own optics numbers being
 a slight underestimate or overestimate without installing the entire catalog."""
 

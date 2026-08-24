@@ -39,8 +39,8 @@ def test_builtin_scripts_directory_loads_with_no_errors() -> None:
     Counts, not identity: a script's `id` is independent of its filename
     (`script_store.py`'s own convention — see `load_scripts`), so a future
     built-in script whose filename doesn't exactly match its `id` (e.g.
-    `plate_solve.yaml` declaring `id: plate_solve_until_precision`) would
-    fail a stem-vs-id comparison despite loading perfectly correctly.
+    `plate_solve_rig.yaml` declaring `id: solve_rig`) would fail a stem-vs-id
+    comparison despite loading perfectly correctly.
     """
     on_disk = list(SCRIPTS_DIR.glob("*.yaml"))
 
@@ -134,66 +134,14 @@ def test_builtin_capture_frame_script_is_a_thin_wrapper_around_the_capture_frame
     assert step.frameHeight == "{{ frameHeight }}"
 
 
-def test_builtin_plate_solve_script_is_a_thin_wrapper_around_the_plate_solve_step() -> None:
-    script_store.load_scripts(SCRIPTS_DIR)
-
-    plate_solve = script_store.get_script("plate_solve")
-
-    assert plate_solve.pausable is False
-    assert set(plate_solve.parameters) == {"exposureSeconds", "syncMount", "timeoutSeconds"}
-    assert plate_solve.parameters["exposureSeconds"].required is False
-    assert plate_solve.parameters["exposureSeconds"].default is None
-    assert plate_solve.parameters["syncMount"].required is False
-    assert plate_solve.parameters["syncMount"].default is True
-    assert plate_solve.parameters["timeoutSeconds"].required is False
-    assert plate_solve.parameters["timeoutSeconds"].default == 60
-    assert len(plate_solve.steps) == 1
-    step = plate_solve.steps[0]
-    assert isinstance(step, script_store.PlateSolveStep)
-    assert step.role == "camera"
-    assert step.mountRole == "mount"
-    assert step.exposureSeconds == "{{ exposureSeconds }}"
-    assert step.syncMount == "{{ syncMount }}"
-    assert step.timeoutSeconds == "{{ timeoutSeconds }}"
-
-
-def test_builtin_plate_solve_until_precision_script_is_a_thin_wrapper() -> None:
-    script_store.load_scripts(SCRIPTS_DIR)
-
-    script = script_store.get_script("plate_solve_until_precision")
-
-    assert script.pausable is False
-    assert set(script.parameters) == {
-        "exposureSeconds",
-        "toleranceArcsec",
-        "maxAttempts",
-        "timeoutSeconds",
-    }
-    assert script.parameters["exposureSeconds"].required is True
-    assert script.parameters["toleranceArcsec"].required is False
-    assert script.parameters["toleranceArcsec"].default == 30
-    assert script.parameters["maxAttempts"].required is False
-    assert script.parameters["maxAttempts"].default == 3
-    assert script.parameters["timeoutSeconds"].required is False
-    assert script.parameters["timeoutSeconds"].default == 60
-    assert len(script.steps) == 1
-    step = script.steps[0]
-    assert isinstance(step, script_store.PlateSolveStep)
-    assert step.role == "camera"
-    assert step.mountRole == "mount"
-    assert step.exposureSeconds == "{{ exposureSeconds }}"
-    assert step.syncMount is True
-    assert step.toleranceArcsec == "{{ toleranceArcsec }}"
-    assert step.maxAttempts == "{{ maxAttempts }}"
-    assert step.timeoutSeconds == "{{ timeoutSeconds }}"
-
-
 def test_builtin_plate_solve_rig_script_is_a_thin_wrapper_around_the_plate_solve_step() -> None:
     """The canonical script the tool-surface redesign's Plate solving group (INDIMCP-119)
-    runs via run_script in place of the standalone plate_solve/plate_solve_until_precision
-    tools (INDIMCP-121) — a superset of both scripts above: exposureSeconds/syncMount/
-    timeoutSeconds behave like plate_solve.yaml's; toleranceArcsec/maxAttempts, when set,
-    behave like plate_solve_until_precision.yaml's.
+    runs via run_script in place of the dropped standalone plate_solve/
+    plate_solve_until_precision tools that INDIMCP-121 first authored this script to
+    supersede — a strict superset of both former scripts, now deleted since nothing
+    references them any more: exposureSeconds/syncMount/timeoutSeconds behave like the old
+    plate_solve.yaml's; toleranceArcsec/maxAttempts, when set, behave like the old
+    plate_solve_until_precision.yaml's.
     """
     script_store.load_scripts(SCRIPTS_DIR)
 

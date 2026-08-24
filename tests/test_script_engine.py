@@ -5546,36 +5546,16 @@ async def test_execute_script_plate_solve_tolerance_requires_exposure_seconds_at
     solve.assert_not_awaited()
 
 
-async def test_builtin_plate_solve_script_reuses_most_recent_frame_when_exposure_seconds_omitted(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    """End-to-end run of the actual shipped `plate_solve.yaml` (not a hand-built stand-in)
-    with `exposureSeconds` omitted — its own docstring documents this as "solve whichever
-    frame was most recently captured", the same bug this whole test group is a regression
-    test for."""
-    script_store.load_scripts(_BUILTIN_SCRIPTS_DIR)
-    _plate_solve_rig()
-    frame_path = tmp_path / "frame-1.fits"
-    frame_path.write_bytes(b"fits-bytes")
-    send_property, list_frames, _, _, solve = _mock_plate_solve(
-        monkeypatch, frame_path=frame_path, result=_plate_solve_result_at(150.0, 20.0)
-    )
-    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
-
-    await script_engine.execute_script("plate_solve", "test-rig", {})
-
-    list_frames.assert_called_once_with(run_id=None, device="CCD Simulator")
-    solve.assert_awaited_once()
-
-
 async def test_builtin_plate_solve_rig_script_reuses_most_recent_frame_with_no_retry_by_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     """End-to-end run of the actual shipped `plate_solve_rig.yaml` (INDIMCP-121) with every
     parameter omitted — the documented default: solve the most recently captured frame once,
-    no retry loop, matching `plate_solve.yaml`'s own single-attempt behavior. Regression test
-    for the same unsubstituted-`is not None` bug as the tests above, which this script's
-    `toleranceArcsec`/`exposureSeconds` fields both parameterize."""
+    no retry loop. Regression test for the unsubstituted-`is not None` bug found in INDIMCP-121
+    (see `docs/PlateSolve.md`), which this script's `toleranceArcsec`/`exposureSeconds` fields
+    both parameterize. Formerly also covered by an equivalent test against the standalone
+    `plate_solve.yaml` script, dropped along with that script in INDIMCP-119 once
+    `plate_solve_rig.yaml` — a strict superset — became the only thing exercising this path."""
     script_store.load_scripts(_BUILTIN_SCRIPTS_DIR)
     _plate_solve_rig()
     frame_path = tmp_path / "frame-1.fits"
@@ -5587,6 +5567,7 @@ async def test_builtin_plate_solve_rig_script_reuses_most_recent_frame_with_no_r
 
     result = await script_engine.execute_script("plate_solve_rig", "test-rig", {})
 
+    list_frames.assert_called_once_with(run_id=None, device="CCD Simulator")
     solve.assert_awaited_once()
     assert result["stepsExecuted"] == 1
     # No re-slew: only the sync's own EQUATORIAL_EOD_COORD send.
@@ -5598,8 +5579,9 @@ async def test_builtin_plate_solve_rig_script_retries_toward_tolerance_when_set(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     """End-to-end run of `plate_solve_rig.yaml` with `toleranceArcsec` set — exercises the
-    same retry-toward-tolerance path `plate_solve_until_precision.yaml` has, through this
-    script's own (differently-shaped, all-optional) parameters."""
+    same retry-toward-tolerance path the old standalone `plate_solve_until_precision.yaml`
+    (dropped in INDIMCP-119) had, through this script's own (differently-shaped, all-optional)
+    parameters."""
     script_store.load_scripts(_BUILTIN_SCRIPTS_DIR)
     _plate_solve_rig()
     frame_path = tmp_path / "frame-1.fits"

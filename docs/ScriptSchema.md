@@ -50,7 +50,7 @@ steps:
     target:
       objectName: M101
   - step: run_script
-    script: plate_solve_until_precision
+    script: plate_solve_rig
     parameters: { toleranceArcsec: 5 }
   - step: set_property
     role: filterWheel
@@ -351,8 +351,10 @@ The retry loop lives in this step's own engine handler, not exposed to YAML via 
 so a script author declares *what* (`toleranceArcsec: 5`), never *how* (re-slewing between
 attempts, when to give up). See [PlateSolve.md](PlateSolve.md) for exactly how convergence works
 (re-slewing to the mount's own commanded target after each sync, so a subsequent attempt lands
-closer using the corrected pointing model) and `plate_solve_until_precision`, a thin wrapper
-script for this mode (INDIMCP-47).
+closer using the corrected pointing model) and `plate_solve_rig` (INDIMCP-121), the built-in
+script that wraps this step and exposes `toleranceArcsec` for this mode, run via
+`run_script`/`manage_script_run` (INDIMCP-119 dropped the earlier dedicated
+`plate_solve_until_precision` tool/script in favor of this).
 
 #### `run_script`
 
