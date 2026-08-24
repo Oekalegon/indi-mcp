@@ -101,7 +101,10 @@ letting the caller choose the gain/offset/exposure range per invocation.
 **Decision:** implement the sweep as a plain MCP tool (like `list_frames` or
 `purge_transferred_frames` — see [server.py](../src/indi_mcp/server.py)), not as a new script
 step or a new script. Implemented for the bias/flat-dark side as
-`run_sensor_calibration_sweep` (INDIMCP-102; `server.py` + `sensor_calibration_sweep.py`):
+`run_sensor_calibration_sweep` (INDIMCP-102; `server.py` + `sensor_calibration_sweep.py`) —
+later merged with its flat counterpart into `run_calibration_sweep(kind="sensor", ...)`
+(INDIMCP-118, `docs/ToolSurfaceRedesign.md`), a rename/consolidation only, not a behavior
+change; the signature below is the tool as INDIMCP-102 originally shipped it:
 
 ```python
 @mcp.tool()
@@ -121,10 +124,24 @@ async def run_sensor_calibration_sweep(
 Paired with `get_sensor_calibration_sweep_status(sweep_id)` and
 `cancel_sensor_calibration_sweep(sweep_id)`, mirroring `run_script`'s own start/status/cancel
 shape (`get_script_status`/`cancel_script` have since merged into `manage_script_run`'s
-`action="status"`/`"cancel"`, INDIMCP-117 — this sweep's own three tools are unaffected, still
-separate). The flat side (INDIMCP-103) gets its own equivalent
-tool once the flat script split and panel-staging design below are settled — two tools, not one
-with a branch, per the "Open items" resolution below.
+`action="status"`/`"cancel"`, INDIMCP-117). The flat side (INDIMCP-103) got its own equivalent
+tool once the flat script split and panel-staging design below were settled — two tools, not
+one with a branch, per the "Open items" resolution below.
+
+**Superseded by INDIMCP-118 (`docs/ToolSurfaceRedesign.md`):** the "two tools, not one with a
+branch" decision above was specifically about `sensor_calibration_sweep.py`/
+`flat_calibration_sweep.py` staying two separate *Python modules* with two separate underlying
+implementations — that hasn't changed. What changed is the *MCP tool* layer sitting on top of
+them: `run_sensor_calibration_sweep`/`run_flat_calibration_sweep` merged into one
+`run_calibration_sweep(kind: "sensor"|"flat", ...)`, and all four status/cancel tools
+(`get_sensor_calibration_sweep_status`, `cancel_sensor_calibration_sweep`,
+`get_flat_calibration_sweep_status`, `cancel_flat_calibration_sweep`) merged into one
+`manage_calibration_sweep(sweep_id, action: "status"|"cancel")`, which resolves which of the
+two trackers a given `sweepId` belongs to automatically. This is the tool-surface
+consolidation the rest of this document's tool names now need reading through — see
+`docs/ToolSurfaceRedesign.md`'s explicit citation of this doc's "why the sweep can't be
+expressed as script `parameters`" reasoning for why the sweep stayed a dedicated tool rather
+than becoming a script step even under that consolidation.
 
 MCP tool parameters are ordinary typed Python/pydantic inputs, not bound by
 `ScriptSchema.md`'s closed step vocabulary — that vocabulary exists specifically to keep
@@ -158,7 +175,8 @@ is the only shape that works at all, not merely the more convenient one. Impleme
 `sensor_calibration_sweep.py`, mirroring `script_runs.py`'s own `_Run`/`_runs` pattern
 (`_Sweep`/`_sweeps`, a `cancel_event`, a `latest_status` polled by `get_sweep_status`). This
 module doesn't publish its own `sensorCalibrationSweep*` events to `event_streams` — a caller
-polls `get_sensor_calibration_sweep_status` instead of subscribing — but see "Retrieving a
+polls `manage_calibration_sweep`'s `action="status"` instead of subscribing — but see
+"Retrieving a
 sweep's frames" below for how the *existing* `indi://mcp-server/scripts/{runId}` stream ends up scoped to a
 sweep for free anyway.
 
@@ -218,7 +236,7 @@ in-flight combination's own `scriptCancelled` outcome), not just the successful 
 **Resolved (INDIMCP-103): documented precondition, not in-band pause/confirmation** — option 2
 from the two originally sketched here, not the pause-for-confirmation option this section
 initially leaned toward. The actual deciding factor wasn't sweep length after all: this server
-has no visibility into who or what is actually driving `run_flat_calibration_sweep` — it could be
+has no visibility into who or what is actually driving `run_calibration_sweep(kind="flat", ...)` — it could be
 a client app with a human operator in the loop (the expected case, and the one this decision is
 made for) or a fully autonomous agent, and either way the server can't tell the difference or
 verify a panel is genuinely staged. Given that, an in-band
@@ -268,11 +286,13 @@ flat side's staging-confirmation design.
 ## INDIMCPKit (Swift client) equivalents
 
 IMCPKIT-32/33 mirror this split on the client side: typed Swift wrapper functions over the two
-new MCP tools (`run_sensor_calibration_sweep`-for-bias-dark and its flat counterpart), following
-the existing pattern of typed device-type abstractions built on top of the raw MCP tool-call
-layer (see INDIMCPKit's own device-type abstractions for `Mount`/`Camera`/`FilterWheel`/
-`Focuser`). Out of scope for this doc; tracked as their own todos once the server-side tool
-shapes above are finalized, since the Swift signatures follow directly from them.
+new MCP tools as INDIMCP-102/103 originally shipped them (`run_sensor_calibration_sweep`-for-
+bias-dark and its flat counterpart — since merged into `run_calibration_sweep(kind, ...)`,
+INDIMCP-118), following the existing pattern of typed device-type abstractions built on top of
+the raw MCP tool-call layer (see INDIMCPKit's own device-type abstractions for `Mount`/
+`Camera`/`FilterWheel`/`Focuser`). Out of scope for this doc; tracked as their own todos, and
+should target the current tool names (`docs/ToolSurfaceRedesign.md`), not the ones this section
+originally described.
 
 ## INDIMCP-103: implemented
 
@@ -283,7 +303,10 @@ shapes above are finalized, since the Swift signatures follow directly from them
 * **Sweep tool**: `run_flat_calibration_sweep`/`get_flat_calibration_sweep_status`/
   `cancel_flat_calibration_sweep` (`flat_calibration_sweep.py`) — a second, separate tool
   alongside `run_sensor_calibration_sweep`, not a branch on the same one, matching the
-  two-script split.
+  two-script split. (These MCP-tool names were later merged into `run_calibration_sweep`/
+  `manage_calibration_sweep`, INDIMCP-118 — see the note earlier in this document; the
+  `flat_calibration_sweep.py` module and its separateness from `sensor_calibration_sweep.py`
+  are unaffected.)
 * **Combination order**: cartesian product of `gains × offsets × exposureSecondsList`
   (`itertools.product`, gains outermost), matching INDIMCP-102's own resolution — kept
   consistent rather than reconsidered, since nothing about real-world flat-sweep sizes turned
