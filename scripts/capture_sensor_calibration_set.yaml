@@ -32,6 +32,13 @@ description: >
   illumination/focus source is whatever the rig is already pointed at when this runs.
   Pausable: capture_frame is the only step inside each repeat loop, so a pause request
   only ever lands between frames, never mid-exposure.
+
+  binningX/binningY/frameX/frameY/frameWidth/frameHeight (INDIMCP-126) are optional,
+  same defaults/omit convention as capture_frame.yaml itself: binning defaults to
+  1x1, and the sub-frame fields default to omitted (full sensor) — set all four
+  together, or omit all four. Held at a single setting for both the bias and
+  flat-dark frames in this set, same as gain/offset — must match the light frames
+  this calibration set calibrates.
 pausable: true
 parameters:
   gain:
@@ -62,6 +69,32 @@ parameters:
     type: integer
     required: true
     description: Number of flat-dark frames to capture.
+  binningX:
+    type: integer
+    required: false
+    default: 1
+    description: Horizontal pixel binning, if the camera supports it.
+  binningY:
+    type: integer
+    required: false
+    default: 1
+    description: Vertical pixel binning, if the camera supports it.
+  frameX:
+    type: integer
+    required: false
+    description: Sub-frame left edge, in pixels. Set together with frameY/frameWidth/frameHeight, or omit all four for the full sensor.
+  frameY:
+    type: integer
+    required: false
+    description: Sub-frame top edge, in pixels. Set together with frameX/frameWidth/frameHeight, or omit all four for the full sensor.
+  frameWidth:
+    type: integer
+    required: false
+    description: Sub-frame width, in pixels. Set together with frameX/frameY/frameHeight, or omit all four for the full sensor.
+  frameHeight:
+    type: integer
+    required: false
+    description: Sub-frame height, in pixels. Set together with frameX/frameY/frameWidth, or omit all four for the full sensor.
 steps:
   - step: repeat
     count: "{{ biasCount }}"
@@ -72,6 +105,12 @@ steps:
         frameType: Bias
         gain: "{{ gain }}"
         offset: "{{ offset }}"
+        binningX: "{{ binningX }}"
+        binningY: "{{ binningY }}"
+        frameX: "{{ frameX }}"
+        frameY: "{{ frameY }}"
+        frameWidth: "{{ frameWidth }}"
+        frameHeight: "{{ frameHeight }}"
   - step: repeat
     count: "{{ darkCount }}"
     steps:
@@ -81,3 +120,9 @@ steps:
         frameType: Dark
         gain: "{{ gain }}"
         offset: "{{ offset }}"
+        binningX: "{{ binningX }}"
+        binningY: "{{ binningY }}"
+        frameX: "{{ frameX }}"
+        frameY: "{{ frameY }}"
+        frameWidth: "{{ frameWidth }}"
+        frameHeight: "{{ frameHeight }}"

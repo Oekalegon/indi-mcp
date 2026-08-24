@@ -674,6 +674,12 @@ def test_builtin_capture_sensor_calibration_set_captures_bias_and_flat_dark_only
         "flatExposureSeconds",
         "biasCount",
         "darkCount",
+        "binningX",
+        "binningY",
+        "frameX",
+        "frameY",
+        "frameWidth",
+        "frameHeight",
     }
     assert calibration_set.parameters["gain"].required is False
     assert calibration_set.parameters["offset"].required is False
@@ -682,6 +688,14 @@ def test_builtin_capture_sensor_calibration_set_captures_bias_and_flat_dark_only
     assert calibration_set.parameters["flatExposureSeconds"].required is True
     assert calibration_set.parameters["biasCount"].required is True
     assert calibration_set.parameters["darkCount"].required is True
+    assert calibration_set.parameters["binningX"].required is False
+    assert calibration_set.parameters["binningX"].default == 1
+    assert calibration_set.parameters["binningY"].required is False
+    assert calibration_set.parameters["binningY"].default == 1
+    assert calibration_set.parameters["frameX"].required is False
+    assert calibration_set.parameters["frameY"].required is False
+    assert calibration_set.parameters["frameWidth"].required is False
+    assert calibration_set.parameters["frameHeight"].required is False
     assert len(calibration_set.steps) == 2
 
     bias_repeat, flat_dark_repeat = calibration_set.steps
@@ -695,6 +709,12 @@ def test_builtin_capture_sensor_calibration_set_captures_bias_and_flat_dark_only
     assert bias_capture.offset == "{{ offset }}"
     assert bias_capture.frameType == "Bias"
     assert bias_capture.exposureSeconds == "{{ biasExposureSeconds }}"
+    assert bias_capture.binningX == "{{ binningX }}"
+    assert bias_capture.binningY == "{{ binningY }}"
+    assert bias_capture.frameX == "{{ frameX }}"
+    assert bias_capture.frameY == "{{ frameY }}"
+    assert bias_capture.frameWidth == "{{ frameWidth }}"
+    assert bias_capture.frameHeight == "{{ frameHeight }}"
 
     assert isinstance(flat_dark_repeat, script_store.RepeatStep)
     assert flat_dark_repeat.count == "{{ darkCount }}"
@@ -705,3 +725,9 @@ def test_builtin_capture_sensor_calibration_set_captures_bias_and_flat_dark_only
     assert flat_dark_capture.offset == "{{ offset }}"
     assert flat_dark_capture.frameType == "Dark"
     assert flat_dark_capture.exposureSeconds == "{{ flatExposureSeconds }}"
+    assert flat_dark_capture.binningX == "{{ binningX }}"
+    assert flat_dark_capture.binningY == "{{ binningY }}"
+    assert flat_dark_capture.frameX == "{{ frameX }}"
+    assert flat_dark_capture.frameY == "{{ frameY }}"
+    assert flat_dark_capture.frameWidth == "{{ frameWidth }}"
+    assert flat_dark_capture.frameHeight == "{{ frameHeight }}"

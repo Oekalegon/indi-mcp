@@ -241,6 +241,12 @@ async def start_sweep(
     dark_count: int,
     *,
     bias_exposure_seconds: float = 0.0,
+    binning_x: int = 1,
+    binning_y: int = 1,
+    frame_x: int | None = None,
+    frame_y: int | None = None,
+    frame_width: int | None = None,
+    frame_height: int | None = None,
     location_id: str | None = None,
 ) -> SensorCalibrationSweepStarted:
     """Start a bias/flat-dark sweep over every (gain, offset, flatExposureSeconds) combination.
@@ -251,6 +257,11 @@ async def start_sweep(
     gets flat-darks at every planned flat exposure length). Returns immediately, as a background
     `asyncio.Task` per `_run_sweep`'s own docstring — poll `get_sweep_status(sweepId)` for
     progress and the eventual terminal outcome, or use `cancel_sweep` to stop it early.
+
+    `binning_x`/`binning_y`/`frame_x`/`frame_y`/`frame_width`/`frame_height` (INDIMCP-126) are
+    fixed for the whole sweep, shared across every combination, exactly like `bias_count`/
+    `dark_count` — same "must match the light frames this calibrates" convention as
+    `capture_sensor_calibration_set`'s own binning/ROI parameters.
     """
     if not gains or not offsets or not flat_exposure_seconds_list:
         raise ValueError(
@@ -274,7 +285,19 @@ async def start_sweep(
     )
     _sweeps[sweep_id] = sweep
     sweep.task = asyncio.create_task(
-        _run_sweep(sweep, bias_count, dark_count, bias_exposure_seconds, location_id)
+        _run_sweep(
+            sweep,
+            bias_count,
+            dark_count,
+            bias_exposure_seconds,
+            binning_x=binning_x,
+            binning_y=binning_y,
+            frame_x=frame_x,
+            frame_y=frame_y,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            location_id=location_id,
+        )
     )
     return started
 
@@ -328,6 +351,13 @@ async def _run_sweep(
     bias_count: int,
     dark_count: int,
     bias_exposure_seconds: float,
+    *,
+    binning_x: int,
+    binning_y: int,
+    frame_x: int | None,
+    frame_y: int | None,
+    frame_width: int | None,
+    frame_height: int | None,
     location_id: str | None,
 ) -> None:
     """Drive the per-combination capture loop for `sweep`, recording progress and outcome.
@@ -354,6 +384,12 @@ async def _run_sweep(
                     "flatExposureSeconds": flat_exposure_seconds,
                     "biasCount": bias_count,
                     "darkCount": dark_count,
+                    "binningX": binning_x,
+                    "binningY": binning_y,
+                    "frameX": frame_x,
+                    "frameY": frame_y,
+                    "frameWidth": frame_width,
+                    "frameHeight": frame_height,
                 },
                 location_id=location_id,
                 run_id=sweep.sweep_id,
