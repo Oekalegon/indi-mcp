@@ -27,8 +27,8 @@ tracked separately (INDIMCP-106) rather than folded into this pass.
 Runs `capture_flat_sequence` (INDIMCP-103's extension of it with optional `gain`/`offset`, same
 "omit to leave the device's current setting alone" convention `capture_sensor_calibration_set`
 already uses) once per (gain, offset, exposureSeconds) combination — `filterName`/
-`focusPosition`/`count` are fixed for the whole sweep, shared across every combination, exactly
-like `sensor_calibration_sweep`'s own `biasCount`/`darkCount`.
+`focusPosition`/`count`/binning/ROI (INDIMCP-125) are fixed for the whole sweep, shared across
+every combination, exactly like `sensor_calibration_sweep`'s own `biasCount`/`darkCount`.
 """
 
 import asyncio
@@ -218,6 +218,12 @@ async def start_sweep(
     focus_position: int,
     count: int,
     *,
+    binning_x: int = 1,
+    binning_y: int = 1,
+    frame_x: int | None = None,
+    frame_y: int | None = None,
+    frame_width: int | None = None,
+    frame_height: int | None = None,
     location_id: str | None = None,
 ) -> FlatCalibrationSweepStarted:
     """Start a flat sweep over every (gain, offset, exposureSeconds) combination.
@@ -229,6 +235,11 @@ async def start_sweep(
     gain/offset setting gets flats at every planned exposure level). Returns immediately, as a
     background `asyncio.Task` per `_run_sweep`'s own docstring — poll `get_sweep_status(sweepId)`
     for progress and the eventual terminal outcome, or use `cancel_sweep` to stop it early.
+
+    `binning_x`/`binning_y`/`frame_x`/`frame_y`/`frame_width`/`frame_height` (INDIMCP-125) are
+    fixed for the whole sweep, shared across every combination, exactly like `filter_name`/
+    `focus_position`/`count` — same "must match the light frames this calibrates" convention as
+    `capture_flat_sequence`'s own binning/ROI parameters.
 
     Assumes the flat panel is already staged — see this module's own docstring for why there's
     no in-band confirmation step here.
@@ -255,7 +266,19 @@ async def start_sweep(
     )
     _sweeps[sweep_id] = sweep
     sweep.task = asyncio.create_task(
-        _run_sweep(sweep, filter_name, focus_position, count, location_id)
+        _run_sweep(
+            sweep,
+            filter_name,
+            focus_position,
+            count,
+            binning_x=binning_x,
+            binning_y=binning_y,
+            frame_x=frame_x,
+            frame_y=frame_y,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            location_id=location_id,
+        )
     )
     return started
 
@@ -309,6 +332,13 @@ async def _run_sweep(
     filter_name: str,
     focus_position: int,
     count: int,
+    *,
+    binning_x: int,
+    binning_y: int,
+    frame_x: int | None,
+    frame_y: int | None,
+    frame_width: int | None,
+    frame_height: int | None,
     location_id: str | None,
 ) -> None:
     """Drive the per-combination capture loop for `sweep`, recording progress and outcome.
@@ -334,6 +364,12 @@ async def _run_sweep(
                     "count": count,
                     "gain": gain,
                     "offset": offset,
+                    "binningX": binning_x,
+                    "binningY": binning_y,
+                    "frameX": frame_x,
+                    "frameY": frame_y,
+                    "frameWidth": frame_width,
+                    "frameHeight": frame_height,
                 },
                 location_id=location_id,
                 run_id=sweep.sweep_id,

@@ -520,11 +520,25 @@ def test_builtin_capture_flat_sequence_skips_mount_and_cooling() -> None:
         "count",
         "gain",
         "offset",
+        "binningX",
+        "binningY",
+        "frameX",
+        "frameY",
+        "frameWidth",
+        "frameHeight",
     }
     assert flats.parameters["exposureSeconds"].required is True
     assert flats.parameters["count"].required is True
     assert flats.parameters["gain"].required is False
     assert flats.parameters["offset"].required is False
+    assert flats.parameters["binningX"].required is False
+    assert flats.parameters["binningX"].default == 1
+    assert flats.parameters["binningY"].required is False
+    assert flats.parameters["binningY"].default == 1
+    assert flats.parameters["frameX"].required is False
+    assert flats.parameters["frameY"].required is False
+    assert flats.parameters["frameWidth"].required is False
+    assert flats.parameters["frameHeight"].required is False
     assert len(flats.steps) == 3
     filter_step, focus_step, repeat_step = flats.steps
     assert isinstance(filter_step, script_store.SelectFilterStep)
@@ -536,6 +550,12 @@ def test_builtin_capture_flat_sequence_skips_mount_and_cooling() -> None:
     assert capture_step.frameType == "Flat"
     assert capture_step.gain == "{{ gain }}"
     assert capture_step.offset == "{{ offset }}"
+    assert capture_step.binningX == "{{ binningX }}"
+    assert capture_step.binningY == "{{ binningY }}"
+    assert capture_step.frameX == "{{ frameX }}"
+    assert capture_step.frameY == "{{ frameY }}"
+    assert capture_step.frameWidth == "{{ frameWidth }}"
+    assert capture_step.frameHeight == "{{ frameHeight }}"
 
 
 def test_builtin_capture_dark_sequence_skips_mount_filter_and_focus() -> None:

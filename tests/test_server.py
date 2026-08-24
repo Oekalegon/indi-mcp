@@ -1605,6 +1605,12 @@ async def test_run_calibration_sweep_flat_delegates_to_flat_calibration_sweep(
         focus_position: int,
         count: int,
         *,
+        binning_x: int = 1,
+        binning_y: int = 1,
+        frame_x: int | None = None,
+        frame_y: int | None = None,
+        frame_width: int | None = None,
+        frame_height: int | None = None,
         location_id: str | None = None,
     ) -> dict:
         calls.append(
@@ -1616,6 +1622,12 @@ async def test_run_calibration_sweep_flat_delegates_to_flat_calibration_sweep(
                 filter_name,
                 focus_position,
                 count,
+                binning_x,
+                binning_y,
+                frame_x,
+                frame_y,
+                frame_width,
+                frame_height,
                 location_id,
             )
         )
@@ -1632,6 +1644,12 @@ async def test_run_calibration_sweep_flat_delegates_to_flat_calibration_sweep(
         filterName="Luminance",
         focusPosition=5000,
         count=5,
+        binningX=2,
+        binningY=2,
+        frameX=100,
+        frameY=200,
+        frameWidth=800,
+        frameHeight=600,
         location_id="home-backyard",
     )
 
@@ -1639,8 +1657,67 @@ async def test_run_calibration_sweep_flat_delegates_to_flat_calibration_sweep(
     # Positional args land in the right slots — focusPosition/count are both plain ints, so a
     # swapped argument order here would silently pass every type check.
     assert calls == [
-        ("test-rig", [50, 100], [10, 20], [1.0, 2.0], "Luminance", 5000, 5, "home-backyard")
+        (
+            "test-rig",
+            [50, 100],
+            [10, 20],
+            [1.0, 2.0],
+            "Luminance",
+            5000,
+            5,
+            2,
+            2,
+            100,
+            200,
+            800,
+            600,
+            "home-backyard",
+        )
     ]
+
+
+async def test_run_calibration_sweep_flat_defaults_binning_to_1x1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`binningX`/`binningY` resolve to `1` when omitted, same as `capture_flat_sequence`'s own
+    default — the sub-frame fields stay `None` (full sensor) rather than getting a fabricated
+    default, since there's no universally safe sub-frame to fall back to."""
+    calls: list[tuple] = []
+
+    async def fake_start_sweep(
+        rig_id: str,
+        gains: list[float],
+        offsets: list[float],
+        exposure_seconds_list: list[float],
+        filter_name: str,
+        focus_position: int,
+        count: int,
+        *,
+        binning_x: int = 1,
+        binning_y: int = 1,
+        frame_x: int | None = None,
+        frame_y: int | None = None,
+        frame_width: int | None = None,
+        frame_height: int | None = None,
+        location_id: str | None = None,
+    ) -> dict:
+        calls.append((binning_x, binning_y, frame_x, frame_y, frame_width, frame_height))
+        return {"kind": "flatCalibrationSweepStarted", "sweepId": "sweep-1"}
+
+    monkeypatch.setattr(flat_calibration_sweep, "start_sweep", fake_start_sweep)
+
+    await server.run_calibration_sweep(
+        "flat",
+        "test-rig",
+        gains=[50],
+        offsets=[10],
+        exposureSecondsList=[1.0],
+        filterName="Luminance",
+        focusPosition=5000,
+        count=5,
+    )
+
+    assert calls == [(1, 1, None, None, None, None)]
 
 
 async def test_run_calibration_sweep_flat_requires_filter_focus_and_count() -> None:
