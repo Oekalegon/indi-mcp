@@ -64,6 +64,12 @@ _FLAT_SEQUENCE_PARAMETERS = {
     "count": {"type": "integer", "required": True},
     "gain": {"type": "number"},
     "offset": {"type": "number"},
+    "binningX": {"type": "integer", "default": 1},
+    "binningY": {"type": "integer", "default": 1},
+    "frameX": {"type": "integer"},
+    "frameY": {"type": "integer"},
+    "frameWidth": {"type": "integer"},
+    "frameHeight": {"type": "integer"},
 }
 
 
@@ -198,6 +204,48 @@ async def test_sweep_runs_every_combination_in_cartesian_order() -> None:
     assert len(completed["results"]) == 8
     assert all(r["status"]["kind"] == "scriptCompleted" for r in completed["results"])
     assert all(r["runId"] == started["sweepId"] for r in completed["results"])
+
+
+async def test_sweep_passes_binning_and_roi_through_to_every_combination() -> None:
+    """`binningX`/`binningY`/`frameX`/`frameY`/`frameWidth`/`frameHeight` (INDIMCP-125) are held
+    constant across the sweep, exactly like `filterName`/`focusPosition`/`count`."""
+    _register_noop_flat_sequence()
+    calls: list[dict[str, Any]] = []
+    original = script_runs.start_script
+
+    async def spy(
+        script_id: str, rig_id: str, parameters: dict[str, Any] | None = None, **kw: Any
+    ) -> Any:
+        calls.append(dict(parameters or {}))
+        return await original(script_id, rig_id, parameters, **kw)
+
+    with patch.object(script_runs, "start_script", spy):
+        started = await flat_calibration_sweep.start_sweep(
+            "test-rig",
+            [50],
+            [10],
+            [1.0, 2.0],
+            "Luminance",
+            5000,
+            3,
+            binning_x=2,
+            binning_y=2,
+            frame_x=100,
+            frame_y=200,
+            frame_width=800,
+            frame_height=600,
+        )
+        await _await_sweep(started["sweepId"])
+
+    assert all(
+        c["binningX"] == 2
+        and c["binningY"] == 2
+        and c["frameX"] == 100
+        and c["frameY"] == 200
+        and c["frameWidth"] == 800
+        and c["frameHeight"] == 600
+        for c in calls
+    )
 
 
 async def test_sweep_reports_running_progress_and_partial_results() -> None:
