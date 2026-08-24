@@ -1500,6 +1500,12 @@ async def test_run_calibration_sweep_sensor_delegates_to_sensor_calibration_swee
         dark_count: int,
         *,
         bias_exposure_seconds: float = 0.0,
+        binning_x: int = 1,
+        binning_y: int = 1,
+        frame_x: int | None = None,
+        frame_y: int | None = None,
+        frame_width: int | None = None,
+        frame_height: int | None = None,
         location_id: str | None = None,
     ) -> dict:
         calls.append(
@@ -1511,6 +1517,12 @@ async def test_run_calibration_sweep_sensor_delegates_to_sensor_calibration_swee
                 bias_count,
                 dark_count,
                 bias_exposure_seconds,
+                binning_x,
+                binning_y,
+                frame_x,
+                frame_y,
+                frame_width,
+                frame_height,
                 location_id,
             )
         )
@@ -1527,13 +1539,36 @@ async def test_run_calibration_sweep_sensor_delegates_to_sensor_calibration_swee
         biasCount=3,
         darkCount=2,
         biasExposureSeconds=0.5,
+        binningX=2,
+        binningY=2,
+        frameX=100,
+        frameY=200,
+        frameWidth=800,
+        frameHeight=600,
         location_id="home-backyard",
     )
 
     assert result == {"kind": "sensorCalibrationSweepStarted", "sweepId": "sweep-1"}
     # Positional args land in the right slots — biasCount/darkCount are both plain ints, so a
     # swapped argument order here would silently pass every type check.
-    assert calls == [("test-rig", [50, 100], [10, 20], [1.0, 2.0], 3, 2, 0.5, "home-backyard")]
+    assert calls == [
+        (
+            "test-rig",
+            [50, 100],
+            [10, 20],
+            [1.0, 2.0],
+            3,
+            2,
+            0.5,
+            2,
+            2,
+            100,
+            200,
+            800,
+            600,
+            "home-backyard",
+        )
+    ]
 
 
 async def test_run_calibration_sweep_sensor_defaults_bias_exposure_seconds(
@@ -1550,6 +1585,12 @@ async def test_run_calibration_sweep_sensor_defaults_bias_exposure_seconds(
         dark_count: int,
         *,
         bias_exposure_seconds: float = 0.0,
+        binning_x: int = 1,
+        binning_y: int = 1,
+        frame_x: int | None = None,
+        frame_y: int | None = None,
+        frame_width: int | None = None,
+        frame_height: int | None = None,
         location_id: str | None = None,
     ) -> dict:
         calls.append(bias_exposure_seconds)
@@ -1568,6 +1609,50 @@ async def test_run_calibration_sweep_sensor_defaults_bias_exposure_seconds(
     )
 
     assert calls == [0.0]
+
+
+async def test_run_calibration_sweep_sensor_defaults_binning_to_1x1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`binningX`/`binningY` resolve to `1` when omitted, same as
+    `capture_sensor_calibration_set`'s own default — the sub-frame fields stay `None` (full
+    sensor) rather than getting a fabricated default, since there's no universally safe
+    sub-frame to fall back to."""
+    calls: list[tuple] = []
+
+    async def fake_start_sweep(
+        rig_id: str,
+        gains: list[float],
+        offsets: list[float],
+        flat_exposure_seconds_list: list[float],
+        bias_count: int,
+        dark_count: int,
+        *,
+        bias_exposure_seconds: float = 0.0,
+        binning_x: int = 1,
+        binning_y: int = 1,
+        frame_x: int | None = None,
+        frame_y: int | None = None,
+        frame_width: int | None = None,
+        frame_height: int | None = None,
+        location_id: str | None = None,
+    ) -> dict:
+        calls.append((binning_x, binning_y, frame_x, frame_y, frame_width, frame_height))
+        return {"kind": "sensorCalibrationSweepStarted", "sweepId": "sweep-1"}
+
+    monkeypatch.setattr(sensor_calibration_sweep, "start_sweep", fake_start_sweep)
+
+    await server.run_calibration_sweep(
+        "sensor",
+        "test-rig",
+        gains=[50],
+        offsets=[10],
+        flatExposureSecondsList=[1.0],
+        biasCount=3,
+        darkCount=2,
+    )
+
+    assert calls == [(1, 1, None, None, None, None)]
 
 
 async def test_run_calibration_sweep_sensor_requires_bias_and_dark_count() -> None:

@@ -1159,6 +1159,12 @@ _CALIBRATION_SWEEP_ALLOWED_PARAMS: dict[str, set[str]] = {
         "biasCount",
         "darkCount",
         "biasExposureSeconds",
+        "binningX",
+        "binningY",
+        "frameX",
+        "frameY",
+        "frameWidth",
+        "frameHeight",
         "location_id",
     },
     "flat": {
@@ -1183,9 +1189,10 @@ _CALIBRATION_SWEEP_REQUIRED_PARAMS: dict[str, set[str]] = {
 }
 """`run_calibration_sweep`'s per-`kind` allowed/required parameter sets — `biasExposureSeconds`
 (sensor, defaults to `0.0`), `binningX`/`binningY`/`frameX`/`frameY`/`frameWidth`/`frameHeight`
-(flat, same defaults/omit convention as `capture_flat_sequence` itself, INDIMCP-125), and
-`location_id` (both kinds) are the only optional entries; everything else is required for its
-own `kind`. Exposed as module-level constants for the same reason as `_MOUNT_ACTION_PARAMS`/
+(both kinds, same defaults/omit convention as `capture_flat_sequence`/
+`capture_sensor_calibration_set` themselves, INDIMCP-125/INDIMCP-126), and `location_id` (both
+kinds) are the only optional entries; everything else is required for its own `kind`. Exposed as
+module-level constants for the same reason as `_MOUNT_ACTION_PARAMS`/
 `_CAMERA_ACTION_ALLOWED_PARAMS` (INDIMCP-116): a single source of truth for validation, not
 duplicated in a test's own expectations list.
 """
@@ -1223,14 +1230,16 @@ async def run_calibration_sweep(
     panel or capture flats itself — this is the bias/flat-dark half of a calibration set only;
     the flat side is `kind="flat"`. `kind="flat"` (INDIMCP-103) runs `capture_flat_sequence`
     once per (`gains`, `offsets`, `exposureSecondsList`) combination; `filterName`/
-    `focusPosition`/`count` are required and shared across every combination.
-    `binningX`/`binningY`/`frameX`/`frameY`/`frameWidth`/`frameHeight` (INDIMCP-125) are
-    optional and also shared across every combination — same defaults/omit convention as
-    `capture_flat_sequence` itself: binning defaults to 1x1, and the sub-frame fields default
-    to omitted (full sensor); set all four together, or omit all four. Assumes the flat
+    `focusPosition`/`count` are required and shared across every combination. Assumes the flat
     panel is already staged before this is called — this tool has no way to prompt for or
     verify that; the caller (typically a client app, having confirmed with its human operator)
     is responsible for staging it first.
+
+    `binningX`/`binningY`/`frameX`/`frameY`/`frameWidth`/`frameHeight` (INDIMCP-125/INDIMCP-126)
+    are optional for both kinds and shared across every combination — same defaults/omit
+    convention as `capture_flat_sequence`/`capture_sensor_calibration_set` themselves: binning
+    defaults to 1x1, and the sub-frame fields default to omitted (full sensor); set all four
+    together, or omit all four.
 
     `gains`/`offsets` are required for both kinds. List-valued arguments are needed because a
     script's own `parameters` can't carry list-valued inputs — see `docs/SensorCalibration.md`
@@ -1285,6 +1294,12 @@ async def run_calibration_sweep(
             biasCount,
             darkCount,
             bias_exposure_seconds=(biasExposureSeconds if biasExposureSeconds is not None else 0.0),
+            binning_x=(binningX if binningX is not None else 1),
+            binning_y=(binningY if binningY is not None else 1),
+            frame_x=frameX,
+            frame_y=frameY,
+            frame_width=frameWidth,
+            frame_height=frameHeight,
             location_id=location_id,
         )
 
