@@ -445,6 +445,12 @@ def test_builtin_capture_light_sequence_composes_cool_slew_filter_focus_and_repe
         "count",
         "gain",
         "offset",
+        "binningX",
+        "binningY",
+        "frameX",
+        "frameY",
+        "frameWidth",
+        "frameHeight",
     }
     assert lights.parameters["ra"].required is True
     assert lights.parameters["dec"].required is True
@@ -457,6 +463,14 @@ def test_builtin_capture_light_sequence_composes_cool_slew_filter_focus_and_repe
     assert lights.parameters["count"].required is True
     assert lights.parameters["gain"].required is False
     assert lights.parameters["offset"].required is False
+    assert lights.parameters["binningX"].required is False
+    assert lights.parameters["binningX"].default == 1
+    assert lights.parameters["binningY"].required is False
+    assert lights.parameters["binningY"].default == 1
+    assert lights.parameters["frameX"].required is False
+    assert lights.parameters["frameY"].required is False
+    assert lights.parameters["frameWidth"].required is False
+    assert lights.parameters["frameHeight"].required is False
     assert len(lights.steps) == 5
     cool_step, slew_step, filter_step, focus_step, repeat_step = lights.steps
     assert isinstance(cool_step, script_store.RunScriptStep)
@@ -485,6 +499,12 @@ def test_builtin_capture_light_sequence_composes_cool_slew_filter_focus_and_repe
     assert capture_step.objectName == "{{ objectName }}"
     assert capture_step.gain == "{{ gain }}"
     assert capture_step.offset == "{{ offset }}"
+    assert capture_step.binningX == "{{ binningX }}"
+    assert capture_step.binningY == "{{ binningY }}"
+    assert capture_step.frameX == "{{ frameX }}"
+    assert capture_step.frameY == "{{ frameY }}"
+    assert capture_step.frameWidth == "{{ frameWidth }}"
+    assert capture_step.frameHeight == "{{ frameHeight }}"
 
 
 def test_builtin_capture_flat_sequence_skips_mount_and_cooling() -> None:
