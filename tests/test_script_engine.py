@@ -5517,3 +5517,119 @@ async def test_execute_script_plate_solve_tolerance_requires_sync_mount_at_runti
         await script_engine.execute_script("solve", "test-rig", {"sync": False})
 
     solve.assert_not_awaited()
+
+
+async def test_execute_script_plate_solve_tolerance_requires_exposure_seconds_at_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """`PlateSolveStep`'s own validator only catches a literal `toleranceArcsec` set without
+    `exposureSeconds` at load time — a `"{{ param }}"` `exposureSeconds` reference resolving
+    to `None` at runtime (the caller omitted it) needs its own check, mirroring the
+    `syncMount` runtime check above. Regression test for a bug where this wasn't checked at
+    all: `step.exposureSeconds is not None` was being evaluated against the raw, unsubstituted
+    `"{{ exposureSeconds }}"` string (always true) instead of the substituted value, so this
+    previously reached `float(None)` deeper in the loop and crashed with an unhandled
+    `TypeError` instead of a clean `ScriptExecutionError`."""
+    _plate_solve_rig()
+    _script(
+        "solve",
+        parameters={"exp": script_store.Parameter(type="number", required=False)},
+        steps=[_plate_solve_step(exposureSeconds="{{ exp }}", toleranceArcsec=10, syncMount=True)],
+    )
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="requires exposureSeconds"):
+        await script_engine.execute_script("solve", "test-rig", {})
+
+    solve.assert_not_awaited()
+
+
+async def test_builtin_plate_solve_script_reuses_most_recent_frame_when_exposure_seconds_omitted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """End-to-end run of the actual shipped `plate_solve.yaml` (not a hand-built stand-in)
+    with `exposureSeconds` omitted — its own docstring documents this as "solve whichever
+    frame was most recently captured", the same bug this whole test group is a regression
+    test for."""
+    script_store.load_scripts(_BUILTIN_SCRIPTS_DIR)
+    _plate_solve_rig()
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    send_property, list_frames, _, _, solve = _mock_plate_solve(
+        monkeypatch, frame_path=frame_path, result=_plate_solve_result_at(150.0, 20.0)
+    )
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    await script_engine.execute_script("plate_solve", "test-rig", {})
+
+    list_frames.assert_called_once_with(run_id=None, device="CCD Simulator")
+    solve.assert_awaited_once()
+
+
+async def test_builtin_plate_solve_rig_script_reuses_most_recent_frame_with_no_retry_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """End-to-end run of the actual shipped `plate_solve_rig.yaml` (INDIMCP-121) with every
+    parameter omitted — the documented default: solve the most recently captured frame once,
+    no retry loop, matching `plate_solve.yaml`'s own single-attempt behavior. Regression test
+    for the same unsubstituted-`is not None` bug as the tests above, which this script's
+    `toleranceArcsec`/`exposureSeconds` fields both parameterize."""
+    script_store.load_scripts(_BUILTIN_SCRIPTS_DIR)
+    _plate_solve_rig()
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    send_property, list_frames, _, _, solve = _mock_plate_solve(
+        monkeypatch, frame_path=frame_path, result=_plate_solve_result_at(150.0, 20.0)
+    )
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    result = await script_engine.execute_script("plate_solve_rig", "test-rig", {})
+
+    solve.assert_awaited_once()
+    assert result["stepsExecuted"] == 1
+    # No re-slew: only the sync's own EQUATORIAL_EOD_COORD send.
+    eq_calls = [c for c in send_property.await_args_list if c.args[1] == "EQUATORIAL_EOD_COORD"]
+    assert len(eq_calls) == 1
+
+
+async def test_builtin_plate_solve_rig_script_retries_toward_tolerance_when_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """End-to-end run of `plate_solve_rig.yaml` with `toleranceArcsec` set — exercises the
+    same retry-toward-tolerance path `plate_solve_until_precision.yaml` has, through this
+    script's own (differently-shaped, all-optional) parameters."""
+    script_store.load_scripts(_BUILTIN_SCRIPTS_DIR)
+    _plate_solve_rig()
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _mock_capture_frame_success(monkeypatch)
+    _mock_plate_solve_target(monkeypatch)
+    send_property, _, _, _, solve = _mock_plate_solve(
+        monkeypatch, frame_path=frame_path, result=_plate_solve_result_at(150.0, 20.0)
+    )
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    await script_engine.execute_script(
+        "plate_solve_rig",
+        "test-rig",
+        {"exposureSeconds": 5, "toleranceArcsec": 30, "maxAttempts": 3},
+    )
+
+    solve.assert_awaited_once()
+
+
+async def test_builtin_plate_solve_rig_script_tolerance_without_exposure_seconds_fails_clearly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    script_store.load_scripts(_BUILTIN_SCRIPTS_DIR)
+    _plate_solve_rig()
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _, _, _, _, solve = _mock_plate_solve(monkeypatch, frame_path=frame_path)
+
+    with pytest.raises(script_engine.ScriptExecutionError, match="requires exposureSeconds"):
+        await script_engine.execute_script("plate_solve_rig", "test-rig", {"toleranceArcsec": 30})
+
+    solve.assert_not_awaited()

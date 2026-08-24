@@ -1,0 +1,68 @@
+id: plate_solve_rig
+name: Plate-solve the rig's camera, optionally retrying toward a target tolerance
+description: >
+  Plate-solves a frame via astrometry.net's local solve-field and, by default, syncs the
+  mount to the solved position — the canonical script the tool-surface redesign's
+  Plate solving group (INDIMCP-119) runs via run_script in place of the old standalone
+  plate_solve/plate_solve_until_precision tools, see docs/ToolSurfaceRedesign.md. A thin,
+  reusable wrapper around the plate_solve step primitive — see docs/PlateSolve.md
+  (INDIMCP-27/45/47). role/mountRole are hardcoded to "camera"/"mount" rather than exposed
+  as parameters, matching every other built-in script's convention (slew.yaml, capture_frame.yaml,
+  etc.) — a rig's standard role names, not something a caller chooses per invocation.
+
+  Omit toleranceArcsec for a single solve attempt (the old plate_solve tool's behavior); set
+  exposureSeconds to capture a fresh frame first, or omit it to solve whichever frame was most
+  recently captured in this run.
+
+  Set toleranceArcsec to retry instead (the old plate_solve_until_precision tool's behavior):
+  each attempt re-syncs and re-slews toward the mount's own commanded target
+  (TARGET_EOD_COORD) until the solved position is within toleranceArcsec of it, or
+  maxAttempts is exhausted. Run a slew step first in this case, so TARGET_EOD_COORD is
+  actually set to something meaningful. Requires exposureSeconds and syncMount=true when set
+  (the plate_solve step's own constraint — a retry loop needs a fresh capture per attempt and
+  can't converge without syncing between attempts; enforced by the step itself, not just this
+  script, so a parameterized violation still fails clearly at execution time).
+pausable: false
+parameters:
+  exposureSeconds:
+    type: number
+    required: false
+    description: >
+      Exposure length, in seconds, for a fresh capture (each retry attempt's own capture, if
+      toleranceArcsec is set). Omit to solve the most recently captured frame instead — only
+      valid when toleranceArcsec is also omitted.
+  syncMount:
+    type: boolean
+    required: false
+    default: true
+    description: >
+      Sync the mount's coordinates to the solved position once solved. Must stay true if
+      toleranceArcsec is set.
+  toleranceArcsec:
+    type: number
+    required: false
+    description: >
+      Retry (re-syncing and re-slewing toward the mount's commanded target) until the solved
+      position is within this many arcseconds of it, or maxAttempts is exhausted. Omit for a
+      single solve attempt with no retry. Requires exposureSeconds and syncMount=true.
+  maxAttempts:
+    type: integer
+    required: false
+    default: 3
+    description: >
+      Give up after this many solve attempts without reaching toleranceArcsec. Only relevant
+      when toleranceArcsec is set.
+  timeoutSeconds:
+    type: number
+    required: false
+    default: 60
+    description: Maximum time to wait for solve-field to solve each attempt.
+steps:
+  - step: plate_solve
+    role: camera
+    mountRole: mount
+    exposureSeconds: "{{ exposureSeconds }}"
+    syncMount: "{{ syncMount }}"
+    toleranceArcsec: "{{ toleranceArcsec }}"
+    maxAttempts: "{{ maxAttempts }}"
+    timeoutSeconds: "{{ timeoutSeconds }}"

@@ -2585,14 +2585,28 @@ async def _execute_plate_solve(
     mount_device = _resolve_device(mount_role, ctx)
     timeout = float(_substitute(step.timeoutSeconds, params))
     sync_mount = bool(_substitute(step.syncMount, params))
-    tolerance_arcsec = (
-        float(_substitute(step.toleranceArcsec, params))
-        if step.toleranceArcsec is not None
-        else None
-    )
+    # Substitute *before* checking None-ness, not after: step.toleranceArcsec/exposureSeconds
+    # hold the raw, unsubstituted field (a "{{ param }}" string for every built-in script that
+    # references either), which is never None even when the parameter it references resolves
+    # to None — checking `step.toleranceArcsec is not None` here would always be true for a
+    # parameterized field regardless of what it substitutes to, silently skipping the "omit
+    # this to get the un-retried/reuse-last-frame default" case every caller-facing script
+    # (plate_solve.yaml, plate_solve_rig.yaml) documents as supported. `_substitute` is a safe
+    # no-op on a literal `None`/number/string, so substituting unconditionally is correct for
+    # every case: a literal value, a "{{ }}" reference, or a field the step never sets at all.
+    exposure_seconds = _substitute(step.exposureSeconds, params)
+    exposure_seconds = float(exposure_seconds) if exposure_seconds is not None else None
+    tolerance_arcsec = _substitute(step.toleranceArcsec, params)
+    tolerance_arcsec = float(tolerance_arcsec) if tolerance_arcsec is not None else None
 
     target_ra_hours = target_dec_deg = None
     if tolerance_arcsec is not None:
+        if exposure_seconds is None:
+            raise ScriptExecutionError(
+                "plate_solve: toleranceArcsec requires exposureSeconds (each retry attempt "
+                "needs a fresh capture; re-solving the same static frame after moving the "
+                "mount would just re-report the same, now-stale position)"
+            )
         if not sync_mount:
             raise ScriptExecutionError(
                 "plate_solve: toleranceArcsec requires syncMount=true (retrying can't "
@@ -2627,9 +2641,9 @@ async def _execute_plate_solve(
             await _plate_solve_reslew_to_target(ctx, mount_device, target_ra_hours, target_dec_deg)
         synced_since_last_attempt = False
 
-        if step.exposureSeconds is not None:
+        if exposure_seconds is not None:
             capture_step = CaptureFrameStep(
-                step="capture_frame", role=step.role, exposureSeconds=step.exposureSeconds
+                step="capture_frame", role=step.role, exposureSeconds=exposure_seconds
             )
             await _execute_capture_frame(capture_step, ctx, params, script_id, pausable)
 

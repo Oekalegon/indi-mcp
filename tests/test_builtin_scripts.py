@@ -188,6 +188,47 @@ def test_builtin_plate_solve_until_precision_script_is_a_thin_wrapper() -> None:
     assert step.timeoutSeconds == "{{ timeoutSeconds }}"
 
 
+def test_builtin_plate_solve_rig_script_is_a_thin_wrapper_around_the_plate_solve_step() -> None:
+    """The canonical script the tool-surface redesign's Plate solving group (INDIMCP-119)
+    runs via run_script in place of the standalone plate_solve/plate_solve_until_precision
+    tools (INDIMCP-121) — a superset of both scripts above: exposureSeconds/syncMount/
+    timeoutSeconds behave like plate_solve.yaml's; toleranceArcsec/maxAttempts, when set,
+    behave like plate_solve_until_precision.yaml's.
+    """
+    script_store.load_scripts(SCRIPTS_DIR)
+
+    script = script_store.get_script("plate_solve_rig")
+
+    assert script.pausable is False
+    assert set(script.parameters) == {
+        "exposureSeconds",
+        "syncMount",
+        "toleranceArcsec",
+        "maxAttempts",
+        "timeoutSeconds",
+    }
+    assert script.parameters["exposureSeconds"].required is False
+    assert script.parameters["exposureSeconds"].default is None
+    assert script.parameters["syncMount"].required is False
+    assert script.parameters["syncMount"].default is True
+    assert script.parameters["toleranceArcsec"].required is False
+    assert script.parameters["toleranceArcsec"].default is None
+    assert script.parameters["maxAttempts"].required is False
+    assert script.parameters["maxAttempts"].default == 3
+    assert script.parameters["timeoutSeconds"].required is False
+    assert script.parameters["timeoutSeconds"].default == 60
+    assert len(script.steps) == 1
+    step = script.steps[0]
+    assert isinstance(step, script_store.PlateSolveStep)
+    assert step.role == "camera"
+    assert step.mountRole == "mount"
+    assert step.exposureSeconds == "{{ exposureSeconds }}"
+    assert step.syncMount == "{{ syncMount }}"
+    assert step.toleranceArcsec == "{{ toleranceArcsec }}"
+    assert step.maxAttempts == "{{ maxAttempts }}"
+    assert step.timeoutSeconds == "{{ timeoutSeconds }}"
+
+
 def test_builtin_park_script_sets_park_and_waits() -> None:
     script_store.load_scripts(SCRIPTS_DIR)
 

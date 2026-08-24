@@ -359,6 +359,18 @@ converge at all if nothing physically moves between attempts. Both are resolved 
 the base wrapper's own parameters, for the clearest separation between "solve once" and "solve
 to a tolerance" as two distinct, independently discoverable tools.
 
+**Superseded by INDIMCP-121 (`docs/ToolSurfaceRedesign.md`):** the tool-surface redesign
+reverses this specific call — `scripts/plate_solve_rig.yaml` folds both `plate_solve.yaml`'s
+and `plate_solve_until_precision.yaml`'s behavior into one script, `toleranceArcsec` optional
+rather than a separate script/tool. The "clearest separation" argument above was about
+*tool*-level discoverability under the old one-tool-per-script convention; once the tool
+surface consolidates to `kind`/`action`-discriminated tools generally (INDIMCP-114 through
+120), that convention no longer holds, so the reason for the split no longer applies —
+`plate_solve.yaml`/`plate_solve_until_precision.yaml` themselves are untouched for now (still
+what the *current*, not-yet-removed `plate_solve`/`plate_solve_until_precision` tools run), but
+have no reason to keep existing once INDIMCP-119 removes those tools in favor of
+`plate_solve_rig.yaml`.
+
 ## Open items resolved during implementation
 
 - Exact `frame_store` query for "most recent frame for run_id + device": `frame_store.list_frames`
@@ -369,3 +381,32 @@ to a tolerance" as two distinct, independently discoverable tools.
   `@mcp.tool()` wrappers and wrapper/script parameter-parity test coverage (`89f7271`'s
   pattern), all shipped.
 - `docs/ScriptSchema.md` updated with the step's full reference table.
+
+## Bug found and fixed during INDIMCP-121 (`_execute_plate_solve`)
+
+`toleranceArcsec`/`exposureSeconds` requirement checks in `_execute_plate_solve`
+(`script_engine.py`) were evaluated against the *raw, unsubstituted* step field
+(`step.exposureSeconds is not None`) rather than the substituted value — for any script that
+references either as a `"{{ param }}"` reference (both `plate_solve.yaml` and
+`plate_solve_rig.yaml` reference `exposureSeconds`; `plate_solve_rig.yaml` also references
+`toleranceArcsec`), the raw field is a non-empty template string and therefore never `None`,
+regardless of what the parameter it references actually resolves to. Two concrete
+consequences before the fix:
+
+- Calling the already-shipped `plate_solve` tool with `exposureSeconds` omitted — the
+  documented "solve whichever frame was most recently captured" case — crashed with an
+  unhandled `float() argument must be a string or a real number, not 'NoneType'` `TypeError`
+  instead of working, or failing with a clean `ScriptExecutionError`. This predates
+  `plate_solve_rig.yaml` entirely; found while adding execution-level test coverage for the
+  new script, confirmed independently reproducible against the existing `plate_solve` script.
+- The "`toleranceArcsec` requires `exposureSeconds`" constraint `PlateSolveStep`'s own
+  docstring already claimed was "enforced... in the engine handler... for a parameterized
+  [case]" was never actually implemented — only `syncMount`'s runtime check existed.
+
+Fixed by substituting `step.exposureSeconds`/`step.toleranceArcsec` unconditionally *before*
+checking for `None` (`_substitute` is a safe no-op on an already-literal value, so this is
+correct for every case: hardcoded, referenced, or the field never set at all), and adding the
+missing `toleranceArcsec`-requires-`exposureSeconds` runtime check alongside the existing
+`syncMount`/`TARGET_EOD_COORD` ones. Regression tests added in `tests/test_script_engine.py`
+cover both the generic engine behavior and end-to-end runs of the real shipped
+`plate_solve.yaml`/`plate_solve_rig.yaml` files.
