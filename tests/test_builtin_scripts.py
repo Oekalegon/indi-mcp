@@ -595,12 +595,31 @@ def test_builtin_capture_bias_sequence_has_no_setup_steps() -> None:
     bias = script_store.get_script("capture_bias_sequence")
 
     assert bias.pausable is True
-    assert set(bias.parameters) == {"exposureSeconds", "count", "gain", "offset"}
+    assert set(bias.parameters) == {
+        "exposureSeconds",
+        "count",
+        "gain",
+        "offset",
+        "binningX",
+        "binningY",
+        "frameX",
+        "frameY",
+        "frameWidth",
+        "frameHeight",
+    }
     assert bias.parameters["exposureSeconds"].required is False
     assert bias.parameters["exposureSeconds"].default == 0.0
     assert bias.parameters["count"].required is True
     assert bias.parameters["gain"].required is False
     assert bias.parameters["offset"].required is False
+    assert bias.parameters["binningX"].required is False
+    assert bias.parameters["binningX"].default == 1
+    assert bias.parameters["binningY"].required is False
+    assert bias.parameters["binningY"].default == 1
+    assert bias.parameters["frameX"].required is False
+    assert bias.parameters["frameY"].required is False
+    assert bias.parameters["frameWidth"].required is False
+    assert bias.parameters["frameHeight"].required is False
     assert len(bias.steps) == 1
     repeat_step = bias.steps[0]
     assert isinstance(repeat_step, script_store.RepeatStep)
@@ -611,6 +630,12 @@ def test_builtin_capture_bias_sequence_has_no_setup_steps() -> None:
     assert capture_step.frameType == "Bias"
     assert capture_step.gain == "{{ gain }}"
     assert capture_step.offset == "{{ offset }}"
+    assert capture_step.binningX == "{{ binningX }}"
+    assert capture_step.binningY == "{{ binningY }}"
+    assert capture_step.frameX == "{{ frameX }}"
+    assert capture_step.frameY == "{{ frameY }}"
+    assert capture_step.frameWidth == "{{ frameWidth }}"
+    assert capture_step.frameHeight == "{{ frameHeight }}"
 
 
 def test_builtin_capture_sensor_calibration_set_captures_bias_and_flat_dark_only() -> None:
