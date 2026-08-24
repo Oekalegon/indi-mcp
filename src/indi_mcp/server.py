@@ -1495,7 +1495,16 @@ module-level constants for the same reason as `_MOUNT_ACTION_PARAMS` (INDIMCP-11
 
 @mcp.tool()
 async def frames(
-    action: Literal["list", "get"],
+    action: Annotated[
+        Literal["list", "get"],
+        Field(
+            json_schema_extra={
+                "requiredParamsByAction": {
+                    name: sorted(params) for name, params in _FRAMES_REQUIRED_PARAMS.items()
+                }
+            }
+        ),
+    ],
     frame_id: str | None = None,
     run_id: str | None = None,
     device: str | None = None,
@@ -1515,7 +1524,10 @@ async def frames(
     raw bytes (INDIMCP-89), `None` if this server has no HTTP listener to build one from
     (`stdio` transport). See `FrameMetadataResponse` for `issues`. Any parameter given
     alongside an action it doesn't belong to, or a required parameter missing for it, raises
-    `ValueError`.
+    `ValueError`. `frame_id` is optional at the schema level regardless of `action`, despite
+    having no fallback if omitted for `action="get"` — `action`'s own schema carries the real
+    per-`action` required set under `requiredParamsByAction` for a schema-reading caller (see
+    `_FRAMES_REQUIRED_PARAMS`).
     """
     given = {
         "frame_id": frame_id,
@@ -1566,7 +1578,16 @@ conditional-defaults trade-off). Exposed as module-level constants for the same 
 
 @mcp.tool()
 async def manage_frame(
-    action: Literal["confirm_transfer", "delete", "purge"],
+    action: Annotated[
+        Literal["confirm_transfer", "delete", "purge"],
+        Field(
+            json_schema_extra={
+                "requiredParamsByAction": {
+                    name: sorted(params) for name, params in _MANAGE_FRAME_REQUIRED_PARAMS.items()
+                }
+            }
+        ),
+    ],
     frame_id: str | None = None,
     require_transferred: bool | None = None,
     older_than_days: float | None = None,
@@ -1590,7 +1611,11 @@ async def manage_frame(
     up, since the INDI Device's own storage is limited; only ever considers frames already
     confirmed transferred, regardless of age, so a frame the Client Computer hasn't confirmed
     receiving yet is never deleted by this call. Any parameter given alongside an action it
-    doesn't belong to, or a required parameter missing for it, raises `ValueError`.
+    doesn't belong to, or a required parameter missing for it, raises `ValueError`. `frame_id`/
+    `older_than_days` are optional at the schema level regardless of `action`, despite having
+    no fallback if omitted for the actions that need them — `action`'s own schema carries the
+    real per-`action` required set under `requiredParamsByAction` for a schema-reading caller
+    (see `_MANAGE_FRAME_REQUIRED_PARAMS`).
     """
     given = {
         "frame_id": frame_id,
