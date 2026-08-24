@@ -369,6 +369,15 @@ class PlateSolveStep(_StepBase):
     improves, so retrying could never converge) — both enforced below for a literal
     misconfiguration; the engine handler enforces the same for a parameterized one, since a
     `"{{ param }}"` reference's actual value isn't known until execution.
+
+    `binningX`/`binningY`/`frameX`/`frameY`/`frameWidth`/`frameHeight` (INDIMCP-127) only
+    apply to the fresh capture `exposureSeconds` triggers — irrelevant when reusing the run's
+    last frame — same names/defaults as `capture_frame`. Binning is the clearer win here: a
+    binned capture is a smaller file with better effective SNR, which solves faster — useful
+    on every attempt of the retry-toward-tolerance loop above. A sub-frame ROI is a more
+    questionable fit: a small enough region may not contain enough stars to solve against at
+    all, so setting one trades solve reliability for speed — the caller's choice to make, not
+    this step's to forbid, but worth knowing before reaching for it (see `docs/PlateSolve.md`).
     """
 
     step: Literal["plate_solve"]
@@ -379,6 +388,12 @@ class PlateSolveStep(_StepBase):
     toleranceArcsec: NumberOrReference | None = None
     maxAttempts: IntOrReference = 3
     timeoutSeconds: NumberOrReference = 60
+    binningX: IntOrReference = 1
+    binningY: IntOrReference = 1
+    frameX: IntOrReference | None = None
+    frameY: IntOrReference | None = None
+    frameWidth: IntOrReference | None = None
+    frameHeight: IntOrReference | None = None
 
     @model_validator(mode="after")
     def _check_tolerance_requirements(self) -> "PlateSolveStep":

@@ -196,13 +196,30 @@ resolve).
 class PlateSolveStep(_StepBase):
     step: Literal["plate_solve"]
     role: str                                  # camera role to capture from (or reuse last frame of)
-    mountRole: str | None = None                # mount role to sync/compare against; default: the rig's only mount
+    mountRole: str                              # mount role to sync/compare against — always required, see PlateSolveStep's own docstring
     exposureSeconds: float | int | str | None = None  # capture a fresh frame if set; else reuse the run's last frame for `role`
     syncMount: bool = True                       # after a successful solve, sync EQUATORIAL_EOD_COORD to the solved position
     toleranceArcsec: float | int | str | None = None  # if set, retry (re-solve after syncing) until within this separation of the mount's target, or maxAttempts is hit
     maxAttempts: int = 3
     timeoutSeconds: float | int | str = 60
+    binningX: int | str = 1                      # only applies to a fresh capture (exposureSeconds set) — see "Binning and ROI" below
+    binningY: int | str = 1
+    frameX: int | str | None = None              # sub-frame ROI, same "set all four or omit all four" convention as capture_frame
+    frameY: int | str | None = None
+    frameWidth: int | str | None = None
+    frameHeight: int | str | None = None
 ```
+
+**Binning and ROI (INDIMCP-127).** Both only matter when `exposureSeconds` triggers a fresh
+capture — irrelevant when reusing the run's last frame. Binning is the clearer win: a binned
+capture is a smaller file with better effective per-pixel SNR, which `solve-field` chews
+through faster — worth it on every attempt of the retry-toward-tolerance loop above, where wall
+clock adds up across attempts. A sub-frame ROI is a more questionable fit for this step: too
+small a region may not contain enough stars to solve against at all, so setting one trades solve
+reliability for speed. Rather than forbidding it outright, the parameter is exposed for
+consistency with every other frame-capturing tool (`capture_frame`, the sequence scripts) — the
+trade-off is the caller's to make, documented here and in `PlateSolveStep`'s own docstring so
+it's not a silent surprise.
 
 **Design decision: the tolerance/retry loop lives inside this one step, not in YAML via
 `repeat`/`until`.** This is the resolution to the `Condition`-can't-check-a-computed-value gap

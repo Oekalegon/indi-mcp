@@ -154,6 +154,12 @@ def test_builtin_plate_solve_rig_script_is_a_thin_wrapper_around_the_plate_solve
         "toleranceArcsec",
         "maxAttempts",
         "timeoutSeconds",
+        "binningX",
+        "binningY",
+        "frameX",
+        "frameY",
+        "frameWidth",
+        "frameHeight",
     }
     assert script.parameters["exposureSeconds"].required is False
     assert script.parameters["exposureSeconds"].default is None
@@ -165,6 +171,14 @@ def test_builtin_plate_solve_rig_script_is_a_thin_wrapper_around_the_plate_solve
     assert script.parameters["maxAttempts"].default == 3
     assert script.parameters["timeoutSeconds"].required is False
     assert script.parameters["timeoutSeconds"].default == 60
+    assert script.parameters["binningX"].required is False
+    assert script.parameters["binningX"].default == 1
+    assert script.parameters["binningY"].required is False
+    assert script.parameters["binningY"].default == 1
+    assert script.parameters["frameX"].required is False
+    assert script.parameters["frameY"].required is False
+    assert script.parameters["frameWidth"].required is False
+    assert script.parameters["frameHeight"].required is False
     assert len(script.steps) == 1
     step = script.steps[0]
     assert isinstance(step, script_store.PlateSolveStep)
@@ -175,6 +189,12 @@ def test_builtin_plate_solve_rig_script_is_a_thin_wrapper_around_the_plate_solve
     assert step.toleranceArcsec == "{{ toleranceArcsec }}"
     assert step.maxAttempts == "{{ maxAttempts }}"
     assert step.timeoutSeconds == "{{ timeoutSeconds }}"
+    assert step.binningX == "{{ binningX }}"
+    assert step.binningY == "{{ binningY }}"
+    assert step.frameX == "{{ frameX }}"
+    assert step.frameY == "{{ frameY }}"
+    assert step.frameWidth == "{{ frameWidth }}"
+    assert step.frameHeight == "{{ frameHeight }}"
 
 
 def test_builtin_park_script_sets_park_and_waits() -> None:

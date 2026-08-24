@@ -5285,6 +5285,52 @@ async def test_execute_script_plate_solve_captures_a_fresh_frame_when_exposure_g
     assert result["framesCaptured"] == 1
 
 
+async def test_execute_script_plate_solve_passes_binning_and_roi_through_to_fresh_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """`binningX`/`binningY`/`frameX`/`frameY`/`frameWidth`/`frameHeight` (INDIMCP-127) only
+    apply to the internal fresh capture `exposureSeconds` triggers — forwarded onto the
+    `CaptureFrameStep` `_execute_plate_solve` builds, same names/defaults as `capture_frame`."""
+    _plate_solve_rig()
+    _script(
+        "solve",
+        steps=[
+            _plate_solve_step(
+                exposureSeconds=5,
+                binningX=2,
+                binningY=2,
+                frameX=100,
+                frameY=200,
+                frameWidth=800,
+                frameHeight=600,
+            )
+        ],
+    )
+    _mock_capture_frame_success(monkeypatch)
+    frame_path = tmp_path / "frame-1.fits"
+    frame_path.write_bytes(b"fits-bytes")
+    _mock_plate_solve(monkeypatch, frame_path=frame_path)
+    monkeypatch.setattr(fits_headers, "write_fits_headers", MagicMock(return_value=None))
+
+    def get_property_values(device: str, name: str) -> dict[str, str] | None:
+        if name in ("CCD_BINNING", "CCD_FRAME"):
+            return {"placeholder": "value"}
+        return _default_get_property_values(device, name)
+
+    monkeypatch.setattr(indi_messaging, "get_property_values", get_property_values)
+    send_property = AsyncMock()
+    monkeypatch.setattr(indi_messaging, "send_property", send_property)
+
+    await script_engine.execute_script("solve", "test-rig", {})
+
+    send_property.assert_any_call("CCD Simulator", "CCD_BINNING", {"HOR_BIN": "2", "VER_BIN": "2"})
+    send_property.assert_any_call(
+        "CCD Simulator",
+        "CCD_FRAME",
+        {"X": "100", "Y": "200", "WIDTH": "800", "HEIGHT": "600"},
+    )
+
+
 async def test_execute_script_plate_solve_fails_when_no_frame_has_been_captured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
