@@ -1066,9 +1066,9 @@ async def manage_astrometry_index(
     loudly instead of quietly ignoring one of them. Raises `ValueError` if selectors are
     miscombined, or if no known `catalog` scale covers a derived arcmin range.
 
-    Each action only accepts its own selector parameters (`_ASTROMETRY_INDEX_ACTION_
-    ALLOWED_PARAMS`) — passing a parameter the other action doesn't recognize (e.g.
-    `indexNumbers` with `action="list"`) raises `ValueError`.
+    Each action only accepts its own selector parameters (see
+    `_ASTROMETRY_INDEX_ACTION_ALLOWED_PARAMS` above) — passing a parameter the other action
+    doesn't recognize (e.g. `indexNumbers` with `action="list"`) raises `ValueError`.
     """
     given_names = {
         name
