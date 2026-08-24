@@ -359,6 +359,18 @@ converge at all if nothing physically moves between attempts. Both are resolved 
 the base wrapper's own parameters, for the clearest separation between "solve once" and "solve
 to a tolerance" as two distinct, independently discoverable tools.
 
+**Superseded by INDIMCP-121 (`docs/ToolSurfaceRedesign.md`):** the tool-surface redesign
+reverses this specific call — `scripts/plate_solve_rig.yaml` folds both `plate_solve.yaml`'s
+and `plate_solve_until_precision.yaml`'s behavior into one script, `toleranceArcsec` optional
+rather than a separate script/tool. The "clearest separation" argument above was about
+*tool*-level discoverability under the old one-tool-per-script convention; once the tool
+surface consolidates to `kind`/`action`-discriminated tools generally (INDIMCP-114 through
+120), that convention no longer holds, so the reason for the split no longer applies —
+`plate_solve.yaml`/`plate_solve_until_precision.yaml` themselves are untouched for now (still
+what the *current*, not-yet-removed `plate_solve`/`plate_solve_until_precision` tools run), but
+have no reason to keep existing once INDIMCP-119 removes those tools in favor of
+`plate_solve_rig.yaml`.
+
 ## Open items resolved during implementation
 
 - Exact `frame_store` query for "most recent frame for run_id + device": `frame_store.list_frames`
