@@ -41,7 +41,7 @@ server runs on — every other device's messaging stream and every other
 script run's pause/cancel/progress polling included — for as long as the
 write takes. Callers in async code MUST wrap every call here in
 `asyncio.to_thread(...)`, exactly as `server.py` already does for
-`rig_store.save_rig`/`observatory_store.save_observatory`:
+`rig_store.save_rig`/`observatory_store.save_observatory`::
 
     metadata = await asyncio.to_thread(
         frame_store.save_frame, data, device=device, extension=extension, run_id=run_id

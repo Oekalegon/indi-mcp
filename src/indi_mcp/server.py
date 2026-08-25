@@ -703,6 +703,15 @@ it did for the standalone wrapper tools this replaces — a single source of tru
 second hardcoded expectations list drifting out of sync with either side.
 """
 
+_MOUNT_ACTION_REQUIRED_PARAMS_BY_ACTION: dict[str, list[str]] = {
+    name: sorted(params) for name, params in _MOUNT_ACTION_PARAMS.items()
+}
+"""JSON-Schema-friendly (sorted list, not set) form of `_MOUNT_ACTION_PARAMS`, precomputed as
+its own module constant — rather than inlined as a dict comprehension directly in `mount_action`'s
+`Annotated[...]` below — purely so `sphinx-autoapi`'s static signature parser (which can't
+follow an inline comprehension inside a decorator/annotation expression) can render the tool's
+signature; referencing it by name here is otherwise equivalent."""
+
 
 @mcp.tool()
 async def mount_action(
@@ -712,11 +721,7 @@ async def mount_action(
             "park", "unpark", "slew", "track_off", "set_track_mode", "set_custom_tracking_rate"
         ],
         Field(
-            json_schema_extra={
-                "requiredParamsByAction": {
-                    name: sorted(params) for name, params in _MOUNT_ACTION_PARAMS.items()
-                }
-            }
+            json_schema_extra={"requiredParamsByAction": _MOUNT_ACTION_REQUIRED_PARAMS_BY_ACTION}
         ),
     ],
     ra: float | None = None,
@@ -817,6 +822,12 @@ wrong value if a future action ever reused one of these parameter names with a d
 intended default, exactly the scenario this dict exists to handle correctly (PR review of #91).
 """
 
+_CAMERA_ACTION_REQUIRED_PARAMS_BY_ACTION: dict[str, list[str]] = {
+    name: sorted(params) for name, params in _CAMERA_ACTION_REQUIRED_PARAMS.items()
+}
+"""JSON-Schema-friendly form of `_CAMERA_ACTION_REQUIRED_PARAMS`, precomputed for the same
+`sphinx-autoapi` signature-parsing reason as `_MOUNT_ACTION_REQUIRED_PARAMS_BY_ACTION`."""
+
 
 @mcp.tool()
 async def camera_action(
@@ -824,11 +835,7 @@ async def camera_action(
     action: Annotated[
         Literal["cool", "cooler_on", "cooler_off", "abort_exposure", "capture_frame"],
         Field(
-            json_schema_extra={
-                "requiredParamsByAction": {
-                    name: sorted(params) for name, params in _CAMERA_ACTION_REQUIRED_PARAMS.items()
-                }
-            }
+            json_schema_extra={"requiredParamsByAction": _CAMERA_ACTION_REQUIRED_PARAMS_BY_ACTION}
         ),
     ],
     targetTempC: float | None = None,
@@ -1509,18 +1516,18 @@ optional; `frame_id` is the only, required, parameter for `action="get"`. Expose
 module-level constants for the same reason as `_MOUNT_ACTION_PARAMS` (INDIMCP-116).
 """
 
+_FRAMES_REQUIRED_PARAMS_BY_ACTION: dict[str, list[str]] = {
+    name: sorted(params) for name, params in _FRAMES_REQUIRED_PARAMS.items()
+}
+"""JSON-Schema-friendly form of `_FRAMES_REQUIRED_PARAMS`, precomputed for the same
+`sphinx-autoapi` signature-parsing reason as `_MOUNT_ACTION_REQUIRED_PARAMS_BY_ACTION`."""
+
 
 @mcp.tool()
 async def frames(
     action: Annotated[
         Literal["list", "get"],
-        Field(
-            json_schema_extra={
-                "requiredParamsByAction": {
-                    name: sorted(params) for name, params in _FRAMES_REQUIRED_PARAMS.items()
-                }
-            }
-        ),
+        Field(json_schema_extra={"requiredParamsByAction": _FRAMES_REQUIRED_PARAMS_BY_ACTION}),
     ],
     frame_id: str | None = None,
     run_id: str | None = None,
@@ -1593,17 +1600,19 @@ conditional-defaults trade-off). Exposed as module-level constants for the same 
 `_MOUNT_ACTION_PARAMS` (INDIMCP-116).
 """
 
+_MANAGE_FRAME_REQUIRED_PARAMS_BY_ACTION: dict[str, list[str]] = {
+    name: sorted(params) for name, params in _MANAGE_FRAME_REQUIRED_PARAMS.items()
+}
+"""JSON-Schema-friendly form of `_MANAGE_FRAME_REQUIRED_PARAMS`, precomputed for the same
+`sphinx-autoapi` signature-parsing reason as `_MOUNT_ACTION_REQUIRED_PARAMS_BY_ACTION`."""
+
 
 @mcp.tool()
 async def manage_frame(
     action: Annotated[
         Literal["confirm_transfer", "delete", "purge"],
         Field(
-            json_schema_extra={
-                "requiredParamsByAction": {
-                    name: sorted(params) for name, params in _MANAGE_FRAME_REQUIRED_PARAMS.items()
-                }
-            }
+            json_schema_extra={"requiredParamsByAction": _MANAGE_FRAME_REQUIRED_PARAMS_BY_ACTION}
         ),
     ],
     frame_id: str | None = None,
