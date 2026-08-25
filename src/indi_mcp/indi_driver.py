@@ -24,13 +24,14 @@ from pathlib import Path
 from typing import Literal, NamedTuple, TypedDict
 
 import psutil
-from indiweb.driver import DeviceDriver, DriverCollection
+from indiweb.driver import INDI_DATA_DIR, DeviceDriver, DriverCollection
 
 from indi_mcp import event_streams, indi_server
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DRIVER_CATALOG_DIR_ENV",
     "DriverInfo",
     "DriverStatus",
     "classify_device",
@@ -39,6 +40,13 @@ __all__ = [
     "start_driver",
     "stop_driver",
 ]
+
+DRIVER_CATALOG_DIR_ENV = "INDI_MCP_DRIVER_CATALOG_DIR"
+"""Overrides `indiweb`'s own hardcoded `INDI_DATA_DIR` default (`/usr/share/indi/`, the
+Raspberry Pi target's real driver XML location) — that path doesn't exist on a macOS/Linux dev
+machine, so `get_driver_catalog`/`start_driver`/`classify_device` fail outright there with no
+way to point them at a locally installed catalog (e.g. Homebrew's `/usr/local/share/indi` or
+`/opt/homebrew/share/indi`) for local development or testing (INDIMCP-128)."""
 
 _catalog: DriverCollection | None = None
 
@@ -76,7 +84,7 @@ def _connection_event(
 def _get_catalog() -> DriverCollection:
     global _catalog
     if _catalog is None:
-        _catalog = DriverCollection()
+        _catalog = DriverCollection(os.environ.get(DRIVER_CATALOG_DIR_ENV, INDI_DATA_DIR))
     return _catalog
 
 
