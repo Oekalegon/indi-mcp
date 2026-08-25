@@ -4,7 +4,6 @@ import asyncio
 import base64
 import contextlib
 import logging
-import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -1470,18 +1469,23 @@ def _frame_issues(metadata: FrameMetadata) -> list[Issue]:
 
 
 def _frame_download_url(frame_id: str) -> str | None:
-    """The URL a LAN client can `GET` to download `frame_id`'s raw bytes, or `None`.
+    """The path a client can `GET` (against the same host:port it used to connect via MCP) to
+    download `frame_id`'s raw bytes, or `None`.
 
     `None` whenever there's no HTTP listener to point at at all — running under `stdio`
-    (`_current_transport`), or before `run()` has set it. Built from `socket.gethostname()`
-    rather than `mcp.settings.host`: the latter is the server's own *bind* address, which in
-    production (`docs/Deployment.md`) is the wildcard `0.0.0.0` — not itself a reachable
-    address for a client to connect back to. `frame_id` is a `uuid4` in practice
-    (`frame_store.save_frame`) so this quoting is defensive, not load-bearing.
+    (`_current_transport`), or before `run()` has set it. Deliberately host-relative rather
+    than absolute (INDIMCP-96): `download_frame` is registered via `custom_route` on this same
+    FastMCP/Starlette app, so it always shares the MCP endpoint's host:port by construction —
+    the client already knows a reachable one, since it used it to make this very call. An
+    absolute URL built from `socket.gethostname()` isn't reliably resolvable from every
+    client's network (mDNS can be disabled or blocked across subnets), and the server's own
+    bind address (`mcp.settings.host`) is typically the wildcard `0.0.0.0` in production
+    (`docs/Deployment.md`) — not a reachable address either. `frame_id` is a `uuid4` in
+    practice (`frame_store.save_frame`) so this quoting is defensive, not load-bearing.
     """
     if _current_transport in (None, "stdio"):
         return None
-    return f"http://{socket.gethostname()}:{mcp.settings.port}/frames/{quote(frame_id, safe='')}"
+    return f"/frames/{quote(frame_id, safe='')}"
 
 
 def _to_frame_response(metadata: FrameMetadata) -> FrameMetadataResponse:
@@ -1533,10 +1537,11 @@ async def frames(
     (`manage_frame`'s `action="confirm_transfer"`), `false` only ones still waiting to be
     retrieved — useful for checking what's left to download before `manage_frame`'s
     `action="purge"`. `action="get"` requires `frame_id`, and rejects the list filters. Never
-    returns a frame's on-disk path; each frame's `downloadUrl` is a `GET`-able HTTP URL for its
-    raw bytes (INDIMCP-89), `None` if this server has no HTTP listener to build one from
-    (`stdio` transport). See `FrameMetadataResponse` for `issues`. Any parameter given
-    alongside an action it doesn't belong to, or a required parameter missing for it, raises
+    returns a frame's on-disk path; each frame's `downloadUrl` is a `GET`-able path for its raw
+    bytes, relative to the same host:port used to make this call (INDIMCP-89/96), `None` if
+    this server has no HTTP listener to build one from (`stdio` transport). See
+    `FrameMetadataResponse` for `issues`. Any parameter given alongside an action it doesn't
+    belong to, or a required parameter missing for it, raises
     `ValueError`. `frame_id` is optional at the schema level regardless of `action`, despite
     having no fallback if omitted for `action="get"` — `action`'s own schema carries the real
     per-`action` required set under `requiredParamsByAction` for a schema-reading caller (see
