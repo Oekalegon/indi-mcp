@@ -33,7 +33,7 @@ def _reset_loaded_scripts() -> None:
     script_store._scripts = {}
 
 
-def test_builtin_scripts_directory_loads_with_no_errors() -> None:
+def test_builtin_scripts_directory_loads_with_no_errors(tmp_path: Path) -> None:
     """Every `*.yaml` file in `scripts/` loads successfully — none silently dropped.
 
     Counts, not identity: a script's `id` is independent of its filename
@@ -41,10 +41,17 @@ def test_builtin_scripts_directory_loads_with_no_errors() -> None:
     built-in script whose filename doesn't exactly match its `id` (e.g.
     `plate_solve_rig.yaml` declaring `id: solve_rig`) would fail a stem-vs-id
     comparison despite loading perfectly correctly.
+
+    `user_directory` is pinned to an empty `tmp_path` rather than left to
+    `load_scripts`'s own `./user_scripts` default (INDIMCP-97): the real
+    `user_scripts/` is developer/local state (e.g. left over from running the
+    INDIMCPKit test app against this server), and any stray file there would
+    inflate the loaded count past `on_disk`'s scripts/-only glob, failing this
+    assertion for a script that in fact loaded fine.
     """
     on_disk = list(SCRIPTS_DIR.glob("*.yaml"))
 
-    scripts = script_store.load_scripts(SCRIPTS_DIR)
+    scripts = script_store.load_scripts(SCRIPTS_DIR, user_directory=tmp_path)
 
     assert len(scripts) == len(on_disk), "a built-in script file failed to load — check logs"
 
