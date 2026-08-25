@@ -391,8 +391,8 @@ async def get_device_properties(
     `timeout_seconds` elapses. INDI has no explicit "end of properties"
     reply, so "the driver has settled" is a heuristic (a quiet period after
     the most recent update), not something that can be detected exactly;
-    the quiet period bounds how long a burst of several `def*Vector`s for
-    the same device is given to finish arriving before this returns.
+    the quiet period bounds how long a burst of several `def*Vector` events
+    for the same device is given to finish arriving before this returns.
 
     Returns whatever `client.data` holds for `device` regardless of whether
     the driver actually responded in time, but sets `refreshed` accordingly

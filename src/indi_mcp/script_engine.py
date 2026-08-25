@@ -2250,6 +2250,7 @@ async def sync_filter_names(role: str, device: str, rig_slots: dict[int, str]) -
     Raises `ValueError` (translated by each caller into whatever failure mode fits it — an MCP
     tool error, or a `ScriptExecutionError`) rather than guessing or partially applying a
     change:
+
     - `device` doesn't expose `FILTER_NAME` at all.
     - `rig_slots` and the live vector declare a *different number* of slots — almost certainly
       the rig was authored for a differently-sized wheel entirely, or the wrong device, so
@@ -2349,6 +2350,7 @@ async def adopt_filter_names_from_driver(
     driver reports, however many slots that is.
 
     Raises `ValueError` rather than guessing or partially applying a change:
+
     - `device` doesn't expose `FILTER_NAME` at all.
     - The driver's live `FILTER_NAME` declares no filter slots at all — nothing to adopt.
     - Persisting the change fails (disk full, permission denied, ...) — wrapped into a
