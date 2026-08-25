@@ -162,7 +162,7 @@ documentation yet.*
       transferred-state by default), `purge_transferred_frames`
 - [x] SHA-256 checksum per captured frame so clients can verify transfers (INDIMCP-95)
 - [x] Warn on null checksum for frames created before checksum support (INDIMCP-107)
-- [ ] Rework `downloadUrl`'s use of `socket.gethostname()` — the client already knows
+- [x] Rework `downloadUrl`'s use of `socket.gethostname()` — the client already knows
       a working host (INDIMCP-96)
 
 **Candidates (not yet decided):**

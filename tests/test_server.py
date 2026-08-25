@@ -2012,12 +2012,10 @@ async def test_frames_get_includes_download_url_when_an_http_listener_exists(
 ) -> None:
     monkeypatch.setattr(frame_store, "get_frame_metadata", lambda frame_id: _FRAME_METADATA)
     monkeypatch.setattr(server, "_current_transport", "streamable-http")
-    monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
-    monkeypatch.setattr(server.mcp.settings, "port", 8000)
 
     result = await server.frames("get", frame_id="frame-1")
 
-    assert result["downloadUrl"] == "http://indi-mcp-pi:8000/frames/frame-1"
+    assert result["downloadUrl"] == "/frames/frame-1"
 
 
 def test_frame_download_url_is_none_without_an_http_listener(
@@ -2032,24 +2030,20 @@ def test_frame_download_url_is_none_without_an_http_listener(
     assert server._frame_download_url("frame-1") is None
 
 
-def test_frame_download_url_uses_hostname_and_port_under_streamable_http(
+def test_frame_download_url_is_host_relative_under_streamable_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(server, "_current_transport", "streamable-http")
-    monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
-    monkeypatch.setattr(server.mcp.settings, "port", 9000)
 
-    assert server._frame_download_url("frame-1") == "http://indi-mcp-pi:9000/frames/frame-1"
+    assert server._frame_download_url("frame-1") == "/frames/frame-1"
 
 
 def test_frame_download_url_percent_encodes_the_frame_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "_current_transport", "streamable-http")
-    monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
-    monkeypatch.setattr(server.mcp.settings, "port", 8000)
 
     url = server._frame_download_url("frame/with slash")
 
-    assert url == "http://indi-mcp-pi:8000/frames/frame%2Fwith%20slash"
+    assert url == "/frames/frame%2Fwith%20slash"
 
 
 async def test_frames_list_includes_download_url_when_an_http_listener_exists(
@@ -2057,14 +2051,10 @@ async def test_frames_list_includes_download_url_when_an_http_listener_exists(
 ) -> None:
     monkeypatch.setattr(frame_store, "list_frames", lambda **_kwargs: [_FRAME_METADATA])
     monkeypatch.setattr(server, "_current_transport", "streamable-http")
-    monkeypatch.setattr(server.socket, "gethostname", lambda: "indi-mcp-pi")
-    monkeypatch.setattr(server.mcp.settings, "port", 8000)
 
     result = await server.frames("list")
 
-    assert result == [
-        {**_FRAME_METADATA, "downloadUrl": "http://indi-mcp-pi:8000/frames/frame-1", "issues": []}
-    ]
+    assert result == [{**_FRAME_METADATA, "downloadUrl": "/frames/frame-1", "issues": []}]
 
 
 async def test_manage_frame_confirm_transfer_delegates_to_frame_store(
