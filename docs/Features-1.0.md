@@ -170,8 +170,9 @@ documentation yet.*
 
 ## Session planning & scheduling
 
-- [ ] Object-visibility check: is a target above the horizon over a given timespan
-      (astropy-based) (INDIMCP-29)
+- [x] Object-visibility check: is a target above the horizon over a given timespan
+      (astropy-based) (INDIMCP-29) — `visibility.compute_visibility`; library function only,
+      not yet wired into a script step or exposed as its own MCP tool
 - [ ] Scheduling for imaging sessions with multiple targets, e.g. mosaics
       (design first) (INDIMCP-32)
 
