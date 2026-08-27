@@ -12,9 +12,9 @@ from indi_mcp.observatory_store import Observatory
 _OBSERVATORY = Observatory(
     id="test-observatory",
     name="Test Observatory",
-    latitudeDeg=60.369722,
-    longitudeDeg=11.363611,
-    elevationMeters=350,
+    latitudeDeg=52.3676,
+    longitudeDeg=4.9041,
+    elevationMeters=4,
 )
 
 

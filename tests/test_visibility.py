@@ -9,9 +9,9 @@ from indi_mcp.observatory_store import Observatory
 _OBSERVATORY = Observatory(
     id="test-observatory",
     name="Test Observatory",
-    latitudeDeg=60.369722,
-    longitudeDeg=11.363611,
-    elevationMeters=350,
+    latitudeDeg=52.3676,
+    longitudeDeg=4.9041,
+    elevationMeters=4,
 )
 
 _START = datetime(2026, 1, 15, 0, 0, 0, tzinfo=UTC)
@@ -69,7 +69,7 @@ def test_compute_visibility_spans_the_whole_window_for_a_circumpolar_target() ->
 
 
 def test_compute_visibility_is_empty_when_min_altitude_exceeds_the_targets_peak() -> None:
-    """A target culminating at ~29.6 degrees (dec=0 seen from ~60.37 degrees latitude) never
+    """A target culminating at ~37.6 degrees (dec=0 seen from ~52.37 degrees latitude) never
     reaches a 40 degree minimum altitude."""
     intervals = visibility.compute_visibility(
         ra_deg=90.0,
