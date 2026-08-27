@@ -357,6 +357,21 @@ def test_observatory_horizon_profile_defaults_to_none() -> None:
     assert observatory.horizonProfile is None
 
 
+def test_observatory_rejects_an_empty_horizon_profile_list() -> None:
+    """`horizonProfile=[]` is schema-vacuously "sorted and unique", but `_horizon_altitude_at`
+    has no sensible altitude to return for a zero-point profile — rejected here rather than
+    left to crash deep inside a later `visibility.compute_visibility` call. `None` (omit the
+    field, or pass it explicitly) is the only valid way to say "no obstruction data"."""
+    with pytest.raises(ValidationError):
+        observatory_store.Observatory(
+            id="empty-profile",
+            name="Empty profile",
+            latitudeDeg=0,
+            longitudeDeg=0,
+            horizonProfile=[],
+        )
+
+
 def test_observatory_accepts_a_valid_horizon_profile() -> None:
     observatory = observatory_store.Observatory(
         id="with-profile",

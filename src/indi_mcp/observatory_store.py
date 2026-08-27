@@ -97,7 +97,7 @@ class Observatory(_StrictModel):
     latitudeDeg: float = Field(ge=-90, le=90)
     longitudeDeg: float = Field(ge=-180, le=180)
     elevationMeters: float = 0
-    horizonProfile: list[HorizonPoint] | None = None
+    horizonProfile: list[HorizonPoint] | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def _check_horizon_profile_azimuths_are_sorted_and_unique(self) -> "Observatory":
