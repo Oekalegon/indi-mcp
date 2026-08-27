@@ -9,7 +9,9 @@ separate tickets that wrap `execute_script` below.
 One thing is deliberately incomplete here, noted inline where it matters:
 `slew` is implemented for a `raDec` target (INDIMCP-38); its `objectName`
 target still raises `ScriptExecutionError` pending astropy-based name
-resolution (INDIMCP-29).
+resolution (INDIMCP-136 — INDIMCP-29 delivered the astropy-based
+object-above-horizon check, `visibility.compute_visibility`, but was
+scoped to RA/Dec input only, not name resolution).
 
 Pause/cancel are supported as plain hooks (`asyncio.Event`s) an eventual
 caller passes in — this engine has no `runId`/task-tracking concept of its
@@ -1969,7 +1971,7 @@ async def _execute_slew(
 
     Only `target.raDec` is implemented: sets `EQUATORIAL_EOD_COORD`'s `RA`/
     `DEC` elements directly. `target.objectName` still needs astropy-based
-    name resolution (INDIMCP-29, not built yet) to turn a name like `"M101"`
+    name resolution (INDIMCP-136, not built yet) to turn a name like `"M101"`
     into RA/Dec, so it raises `ScriptExecutionError` for now rather than
     silently doing nothing — consistent with this module's exception
     contract (`ScriptValidationError`/`ScriptPreconditionError`/
@@ -1990,7 +1992,7 @@ async def _execute_slew(
     if step.target.raDec is None:
         raise ScriptExecutionError(
             f"slew to objectName {step.target.objectName!r} is not yet supported "
-            "(needs astropy-based name resolution, see INDIMCP-29); use target.raDec instead"
+            "(needs astropy-based name resolution, see INDIMCP-136); use target.raDec instead"
         )
     ra = float(_substitute(step.target.raDec.ra, params))
     dec = float(_substitute(step.target.raDec.dec, params))

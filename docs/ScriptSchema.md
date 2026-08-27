@@ -229,7 +229,7 @@ and the `capture_frame` step handler itself (`script_engine`, INDIMCP-37).
 | `target` | object | yes | Exactly one of `raDec` or `objectName` (below). |
 | `target.raDec.ra` | number | one of `raDec`/`objectName` | Right ascension, in hours (matching INDI's `EQUATORIAL_EOD_COORD` `RA` element). |
 | `target.raDec.dec` | number | one of `raDec`/`objectName` | Declination, in degrees (matching INDI's `EQUATORIAL_EOD_COORD` `DEC` element). |
-| `target.objectName` | string | one of `raDec`/`objectName` | A named object (e.g. `"M101"`) for the execution engine to resolve to RA/Dec — mechanics (e.g. via `astropy`, see INDIMCP-29) are an execution-engine concern (INDIMCP-7), not fixed by this schema. |
+| `target.objectName` | string | one of `raDec`/`objectName` | A named object (e.g. `"M101"`) for the execution engine to resolve to RA/Dec — mechanics (e.g. via `astropy`, see INDIMCP-136) are an execution-engine concern (INDIMCP-7), not fixed by this schema. |
 
 #### `cool_camera`
 

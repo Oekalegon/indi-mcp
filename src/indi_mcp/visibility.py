@@ -25,7 +25,6 @@ from datetime import datetime, timedelta
 from typing import TypedDict
 
 import astropy.units as u
-import numpy as np
 from astropy.coordinates import ICRS, AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 
@@ -68,11 +67,14 @@ def compute_visibility(
     callers should always pass aware values (same requirement as `fits_headers.
     compute_celestial_context`).
 
-    Sampling runs at `step_minutes` intervals across `[start, end]` (always including both
-    endpoints), so a rise/set moment falling between two samples is only known to within one
-    step — pass a smaller `step_minutes` for a tighter (at the cost of more computation)
-    boundary. Raises `ValueError` if `end` is not after `start`, or if `step_minutes` is not
-    positive.
+    Sampling runs across `[start, end]` at intervals of *at most* `step_minutes`, always
+    including both endpoints exactly: the actual spacing is narrowed just enough to divide the
+    span into a whole number of equal steps, so it only equals `step_minutes` exactly when the
+    span is itself a whole multiple of it. Either way, a rise/set moment falling between two
+    samples is only known to within one step — pass a smaller `step_minutes` for a tighter (at
+    the cost of more computation) boundary. Raises `ValueError` if `end` is not after `start`,
+    if `step_minutes` is not positive, or if `dec_deg` is outside astropy's own -90..90 valid
+    range (propagated from constructing the target `SkyCoord`).
     """
     if end <= start:
         raise ValueError(f"end ({end!r}) must be after start ({start!r})")
@@ -88,8 +90,8 @@ def compute_visibility(
 
     span_seconds = (end - start).total_seconds()
     sample_count = max(2, math.ceil(span_seconds / (step_minutes * 60)) + 1)
-    offsets_seconds = np.linspace(0, span_seconds, sample_count)
-    sample_times = [start + timedelta(seconds=float(offset)) for offset in offsets_seconds]
+    actual_step_seconds = span_seconds / (sample_count - 1)
+    sample_times = [start + timedelta(seconds=i * actual_step_seconds) for i in range(sample_count)]
 
     altitudes_deg = target.transform_to(
         AltAz(obstime=Time(sample_times), location=location)

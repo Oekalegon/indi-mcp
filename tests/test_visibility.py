@@ -1,3 +1,4 @@
+import math
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -119,3 +120,28 @@ def test_compute_visibility_interval_boundaries_are_sample_times() -> None:
         for boundary in (interval["start"], interval["end"]):
             offset_minutes = (boundary - _START).total_seconds() / 60
             assert offset_minutes % step_minutes == pytest.approx(0, abs=1e-6)
+
+
+def test_compute_visibility_narrows_the_step_for_a_non_exact_multiple_span() -> None:
+    """When `[start, end]` isn't an exact multiple of `step_minutes`, actual sample spacing is
+    narrowed (never widened) so the span still divides into whole steps and both endpoints are
+    included exactly — the documented "at most step_minutes" contract, not a fixed grid."""
+    step_minutes = 10.0
+    end = _START + timedelta(hours=24, minutes=5)
+    intervals = visibility.compute_visibility(
+        ra_deg=45.0,
+        dec_deg=75.0,
+        observatory=_OBSERVATORY,
+        start=_START,
+        end=end,
+        step_minutes=step_minutes,
+    )
+
+    assert len(intervals) == 1
+    assert intervals[0]["start"] == _START
+    assert intervals[0]["end"] == end
+
+    span_minutes = (end - _START).total_seconds() / 60
+    sample_count = math.ceil(span_minutes / step_minutes) + 1
+    actual_step_minutes = span_minutes / (sample_count - 1)
+    assert actual_step_minutes < step_minutes
