@@ -4,7 +4,9 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from indi_mcp import observatory_store
+from indi_mcp import observatory_store, visibility
+
+_HORIZON_PROFILE_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "horizon_profiles"
 
 VALID_OBSERVATORY_YAML = """
 id: home-backyard
@@ -345,3 +347,161 @@ def test_draft_observatory_uses_first_device_and_notes_others_on_multiple_fixes(
 
     assert draft["sourceDevice"] == "Telescope Simulator"
     assert any("Telescope Simulator" in note and "GPS Simulator" in note for note in draft["notes"])
+
+
+def test_observatory_horizon_profile_defaults_to_none() -> None:
+    observatory = observatory_store.Observatory(
+        id="no-profile", name="No profile", latitudeDeg=0, longitudeDeg=0
+    )
+
+    assert observatory.horizonProfile is None
+
+
+def test_observatory_accepts_a_valid_horizon_profile() -> None:
+    observatory = observatory_store.Observatory(
+        id="with-profile",
+        name="With profile",
+        latitudeDeg=0,
+        longitudeDeg=0,
+        horizonProfile=[
+            {"azimuthDeg": 0, "altitudeDeg": 5},
+            {"azimuthDeg": 90, "altitudeDeg": 12},
+            {"azimuthDeg": 180, "altitudeDeg": 8},
+        ],
+    )
+
+    assert observatory.horizonProfile is not None
+    assert [p.azimuthDeg for p in observatory.horizonProfile] == [0, 90, 180]
+    assert [p.altitudeDeg for p in observatory.horizonProfile] == [5, 12, 8]
+
+
+def test_observatory_rejects_horizon_profile_with_azimuths_out_of_order() -> None:
+    with pytest.raises(ValidationError, match="sorted"):
+        observatory_store.Observatory(
+            id="unsorted",
+            name="Unsorted",
+            latitudeDeg=0,
+            longitudeDeg=0,
+            horizonProfile=[
+                {"azimuthDeg": 90, "altitudeDeg": 5},
+                {"azimuthDeg": 10, "altitudeDeg": 5},
+            ],
+        )
+
+
+def test_observatory_rejects_horizon_profile_with_duplicate_azimuths() -> None:
+    with pytest.raises(ValidationError, match="unique"):
+        observatory_store.Observatory(
+            id="duplicate",
+            name="Duplicate",
+            latitudeDeg=0,
+            longitudeDeg=0,
+            horizonProfile=[
+                {"azimuthDeg": 10, "altitudeDeg": 5},
+                {"azimuthDeg": 10, "altitudeDeg": 7},
+            ],
+        )
+
+
+def test_horizon_point_rejects_azimuth_out_of_range() -> None:
+    with pytest.raises(ValidationError):
+        observatory_store.HorizonPoint(azimuthDeg=360, altitudeDeg=5)
+
+
+def test_horizon_point_rejects_altitude_out_of_range() -> None:
+    with pytest.raises(ValidationError):
+        observatory_store.HorizonPoint(azimuthDeg=10, altitudeDeg=91)
+
+
+def test_save_and_reload_observatory_round_trips_horizon_profile(tmp_path: Path) -> None:
+    observatory = observatory_store.Observatory(
+        id="round-trip",
+        name="Round trip",
+        latitudeDeg=52.3676,
+        longitudeDeg=4.9041,
+        horizonProfile=[
+            {"azimuthDeg": 0, "altitudeDeg": 5},
+            {"azimuthDeg": 180, "altitudeDeg": 10},
+        ],
+    )
+
+    observatory_store.save_observatory(observatory, directory=tmp_path)
+    reloaded = observatory_store.get_observatory("round-trip")
+
+    assert reloaded.horizonProfile is not None
+    assert [p.model_dump() for p in reloaded.horizonProfile] == [
+        {"azimuthDeg": 0, "altitudeDeg": 5},
+        {"azimuthDeg": 180, "altitudeDeg": 10},
+    ]
+
+
+def test_parse_hzn_profile_parses_azimuth_altitude_pairs_and_skips_blank_lines() -> None:
+    text = "0,5.23\n1,6.03\n\n359,4.61\n"
+
+    points = observatory_store.parse_hzn_profile(text)
+
+    assert [(p.azimuthDeg, p.altitudeDeg) for p in points] == [
+        (0.0, 5.23),
+        (1.0, 6.03),
+        (359.0, 4.61),
+    ]
+
+
+def test_parse_hzn_profile_raises_with_line_number_on_malformed_line() -> None:
+    text = "0,5.23\nnot-a-pair\n2,6.0\n"
+
+    with pytest.raises(ValueError, match="line 2"):
+        observatory_store.parse_hzn_profile(text)
+
+
+def test_parse_hzn_profile_raises_with_line_number_on_out_of_range_value() -> None:
+    text = "0,5.23\n1,95.0\n"
+
+    with pytest.raises(ValueError, match="line 2"):
+        observatory_store.parse_hzn_profile(text)
+
+
+def test_parse_hzn_profile_result_is_accepted_by_observatory_horizon_profile() -> None:
+    text = "0,5.23\n90,12.0\n180,8.5\n270,6.0\n"
+
+    points = observatory_store.parse_hzn_profile(text)
+    observatory = observatory_store.Observatory(
+        id="from-hzn", name="From hzn", latitudeDeg=0, longitudeDeg=0, horizonProfile=points
+    )
+
+    assert observatory.horizonProfile == points
+
+
+# --- Real .hzn fixtures (tests/fixtures/horizon_profiles/) -------------------------------
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["center.hzn", "north.hzn", "north_east.hzn", "north_west.hzn", "south_west.hzn", "west.hzn"],
+)
+def test_parse_hzn_profile_parses_every_real_fixture_into_a_valid_observatory(
+    filename: str,
+) -> None:
+    text = (_HORIZON_PROFILE_FIXTURES_DIR / filename).read_text()
+
+    points = observatory_store.parse_hzn_profile(text)
+    observatory = observatory_store.Observatory(
+        id="fixture", name="Fixture", latitudeDeg=0, longitudeDeg=0, horizonProfile=points
+    )
+
+    assert len(points) == 360
+    assert [p.azimuthDeg for p in points] == list(range(360))
+    assert observatory.horizonProfile == points
+
+
+def test_parse_hzn_profile_handles_a_flat_plateau_segment_from_a_real_fixture() -> None:
+    """north_west.hzn has a flat 40.09 degree plateau from azimuth 199 through 225 (a building
+    edge, dropping to 31.94 at azimuth 226) — a real-world case for the flat-segment
+    (zero-slope) branch of the interpolator."""
+    text = (_HORIZON_PROFILE_FIXTURES_DIR / "north_west.hzn").read_text()
+    points = observatory_store.parse_hzn_profile(text)
+
+    for azimuth_deg in (199, 210, 225):
+        assert visibility._horizon_altitude_at(points, azimuth_deg) == pytest.approx(40.09)
+    # The very next point drops off the plateau — should not still read the plateau's value.
+    assert visibility._horizon_altitude_at(points, 226) == pytest.approx(31.94)

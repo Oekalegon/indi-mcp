@@ -5,7 +5,8 @@ longitude, and elevation — plus a `name`/`id`. INDI has no protocol representa
 all (unlike a camera's pixel geometry, which a device can at least partially report over
 `CCD_INFO`): it is pure operator knowledge, needed for astronomical calculations that depend on
 where on Earth the observer is, such as computing an object's altitude/visibility over a timespan
-(INDIMCP-29) and, later, meridian-flip and multi-target scheduling logic (INDIMCP-32/33).
+(INDIMCP-29), optionally shaped by real horizon obstructions at the site (`horizonProfile`,
+INDIMCP-135), and, later, meridian-flip and multi-target scheduling logic (INDIMCP-32/33).
 
 ## Where this lives
 
@@ -62,6 +63,7 @@ elevationMeters: 4
 | `latitudeDeg` | number | yes | Geodetic latitude, in decimal degrees, WGS84. Positive north, negative south. Must be in `[-90, 90]`. |
 | `longitudeDeg` | number | yes | Geodetic longitude, in decimal degrees, WGS84. Positive east, negative west (astropy's `EarthLocation.from_geodetic` convention). Must be in `[-180, 180]`. |
 | `elevationMeters` | number | no, default `0` | Height above the WGS84 ellipsoid, in meters. May be negative (a site below the ellipsoid is valid). |
+| `horizonProfile` | array of objects | no, default absent | Real horizon obstructions at this site (trees, buildings, terrain), as a list of `{azimuthDeg, altitudeDeg}` points — see "Horizon obstruction profile" below. Absent means no obstruction data is available, distinct from an explicit flat/zero profile. |
 
 `latitudeDeg`/`longitudeDeg`/`elevationMeters` map directly onto astropy's
 `EarthLocation.from_geodetic(lon, lat, height)`, which is what INDIMCP-29's horizon check (and
@@ -71,6 +73,49 @@ select which location a script run applies to. No timezone field is included: as
 time/coordinate calculations run in UTC regardless of the site's local timezone, and adding a
 `timezone` field now for display purposes with no current consumer would be speculative — it can
 be added later if a concrete use (e.g. showing local sunset time in a client) needs it.
+
+## Horizon obstruction profile
+
+`horizonProfile` (INDIMCP-135) describes real obstructions around the site — trees, buildings,
+terrain — that block part of the sky beyond the geometric horizon `visibility.compute_visibility`
+would otherwise assume. Each point is `{azimuthDeg, altitudeDeg}`:
+
+```yaml
+horizonProfile:
+  - { azimuthDeg: 0, altitudeDeg: 5.2 }
+  - { azimuthDeg: 90, altitudeDeg: 12.9 }
+  - { azimuthDeg: 180, altitudeDeg: 8.6 }
+  - { azimuthDeg: 270, altitudeDeg: 3.7 }
+```
+
+* `azimuthDeg` — `[0, 360)`, the usual astronomical convention (0=North, 90=East, measured
+  clockwise).
+* `altitudeDeg` — `[-90, 90]`, the minimum altitude a target must clear at that azimuth to be
+  observable (i.e. the height the obstruction blocks up to, not the obstruction's own physical
+  height).
+
+Points must be sorted by strictly ascending `azimuthDeg` with no duplicates — a file that isn't
+fails to load (same "fail loudly rather than silently compute something wrong" rule as the
+latitude/longitude bounds above). Between two defined points, `visibility.compute_visibility`
+linearly interpolates by azimuth, wrapping around the 0/360 boundary between the last and first
+points; a single-point profile is treated as a uniform horizon in every direction. The profile
+never *lowers* whatever minimum altitude a caller already requested — at each sample,
+`compute_visibility` uses whichever is higher, the caller's `min_altitude_deg` or the profile's
+interpolated altitude at that sample's azimuth.
+
+`horizonProfile` needs no dedicated tool support to save — it's just another field on
+`Observatory`, so it's already accepted by the existing generic `configuration`
+`action="save"`, `kind="observatory"` call (`Observatory.model_validate(config)`) and already
+shows up in `list_config`'s advertised JSON Schema for `kind="observatory"`.
+
+**Importing a `.hzn` file.** `.hzn` — the plain-CSV `azimuth,altitude` format used by Stellarium,
+N.I.N.A., and similar tools, typically one line per integer azimuth degree — can be converted to
+`horizonProfile` points with `observatory_store.parse_hzn_profile(text)`. This is a
+server-side/Python helper only, not itself exposed as an MCP tool: a client wanting to import a
+`.hzn` file today either parses it itself (re-implementing the same trivial CSV format) and sends
+the resulting `{azimuthDeg, altitudeDeg}` points directly in the `configuration` `action="save"`
+payload, or a future convenience tool could wrap `parse_hzn_profile` server-side if file upload
+becomes a common workflow.
 
 ## Drafting a location from a connected device's GPS fix
 

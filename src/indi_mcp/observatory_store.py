@@ -30,12 +30,13 @@ from pathlib import Path
 from typing import TypedDict
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "DraftLocationDeviceInfo",
+    "HorizonPoint",
     "Observatory",
     "ObservatoryDraft",
     "ObservatorySummary",
@@ -43,6 +44,7 @@ __all__ = [
     "get_observatory",
     "list_observatories",
     "load_observatories",
+    "parse_hzn_profile",
     "save_observatory",
 ]
 
@@ -56,15 +58,38 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class HorizonPoint(_StrictModel):
+    """One azimuth/altitude sample of a horizon-obstruction profile (INDIMCP-135).
+
+    `azimuthDeg` follows the usual astronomical convention (0=North, 90=East, measured
+    clockwise), matching what `visibility.compute_visibility` reads back from astropy's
+    `AltAz` frame. `altitudeDeg` is the height above the geometric horizon, in degrees, that a
+    real obstruction (a tree, a building, a hill) blocks up to at that azimuth — i.e. the
+    minimum altitude a target must clear to be observable in that direction, not the
+    obstruction's own physical height.
+    """
+
+    azimuthDeg: float = Field(ge=0, lt=360)
+    altitudeDeg: float = Field(ge=-90, le=90)
+
+
 class Observatory(_StrictModel):
     """A single observatory location definition, as declared in one `observatories/*.yaml` file.
 
     `latitudeDeg`/`longitudeDeg`/`elevationMeters` map directly onto
     astropy's `EarthLocation.from_geodetic(lon, lat, height)`, which is what
-    consumers such as INDIMCP-29's horizon check construct the observer
+    consumers such as `visibility.compute_visibility`'s horizon check construct the observer
     frame from. Latitude/longitude bounds are validated because a value
     outside them is unambiguously a mistake (e.g. unconverted
     degrees/minutes/seconds), not a legitimate location.
+
+    `horizonProfile` is optional and describes real obstructions around this site, beyond the
+    geometric horizon — see `HorizonPoint`. When present, `visibility.compute_visibility`
+    linearly interpolates between its points (wrapping around 0/360) to find the minimum
+    observable altitude at any azimuth, and combines it with its own `min_altitude_deg`
+    argument (whichever is higher wins) rather than one silently overriding the other. `None`
+    (the default) means no obstruction data is available — the same as an all-zero flat
+    horizon, but explicit about the difference between "flat" and "unknown".
     """
 
     id: str
@@ -72,6 +97,18 @@ class Observatory(_StrictModel):
     latitudeDeg: float = Field(ge=-90, le=90)
     longitudeDeg: float = Field(ge=-180, le=180)
     elevationMeters: float = 0
+    horizonProfile: list[HorizonPoint] | None = None
+
+    @model_validator(mode="after")
+    def _check_horizon_profile_azimuths_are_sorted_and_unique(self) -> "Observatory":
+        if self.horizonProfile is None:
+            return self
+        azimuths = [point.azimuthDeg for point in self.horizonProfile]
+        if azimuths != sorted(azimuths):
+            raise ValueError("horizonProfile points must be sorted by ascending azimuthDeg")
+        if len(azimuths) != len(set(azimuths)):
+            raise ValueError("horizonProfile points must have unique azimuthDeg values")
+        return self
 
 
 class ObservatorySummary(TypedDict):
@@ -314,3 +351,41 @@ def _parse_coord(value: str | None) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def parse_hzn_profile(text: str) -> list[HorizonPoint]:
+    """Parse a `.hzn` horizon-profile file's content into a list of `HorizonPoint` values, for
+    assigning to `Observatory.horizonProfile`.
+
+    `.hzn` is the plain-CSV format used by Stellarium/N.I.N.A. and similar planetarium/
+    acquisition tools: one `azimuthDeg,altitudeDeg` pair per line, conventionally (but not
+    required by this parser) one line per integer azimuth degree 0..359. Blank lines (including
+    a common trailing one) are skipped; line order is preserved.
+
+    Raises `ValueError` naming the offending line number if a non-blank line isn't a parseable
+    `azimuth,altitude` pair, or if a value is out of `HorizonPoint`'s valid range (azimuth
+    0..<360, altitude -90..90) — the same validation `Observatory.horizonProfile` itself
+    enforces, just attributed to a specific source line rather than the point's position in the
+    list. Does not itself check that azimuths come out sorted/unique across the whole file —
+    that's `Observatory.horizonProfile`'s own model validator's job, once this result is
+    assigned to it.
+    """
+    points: list[HorizonPoint] = []
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(",")
+        if len(parts) != 2:
+            raise ValueError(f"line {line_number}: expected 'azimuth,altitude', got {line!r}")
+        try:
+            azimuth_deg, altitude_deg = float(parts[0]), float(parts[1])
+        except ValueError as exc:
+            raise ValueError(
+                f"line {line_number}: expected 'azimuth,altitude', got {line!r}"
+            ) from exc
+        try:
+            points.append(HorizonPoint(azimuthDeg=azimuth_deg, altitudeDeg=altitude_deg))
+        except ValidationError as exc:
+            raise ValueError(f"line {line_number}: {exc}") from exc
+    return points
