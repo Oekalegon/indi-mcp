@@ -4,4 +4,4 @@ Do not edit by hand — changes will be overwritten on the next merge. The
 placeholder below is what a local checkout has until CI has run against it.
 """
 
-BUILD_TIMESTAMP: str | None = "2026-08-25T13:49:41Z"
+BUILD_TIMESTAMP: str | None = "2026-08-27T09:10:47Z"
