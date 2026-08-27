@@ -126,7 +126,7 @@ no user documentation yet.*
 - [x] Precise pointing via iterative solve-and-refine (`plate_solve_rig` script's
       `toleranceArcsec`, run via `run_script`/`manage_script_run`)
 - [ ] Guiding: design how to connect the PHD2 guiding API to the MCP server
-      (INDIMCP-26)
+      (INDIMCP-26) — 📖 [Guiding.md](Guiding.md) (design done; implementation still open)
 - [ ] Meridian-flip handling (design first) (INDIMCP-33)
 - [ ] Nudge moves: move the mount a little in a direction (e.g. East) at a slew rate,
       rather than to a position (INDIMCP-55)
