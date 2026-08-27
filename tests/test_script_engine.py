@@ -74,9 +74,9 @@ def _observatory(
     observatory_id: str = "test-observatory", **fields: Any
 ) -> observatory_store.Observatory:
     fields.setdefault("name", observatory_id)
-    fields.setdefault("latitudeDeg", 60.369722)
-    fields.setdefault("longitudeDeg", 11.363611)
-    fields.setdefault("elevationMeters", 350)
+    fields.setdefault("latitudeDeg", 52.3676)
+    fields.setdefault("longitudeDeg", 4.9041)
+    fields.setdefault("elevationMeters", 4)
     observatory = observatory_store.Observatory(id=observatory_id, **fields)
     observatory_store._observatories[observatory.id] = observatory
     return observatory
@@ -2321,8 +2321,8 @@ async def test_execute_script_capture_frame_writes_site_lat_long_for_any_frame_t
     await script_engine.execute_script("capture", "test-rig", {}, location_id="test-observatory")
 
     fields = write_headers.call_args.args[1]
-    assert fields["SITELAT"] == (60.369722, "[deg] Observatory latitude")
-    assert fields["SITELONG"] == (11.363611, "[deg] Observatory longitude")
+    assert fields["SITELAT"] == (52.3676, "[deg] Observatory latitude")
+    assert fields["SITELONG"] == (4.9041, "[deg] Observatory longitude")
 
 
 async def test_execute_script_capture_frame_omits_site_lat_long_when_no_location(
