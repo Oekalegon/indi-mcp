@@ -16,6 +16,12 @@ This is a sampled, not analytic, check: it evaluates altitude at a fixed step ac
 timespan and reports the above-threshold intervals between samples, so a target's actual
 rise/set moment can be off from the reported interval boundary by up to `step_minutes` — fine
 for scheduling/gating decisions, not for precision rise/set timing.
+
+When `observatory.horizonProfile` is set (INDIMCP-135), the effective minimum altitude at each
+sample is `max(min_altitude_deg, profile altitude at that sample's azimuth)` — a real
+obstruction (a tree, a building) never *lowers* an explicitly requested minimum, it can only
+raise it. Between two defined profile points, altitude is linearly interpolated by azimuth
+(wrapping around the 0/360 boundary); see `_horizon_altitude_at`.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ import astropy.units as u
 from astropy.coordinates import ICRS, AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 
-from indi_mcp.observatory_store import Observatory
+from indi_mcp.observatory_store import HorizonPoint, Observatory
 
 __all__ = ["VisibilityInterval", "compute_visibility"]
 
@@ -59,8 +65,9 @@ def compute_visibility(
     spanning the whole `[start, end]` if it stays above it throughout.
 
     `min_altitude_deg` defaults to the geometric horizon (0 degrees) but is commonly set higher
-    to also exclude altitudes still too low for useful imaging (atmospheric extinction,
-    horizon obstructions).
+    to also exclude altitudes still too low for useful imaging (atmospheric extinction). If
+    `observatory.horizonProfile` is set, it's combined with `min_altitude_deg` at each sample's
+    azimuth (whichever is higher wins) — see this module's own docstring.
 
     `start`/`end` should be timezone-aware; `astropy.time.Time` is given whatever it is
     directly, so naive `datetime`s would be silently treated as UTC by astropy's own default —
@@ -93,14 +100,23 @@ def compute_visibility(
     actual_step_seconds = span_seconds / (sample_count - 1)
     sample_times = [start + timedelta(seconds=i * actual_step_seconds) for i in range(sample_count)]
 
-    altitudes_deg = target.transform_to(
-        AltAz(obstime=Time(sample_times), location=location)
-    ).alt.to_value(u.deg)
+    sample_altaz = target.transform_to(AltAz(obstime=Time(sample_times), location=location))
+    altitudes_deg = sample_altaz.alt.to_value(u.deg)
+    azimuths_deg = sample_altaz.az.to_value(u.deg)
+
+    horizon_profile = observatory.horizonProfile
 
     intervals: list[VisibilityInterval] = []
     interval_start: datetime | None = None
-    for altitude_deg, sample_time in zip(altitudes_deg, sample_times, strict=True):
-        is_above = altitude_deg >= min_altitude_deg
+    for altitude_deg, azimuth_deg, sample_time in zip(
+        altitudes_deg, azimuths_deg, sample_times, strict=True
+    ):
+        effective_min_altitude_deg = min_altitude_deg
+        if horizon_profile is not None:
+            effective_min_altitude_deg = max(
+                min_altitude_deg, _horizon_altitude_at(horizon_profile, azimuth_deg)
+            )
+        is_above = altitude_deg >= effective_min_altitude_deg
         if is_above and interval_start is None:
             interval_start = sample_time
         elif not is_above and interval_start is not None:
@@ -110,3 +126,37 @@ def compute_visibility(
         intervals.append({"start": interval_start, "end": sample_times[-1]})
 
     return intervals
+
+
+def _horizon_altitude_at(profile: list[HorizonPoint], azimuth_deg: float) -> float:
+    """Linearly interpolate `profile`'s obstruction altitude at `azimuth_deg`, wrapping around
+    the 0/360 boundary between the profile's last and first points.
+
+    `profile` must be sorted by ascending `azimuthDeg` with no duplicates — the same contract
+    `Observatory.horizonProfile`'s own model validator already enforces, so any list read off
+    an `Observatory` satisfies it. A single-point profile returns that point's altitude
+    unconditionally (a uniform horizon in every direction).
+    """
+    azimuth_deg %= 360
+    point_count = len(profile)
+    if point_count == 1:
+        return profile[0].altitudeDeg
+    for index in range(point_count):
+        start_point = profile[index]
+        end_point = profile[(index + 1) % point_count]
+        wraps = index == point_count - 1
+        end_azimuth_deg = end_point.azimuthDeg + 360 if wraps else end_point.azimuthDeg
+        sample_azimuth_deg = (
+            azimuth_deg + 360 if wraps and azimuth_deg < start_point.azimuthDeg else azimuth_deg
+        )
+        if start_point.azimuthDeg <= sample_azimuth_deg <= end_azimuth_deg:
+            span_deg = end_azimuth_deg - start_point.azimuthDeg
+            fraction = (
+                0.0 if span_deg == 0 else (sample_azimuth_deg - start_point.azimuthDeg) / span_deg
+            )
+            return start_point.altitudeDeg + fraction * (
+                end_point.altitudeDeg - start_point.altitudeDeg
+            )
+    raise AssertionError(  # pragma: no cover - every azimuth falls into exactly one segment
+        f"azimuth_deg {azimuth_deg!r} did not fall within any horizon-profile segment"
+    )

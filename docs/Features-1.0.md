@@ -173,6 +173,9 @@ documentation yet.*
 - [x] Object-visibility check: is a target above the horizon over a given timespan
       (astropy-based) (INDIMCP-29) — `visibility.compute_visibility`; library function only,
       not yet wired into a script step or exposed as its own MCP tool
+- [x] Per-azimuth horizon-obstruction profiles (trees/buildings/terrain), factored into the
+      visibility check above rather than just a flat minimum altitude (INDIMCP-135) —
+      `Observatory.horizonProfile`, with `.hzn`-file import via `parse_hzn_profile`
 - [ ] Scheduling for imaging sessions with multiple targets, e.g. mosaics
       (design first) (INDIMCP-32)
 
