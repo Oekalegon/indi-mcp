@@ -20,6 +20,7 @@ from starlette.responses import FileResponse, Response
 
 from indi_mcp import (
     astrometry_index,
+    bonjour,
     event_log,
     event_streams,
     flat_calibration_sweep,
@@ -2504,6 +2505,7 @@ def test_run_disables_rebinding_protection_for_a_non_loopback_host(
     monkeypatch.setattr(rig_store, "load_rigs", lambda: None)
     monkeypatch.setattr(observatory_store, "load_observatories", lambda: None)
     monkeypatch.setattr(script_store, "load_scripts", lambda: None)
+    monkeypatch.setattr(bonjour, "try_start_advertising", lambda *args, **kwargs: None)
 
     server.run(transport="streamable-http", host="0.0.0.0", port=8000)
 
@@ -2518,8 +2520,66 @@ def test_run_keeps_rebinding_protection_for_the_default_loopback_host(
     monkeypatch.setattr(rig_store, "load_rigs", lambda: None)
     monkeypatch.setattr(observatory_store, "load_observatories", lambda: None)
     monkeypatch.setattr(script_store, "load_scripts", lambda: None)
+    monkeypatch.setattr(bonjour, "try_start_advertising", lambda *args, **kwargs: None)
 
     server.run(transport="streamable-http", host="127.0.0.1", port=8000)
 
     assert server.mcp.settings.transport_security is not None
     assert server.mcp.settings.transport_security.enable_dns_rebinding_protection is True
+
+
+def test_run_advertises_via_bonjour_for_streamable_http(
+    monkeypatch: pytest.MonkeyPatch, _restore_transport_security: None
+) -> None:
+    monkeypatch.setattr(server.mcp, "run", lambda **kwargs: None)
+    monkeypatch.setattr(rig_store, "load_rigs", lambda: None)
+    monkeypatch.setattr(observatory_store, "load_observatories", lambda: None)
+    monkeypatch.setattr(script_store, "load_scripts", lambda: None)
+    advertised = bonjour.AdvertisedService(zeroconf=cast(Any, object()), info=cast(Any, object()))
+    start_calls: list[tuple[str, int, str]] = []
+    stop_calls: list[bonjour.AdvertisedService] = []
+    monkeypatch.setattr(
+        bonjour,
+        "try_start_advertising",
+        lambda host, port, path: (start_calls.append((host, port, path)), advertised)[1],
+    )
+    monkeypatch.setattr(bonjour, "stop_advertising", stop_calls.append)
+
+    server.run(transport="streamable-http", host="0.0.0.0", port=8000)
+
+    assert start_calls == [("0.0.0.0", 8000, server.mcp.settings.streamable_http_path)]
+    assert stop_calls == [advertised]
+
+
+def test_run_does_not_advertise_via_bonjour_for_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server.mcp, "run", lambda **kwargs: None)
+    monkeypatch.setattr(rig_store, "load_rigs", lambda: None)
+    monkeypatch.setattr(observatory_store, "load_observatories", lambda: None)
+    monkeypatch.setattr(script_store, "load_scripts", lambda: None)
+    start = AsyncMock()
+    monkeypatch.setattr(bonjour, "try_start_advertising", start)
+
+    server.run(transport="stdio")
+
+    start.assert_not_called()
+
+
+def test_run_stops_advertising_even_if_mcp_run_raises(
+    monkeypatch: pytest.MonkeyPatch, _restore_transport_security: None
+) -> None:
+    def _raise(**kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(server.mcp, "run", _raise)
+    monkeypatch.setattr(rig_store, "load_rigs", lambda: None)
+    monkeypatch.setattr(observatory_store, "load_observatories", lambda: None)
+    monkeypatch.setattr(script_store, "load_scripts", lambda: None)
+    advertised = bonjour.AdvertisedService(zeroconf=cast(Any, object()), info=cast(Any, object()))
+    stop_calls: list[bonjour.AdvertisedService] = []
+    monkeypatch.setattr(bonjour, "try_start_advertising", lambda *args, **kwargs: advertised)
+    monkeypatch.setattr(bonjour, "stop_advertising", stop_calls.append)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        server.run(transport="streamable-http", host="127.0.0.1", port=8000)
+
+    assert stop_calls == [advertised]

@@ -20,6 +20,7 @@ from starlette.responses import FileResponse, PlainTextResponse, Response
 
 from indi_mcp import (
     astrometry_index,
+    bonjour,
     event_log,
     event_streams,
     flat_calibration_sweep,
@@ -1713,7 +1714,11 @@ _current_transport: Transport | None = None
 def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
     """Start serving the MCP server over the given transport.
 
-    `host`/`port` only apply to the `sse` and `streamable-http` transports.
+    `host`/`port` only apply to the `sse` and `streamable-http` transports. For either of
+    those, this also advertises the server via Bonjour/mDNS (INDIMCP-140) for the duration of
+    the run, so a client on the LAN (e.g. Navi) can discover it without the operator typing in
+    a hostname or IP — best-effort, see `bonjour.try_start_advertising`; a `stdio` server has
+    no network listener to advertise at all.
     """
     global _current_transport
     logging.basicConfig(level=logging.INFO)
@@ -1721,6 +1726,7 @@ def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 800
     rig_store.load_rigs()
     observatory_store.load_observatories()
     script_store.load_scripts()
+    advertised_service: bonjour.AdvertisedService | None = None
     if transport != "stdio":
         mcp.settings.host = host
         mcp.settings.port = port
@@ -1745,6 +1751,14 @@ def run(transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 800
         logger.info(
             "Starting indi-mcp server (transport=%s, host=%s, port=%d)", transport, host, port
         )
+        endpoint_path = (
+            mcp.settings.sse_path if transport == "sse" else mcp.settings.streamable_http_path
+        )
+        advertised_service = bonjour.try_start_advertising(host, port, endpoint_path)
     else:
         logger.info("Starting indi-mcp server (transport=%s)", transport)
-    mcp.run(transport=transport)
+    try:
+        mcp.run(transport=transport)
+    finally:
+        if advertised_service is not None:
+            bonjour.stop_advertising(advertised_service)
