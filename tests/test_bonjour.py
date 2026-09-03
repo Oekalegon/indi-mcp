@@ -77,9 +77,7 @@ def test_start_advertising_registers_a_service_with_the_expected_type_and_proper
 
     service = bonjour.start_advertising("192.168.1.20", 8000, path="/mcp")
 
-    zeroconf_instance.register_service.assert_called_once_with(
-        service.info, allow_name_change=True
-    )
+    zeroconf_instance.register_service.assert_called_once_with(service.info, allow_name_change=True)
     assert service.info.type == bonjour.SERVICE_TYPE
     assert service.info.name == f"telescope.{bonjour.SERVICE_TYPE}"
     assert service.info.port == 8000
