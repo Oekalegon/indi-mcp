@@ -31,6 +31,8 @@ _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})
 needs concrete addresses to advertise, so these are expanded to every non-loopback address this
 machine actually has (see `_addresses_for_host`)."""
 
+_LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "::1"})
+
 
 @dataclass
 class AdvertisedService:
@@ -55,12 +57,14 @@ def _addresses_for_host(host: str) -> list[str]:
     """
     if host not in _WILDCARD_HOSTS:
         return [host]
-    addresses = {
-        cast(str, ip.ip)
-        for adapter in ifaddr.get_adapters()
-        for ip in adapter.ips
-        if ip.is_IPv4 and ip.ip != "127.0.0.1"
-    }
+    addresses: set[str] = set()
+    for adapter in ifaddr.get_adapters():
+        for ip in adapter.ips:
+            # ifaddr represents an IPv4 address as a plain str, an IPv6 address as a
+            # (address, flowinfo, scope_id) tuple — see the ifaddr.IP.ip docstring.
+            address = ip.ip[0] if ip.is_IPv6 else cast(str, ip.ip)
+            if address not in _LOOPBACK_ADDRESSES:
+                addresses.add(address)
     if not addresses:
         raise OSError(f"no non-loopback network address found to advertise for host={host!r}")
     return sorted(addresses)
@@ -97,7 +101,13 @@ def start_advertising(host: str, port: int, path: str = "/mcp") -> AdvertisedSer
     )
     zeroconf = Zeroconf()
     try:
-        zeroconf.register_service(info)
+        # allow_name_change=True: if another device on the LAN already advertises under this
+        # same hostname-derived instance name (e.g. two Pis cloned from the same SD-card
+        # image, both still called "raspberrypi"), zeroconf renames this one to stay unique
+        # rather than raising NonUniqueNameException — a discoverable renamed service beats
+        # no service at all, which is what a raised exception here would end up as (caught by
+        # try_start_advertising).
+        zeroconf.register_service(info, allow_name_change=True)
     except Exception:
         zeroconf.close()
         raise

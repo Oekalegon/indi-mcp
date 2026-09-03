@@ -22,11 +22,23 @@ def test_addresses_for_host_returns_the_given_host_when_not_a_wildcard() -> None
     assert bonjour._addresses_for_host("192.168.1.20") == ["192.168.1.20"]
 
 
-def test_addresses_for_host_expands_a_wildcard_host_to_every_non_loopback_address(
+def test_addresses_for_host_expands_a_wildcard_host_to_every_non_loopback_ipv4_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapters = [
         _FakeAdapter(ips=[_FakeIp(ip="127.0.0.1", is_IPv4=True)]),
+        _FakeAdapter(ips=[_FakeIp(ip="192.168.1.20", is_IPv4=True)]),
+    ]
+    monkeypatch.setattr(bonjour.ifaddr, "get_adapters", lambda: adapters)
+
+    assert bonjour._addresses_for_host("0.0.0.0") == ["192.168.1.20"]
+
+
+def test_addresses_for_host_includes_non_loopback_ipv6_addresses_for_a_wildcard_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapters = [
+        _FakeAdapter(ips=[_FakeIp(ip=("::1", 0, 0), is_IPv4=False, is_IPv6=True)]),
         _FakeAdapter(
             ips=[
                 _FakeIp(ip="192.168.1.20", is_IPv4=True),
@@ -36,13 +48,20 @@ def test_addresses_for_host_expands_a_wildcard_host_to_every_non_loopback_addres
     ]
     monkeypatch.setattr(bonjour.ifaddr, "get_adapters", lambda: adapters)
 
-    assert bonjour._addresses_for_host("0.0.0.0") == ["192.168.1.20"]
+    assert bonjour._addresses_for_host("::") == ["192.168.1.20", "fe80::1"]
 
 
 def test_addresses_for_host_raises_when_no_non_loopback_address_is_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapters = [_FakeAdapter(ips=[_FakeIp(ip="127.0.0.1", is_IPv4=True)])]
+    adapters = [
+        _FakeAdapter(
+            ips=[
+                _FakeIp(ip="127.0.0.1", is_IPv4=True),
+                _FakeIp(ip=("::1", 0, 0), is_IPv4=False, is_IPv6=True),
+            ]
+        )
+    ]
     monkeypatch.setattr(bonjour.ifaddr, "get_adapters", lambda: adapters)
 
     with pytest.raises(OSError, match="no non-loopback"):
@@ -58,12 +77,35 @@ def test_start_advertising_registers_a_service_with_the_expected_type_and_proper
 
     service = bonjour.start_advertising("192.168.1.20", 8000, path="/mcp")
 
-    zeroconf_instance.register_service.assert_called_once_with(service.info)
+    zeroconf_instance.register_service.assert_called_once_with(
+        service.info, allow_name_change=True
+    )
     assert service.info.type == bonjour.SERVICE_TYPE
     assert service.info.name == f"telescope.{bonjour.SERVICE_TYPE}"
     assert service.info.port == 8000
     assert service.info.properties[b"path"] == b"/mcp"
     zeroconf_instance.close.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("raw_hostname", "expected_instance_hostname"),
+    [
+        ("telescope", "telescope"),
+        ("telescope.local", "telescope"),
+        ("telescope.local.", "telescope"),
+    ],
+)
+def test_start_advertising_strips_a_local_suffix_from_the_hostname_if_present(
+    monkeypatch: pytest.MonkeyPatch, raw_hostname: str, expected_instance_hostname: str
+) -> None:
+    zeroconf_instance = MagicMock()
+    monkeypatch.setattr(bonjour, "Zeroconf", MagicMock(return_value=zeroconf_instance))
+    monkeypatch.setattr(bonjour.socket, "gethostname", lambda: raw_hostname)
+
+    service = bonjour.start_advertising("192.168.1.20", 8000)
+
+    assert service.info.name == f"{expected_instance_hostname}.{bonjour.SERVICE_TYPE}"
+    assert service.info.server == f"{expected_instance_hostname}.local."
 
 
 def test_start_advertising_closes_zeroconf_and_reraises_on_registration_failure(

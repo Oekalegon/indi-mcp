@@ -7,7 +7,7 @@ from collections.abc import Iterator, MutableMapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pydantic
 import pytest
@@ -2538,11 +2538,12 @@ def test_run_advertises_via_bonjour_for_streamable_http(
     advertised = bonjour.AdvertisedService(zeroconf=cast(Any, object()), info=cast(Any, object()))
     start_calls: list[tuple[str, int, str]] = []
     stop_calls: list[bonjour.AdvertisedService] = []
-    monkeypatch.setattr(
-        bonjour,
-        "try_start_advertising",
-        lambda host, port, path: (start_calls.append((host, port, path)), advertised)[1],
-    )
+
+    def _fake_try_start_advertising(host: str, port: int, path: str) -> bonjour.AdvertisedService:
+        start_calls.append((host, port, path))
+        return advertised
+
+    monkeypatch.setattr(bonjour, "try_start_advertising", _fake_try_start_advertising)
     monkeypatch.setattr(bonjour, "stop_advertising", stop_calls.append)
 
     server.run(transport="streamable-http", host="0.0.0.0", port=8000)
@@ -2551,12 +2552,33 @@ def test_run_advertises_via_bonjour_for_streamable_http(
     assert stop_calls == [advertised]
 
 
+def test_run_advertises_via_bonjour_using_the_sse_path_for_sse(
+    monkeypatch: pytest.MonkeyPatch, _restore_transport_security: None
+) -> None:
+    monkeypatch.setattr(server.mcp, "run", lambda **kwargs: None)
+    monkeypatch.setattr(rig_store, "load_rigs", lambda: None)
+    monkeypatch.setattr(observatory_store, "load_observatories", lambda: None)
+    monkeypatch.setattr(script_store, "load_scripts", lambda: None)
+    start_calls: list[tuple[str, int, str]] = []
+
+    def _fake_try_start_advertising(host: str, port: int, path: str) -> None:
+        start_calls.append((host, port, path))
+        return None
+
+    monkeypatch.setattr(bonjour, "try_start_advertising", _fake_try_start_advertising)
+
+    server.run(transport="sse", host="0.0.0.0", port=8000)
+
+    assert start_calls == [("0.0.0.0", 8000, server.mcp.settings.sse_path)]
+    assert server.mcp.settings.sse_path != server.mcp.settings.streamable_http_path
+
+
 def test_run_does_not_advertise_via_bonjour_for_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server.mcp, "run", lambda **kwargs: None)
     monkeypatch.setattr(rig_store, "load_rigs", lambda: None)
     monkeypatch.setattr(observatory_store, "load_observatories", lambda: None)
     monkeypatch.setattr(script_store, "load_scripts", lambda: None)
-    start = AsyncMock()
+    start = MagicMock()
     monkeypatch.setattr(bonjour, "try_start_advertising", start)
 
     server.run(transport="stdio")

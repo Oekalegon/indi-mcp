@@ -685,7 +685,7 @@ requires-dist = [
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "starlette", specifier = ">=1.3.1" },
-    { name = "zeroconf", specifier = ">=0.147.0" },
+    { name = "zeroconf", specifier = ">=0.151.3" },
 ]
 
 [package.metadata.requires-dev]
