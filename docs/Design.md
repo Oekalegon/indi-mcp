@@ -498,15 +498,13 @@ components:
     device: "Pegasus PPBA:Dew B"
 ```
 
-**A rig is a flat list of components, not a nested structure of trains/OTAs/mounts.** A more
-faithful model of a real setup would separate out an imaging train (camera, filter wheel,
-rotator, off-axis guider — things that stay together when swapped onto a different telescope),
-an optical tube assembly (telescope, focuser, flat-field light — things that stay together when
-moved to a different mount), the mount itself, and the observatory, each cross-referencing the
-others. That's deferred as unnecessary complexity for now — a flat `components` list is enough
-to declare "this is what's mounted this session," which is all `rig_diagnostics`'s `suggest`/`check` actions need.
-Structure can be reintroduced later once real rig files show what's actually worth splitting
-out.
+**A rig is a flat list of components, not a nested structure of OTAs/mounts.** A more faithful
+model of a real setup would separate out an optical tube assembly (telescope, focuser,
+flat-field light — things that stay together when moved to a different mount), the mount
+itself, and the observatory, each cross-referencing the others. That's deferred as unnecessary
+complexity for now — a flat `components` list is enough to declare "this is what's mounted this
+session," which is all `rig_diagnostics`'s `suggest`/`check` actions need. Structure can be
+reintroduced later once real rig files show what's actually worth splitting out.
 
 Each entry has a `role` and an `id` (both required), plus whichever other fields are meaningful
 for that role. `role` is one of a known set (`mount`, `telescope`, `guideTelescope`, `camera`,
@@ -519,6 +517,17 @@ actually identifies *this specific component*: a serial number, or any label the
 chooses, unique within the rig (a rig with two components sharing an `id` fails to load).
 Something downstream needs a way to tell same-role components apart — e.g. picking the matching
 master dark for a given camera's frames — and `role` alone can't do that.
+
+An optional `trainId` on each component groups it with the others mounted on the same imaging
+train — e.g. a filter wheel, camera, and rotator sharing one OTA, distinct from a second OTA's
+components sharing a different `trainId` (INDIMCP-138). Unlike the OTA/mount/observatory
+structure above, this doesn't need its own cross-referencing store: it's a free-form tag on the
+existing flat list, with no ordering, so a client (Navi's rig editor, in particular) can group
+and enforce "these move together" without the server modeling optical paths. A rig fails to load
+if two components sharing a `trainId` also share a role that's naturally singular within a train
+(`mount`, `telescope`, `guideTelescope`, `camera`, `guideCamera`, `focuser`, `filterWheel`,
+`rotator`); other roles, like `dewHeater`, commonly repeat on one train (independently-controlled
+heater channels for the same OTA) and are exempt from that check.
 
 A `role: telescope` (or `guideTelescope`) entry has `apertureMm`/`focalLengthMm` and no `device`,
 since optics aren't a driver. A `role: camera` (or `guideCamera`) entry has `device` plus pixel

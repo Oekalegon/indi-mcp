@@ -11,17 +11,25 @@ reference it. Files are loaded at server startup with `yaml.safe_load` and valid
 the schema below; a file that fails to parse or validate is logged and skipped rather than
 aborting the whole load, and unknown fields are rejected.
 
-A rig is a **flat list of components**, not a nested structure of imaging/guiding trains,
-optical tube assemblies, or mounts — see
-[Design.md](Design.md#imaging-rig-metadata) for why that's deferred. Each component has a
-`role` (one of a known set, or any other string) plus whichever of the fields below are
+A rig is a **flat list of components**, not a nested structure of optical tube assemblies or
+mounts — see [Design.md](Design.md#imaging-rig-metadata) for why that's deferred. Each component
+has a `role` (one of a known set, or any other string) plus whichever of the fields below are
 meaningful for it.
 
 This document still talks about the **imaging train** (`telescope`, `focuser`, `filterWheel`,
 `rotator`, `camera`) and **guiding train** (`guideTelescope`, `guideCamera`) as a way to group
-and discuss related roles — that's just descriptive language, not YAML structure. There is no
-`imagingTrain`/`guidingTrain` key; every component, regardless of which train it conceptually
-belongs to, is just another entry in the one flat `components` list.
+and discuss related roles by convention. A rig can also declare a *literal* grouping via each
+component's optional `trainId`: components sharing the same `trainId` value are mounted on the
+same physical train (e.g. a filter wheel, camera, and rotator all on one OTA), distinct from a
+second OTA's components sharing a different `trainId`. It's just a free-form tag — no ordering,
+and no separate `trains` list — a component with no `trainId` isn't part of any train (typically
+`powerHub`, `observatoryControl`, `flatScreen`, and `dewHeater` components, which aren't mounted
+on a specific optical path). Within one `trainId`, no two components may share the same `role`
+for a role that's naturally singular (`mount`, `telescope`, `guideTelescope`, `camera`,
+`guideCamera`, `focuser`, `filterWheel`, `rotator`) — `camera` and `guideCamera` are separate
+roles, so a train may have one of each (e.g. an off-axis guider). Roles that commonly repeat on
+one train, such as `dewHeater` (independently-controlled heater channels for the same OTA), are
+exempt and may appear any number of times with the same `trainId`.
 
 ## Example
 
@@ -34,15 +42,18 @@ components:
     device: "Telescope Simulator"
   - role: telescope
     id: main-scope
+    trainId: ota1
     apertureMm: 203
     focalLengthMm: 1000
   - role: focuser
     id: focuser-1
+    trainId: ota1
     device: "Focuser Simulator"
     minPosition: 0
     maxPosition: 50000
   - role: filterWheel
     id: filter-wheel-1
+    trainId: ota1
     device: "Filter Wheel Simulator"
     slots:
       1: Luminance
@@ -54,9 +65,11 @@ components:
       7: SII
   - role: rotator
     id: rotator-1
+    trainId: ota1
     device: "Rotator Simulator"
   - role: camera
     id: "SN12345"
+    trainId: ota1
     make: ZWO
     model: ASI2600MM Pro
     device: "ZWO CCD ASI2600MM Pro"
@@ -67,10 +80,12 @@ components:
     bitDepth: 16
   - role: guideTelescope
     id: guide-scope
+    trainId: ota1
     apertureMm: 60
     focalLengthMm: 240
   - role: guideCamera
     id: "SN67890"
+    trainId: ota1
     make: ZWO
     model: ASI120MM Mini
     device: "ZWO CCD ASI120MM Mini"
@@ -116,6 +131,7 @@ to make this reference easier to read — again, not a grouping that exists in t
 |---|---|---|---|
 | `role` | string | yes | What this component is. One of the known roles — `"mount"`, `"telescope"`, `"guideTelescope"`, `"camera"`, `"guideCamera"`, `"focuser"`, `"filterWheel"`, `"rotator"`, `"powerHub"`, `"observatoryControl"`, `"flatScreen"`, `"dewHeater"` — or any other string, for a component type this schema's authors haven't thought of yet. Not required to be unique within a rig: a rig commonly has more than one component sharing a role (e.g. several independently-controlled dew heater channels). |
 | `id` | string | yes | Identifies this specific physical component — a serial number, or any label the operator chooses (e.g. `"mount-1"`, `"main-scope"`). Required, and unique within the rig (a rig with two components sharing an `id` fails to load), because `role` alone can't tell apart two components sharing it — e.g. two identical guide cameras, or several dew heater channels — and something downstream needs a way to, such as picking the matching master dark for a given camera's frames. |
+| `trainId` | string | no | Groups this component with others mounted on the same imaging train (e.g. `"ota1"`) — see above. Two components with the same `trainId` may not share a `role` (a rig where they do fails to load). |
 | `make` | string | no | The manufacturer (e.g. `"ZWO"`). Independent of `role` — useful once rigs get cross-referenced against a device library rather than each rig repeating full specs. |
 | `model` | string | no | The product model (e.g. `"ASI2600MM Pro"`). |
 
