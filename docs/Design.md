@@ -395,6 +395,30 @@ The INDI Device's own storage is limited, so frames need cleaning up once the Cl
 
 **`manage_frame`'s `action="purge"`** (replacing the old standalone `purge_transferred_frames` tool) — bulk-deletes every already-transferred frame captured more than a caller-supplied age ago (`olderThanDays`, always explicit — never a hardcoded default, since how much local retention makes sense depends on the Pi's actual free storage and how often the operator downloads frames). Age is measured from `capturedAt`, not `transferredAt`. Returns the metadata of every frame actually deleted, most recently captured first.
 
+## Server discovery
+
+A `streamable-http`/`sse` server advertises itself on the local network via Bonjour/mDNS at
+startup (INDIMCP-140), so a client (e.g. Navi) can find it without the operator typing in the
+Raspberry Pi's hostname or IP — the Pi's IP can change between sessions on a home network, and
+`.local` mDNS hostnames aren't always reliably resolvable from every client OS/network stack.
+See `indi_mcp.bonjour` for the implementation and `docs/Deployment.md`'s "Discovery" note for
+the operator-facing summary.
+
+The service type is a custom `_indi-mcp._tcp.local.` (there's no existing standard type for an
+MCP server), carrying the MCP endpoint's HTTP path (e.g. `/mcp`) and this server's package
+version in its TXT record — a resolving client still needs to append that path itself to build
+the full endpoint URL, since Bonjour/mDNS has no notion of an HTTP path on its own. This is
+server-side advertisement only, deliberately narrow in scope: the discovery/browsing (client)
+side that resolves the advertised service into a connectable URL lives in INDIMCPKit, and
+Navi's Settings pane is the actual consumer offering a one-click "Add" for a discovered server
+(see INDIMCP-140's companion todos in each of those projects).
+
+Advertising is best-effort — a network without multicast support, or a machine with no
+non-loopback address to advertise, logs a warning and is skipped rather than preventing the MCP
+server itself from starting, since Bonjour is a discovery convenience, not something any tool
+call depends on. A `stdio` server has no network listener to advertise at all, so it never
+attempts this.
+
 ## Imaging rig metadata
 
 Scripts (and the MCP server generally) need to know about the physical imaging setup — telescope, focuser, filter wheel, imaging camera, guide camera — not just the live INDI devices currently connected. INDI can report *some* of this at runtime (a camera's pixel count, pixel size and bit depth, and sometimes cooling capability, are commonly exposed through its `CCD_INFO`-family properties), but it has no concept of aperture, focal length, or which physical optical train a device is wired through (imaging vs. guiding) — that's operator knowledge with no protocol representation. A user may also swap rigs entirely between sessions, so the server must be able to store **multiple** rig definitions, not just one.

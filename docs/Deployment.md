@@ -25,6 +25,14 @@ uv run indi-mcp --transport streamable-http --host 0.0.0.0 --port 8000
 
 `--host`/`--port` only apply to `sse`/`streamable-http`; they're ignored for `stdio`.
 
+### Discovery
+
+Whenever the server runs over `sse`/`streamable-http`, it also advertises itself on the LAN via
+Bonjour/mDNS (INDIMCP-140) for as long as it's running, so a client (e.g. Navi) can find it
+without the operator typing in the Pi's hostname or IP. This is best-effort: if the network has
+no multicast support, a warning is logged and the server starts normally anyway — see
+[Design.md](Design.md#server-discovery) for how it works and what's advertised.
+
 ## Installing as a systemd service on the Raspberry Pi
 
 These steps assume the Pi already has the `indiserver` binary and its drivers
