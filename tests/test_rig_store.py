@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from indi_mcp import rig_store
 
@@ -254,6 +255,102 @@ def test_load_rigs_skips_files_with_duplicate_component_ids(tmp_path: Path) -> N
     rigs = rig_store.load_rigs(tmp_path)
 
     assert [rig.id for rig in rigs] == ["minimal"]
+
+
+def test_load_rigs_skips_files_with_duplicate_role_in_the_same_train(tmp_path: Path) -> None:
+    (tmp_path / "duplicate-train-role.yaml").write_text(
+        MINIMAL_RIG_YAML
+        + '  - role: camera\n    id: camera-2\n    trainId: ota1\n    device: "CCD 2"\n'
+        + '  - role: camera\n    id: camera-3\n    trainId: ota1\n    device: "CCD 3"\n'
+    )
+    (tmp_path / "minimal.yaml").write_text(MINIMAL_RIG_YAML)
+
+    rigs = rig_store.load_rigs(tmp_path)
+
+    assert [rig.id for rig in rigs] == ["minimal"]
+
+
+def test_component_rejects_an_empty_train_id() -> None:
+    with pytest.raises(ValidationError, match="trainId"):
+        rig_store.Component(role="camera", id="camera-1", trainId="")
+
+
+def test_rig_rejects_two_components_with_the_same_role_sharing_a_train_id() -> None:
+    with pytest.raises(ValidationError, match="train 'ota1'"):
+        rig_store.Rig(
+            id="two-cameras",
+            name="Two cameras on one train",
+            components=[
+                rig_store.Component(role="camera", id="camera-1", trainId="ota1"),
+                rig_store.Component(role="camera", id="camera-2", trainId="ota1"),
+            ],
+        )
+
+
+def test_rig_allows_the_same_role_in_different_trains() -> None:
+    rig = rig_store.Rig(
+        id="two-trains",
+        name="Two independent OTAs",
+        components=[
+            rig_store.Component(role="camera", id="camera-1", trainId="ota1"),
+            rig_store.Component(role="camera", id="camera-2", trainId="ota2"),
+        ],
+    )
+
+    assert {c.trainId for c in rig.components} == {"ota1", "ota2"}
+
+
+def test_rig_allows_a_camera_and_guide_camera_in_the_same_train() -> None:
+    rig = rig_store.Rig(
+        id="oag",
+        name="Off-axis guider train",
+        components=[
+            rig_store.Component(role="camera", id="camera-1", trainId="ota1"),
+            rig_store.Component(role="guideCamera", id="camera-2", trainId="ota1"),
+        ],
+    )
+
+    assert {c.role for c in rig.components} == {"camera", "guideCamera"}
+
+
+def test_rig_allows_multiple_dew_heaters_in_the_same_train() -> None:
+    rig = rig_store.Rig(
+        id="dual-dew-heaters",
+        name="OTA with two dew heater channels",
+        components=[
+            rig_store.Component(role="dewHeater", id="dew-heater-a", trainId="ota1"),
+            rig_store.Component(role="dewHeater", id="dew-heater-b", trainId="ota1"),
+            rig_store.Component(role="dewHeater", id="dew-heater-c", trainId="ota1"),
+        ],
+    )
+
+    assert {c.id for c in rig.components} == {"dew-heater-a", "dew-heater-b", "dew-heater-c"}
+
+
+def test_rig_allows_a_custom_role_to_repeat_in_the_same_train() -> None:
+    rig = rig_store.Rig(
+        id="custom-role-train",
+        name="Train with a schema-unknown role",
+        components=[
+            rig_store.Component(role="opticalFilter", id="f1", trainId="ota1"),
+            rig_store.Component(role="opticalFilter", id="f2", trainId="ota1"),
+        ],
+    )
+
+    assert {c.id for c in rig.components} == {"f1", "f2"}
+
+
+def test_rig_allows_components_with_no_train_id() -> None:
+    rig = rig_store.Rig(
+        id="untrained",
+        name="No train grouping",
+        components=[
+            rig_store.Component(role="powerHub", id="power-hub-1"),
+            rig_store.Component(role="dewHeater", id="dew-heater-a"),
+        ],
+    )
+
+    assert all(c.trainId is None for c in rig.components)
 
 
 def test_load_rigs_rejects_unknown_fields(tmp_path: Path) -> None:

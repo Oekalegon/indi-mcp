@@ -10,13 +10,17 @@ with `yaml.safe_load` and validated against a schema, since they may be
 authored on the Client Computer and uploaded.
 
 A rig is a flat list of components rather than a nested structure of
-imaging/guiding trains and optical tube assemblies. Real setups can swap
-imaging trains between telescopes and telescopes between mounts, so a
-faithful model of those relationships would need separate stores for
-trains, OTAs, mounts, and observatories, cross-referencing each other. That
-is deferred as unnecessary complexity for now; a flat list per rig is
-enough to declare "this is what's mounted this session" and to cross-check
-it against connected INDI devices (see `suggest_rig`/`check_rig`).
+optical tube assemblies, mounts, and observatories. Real setups can swap
+whole OTAs between mounts, so a faithful model of those relationships would
+need separate stores for OTAs, mounts, and observatories, cross-referencing
+each other. That is deferred as unnecessary complexity for now; a flat list
+per rig is enough to declare "this is what's mounted this session" and to
+cross-check it against connected INDI devices (see
+`suggest_rig`/`check_rig`).
+
+Within that flat list, a component's optional `trainId` groups it with the
+other components mounted on the same imaging train (e.g. filter wheel,
+camera, and rotator sharing one OTA) — see `Component.trainId`.
 """
 
 import logging
@@ -27,7 +31,7 @@ from pathlib import Path
 from typing import Literal, TypedDict
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +100,25 @@ role this schema has no dedicated name for, so a new component type never
 requires a schema change.
 """
 
+_MULTI_INSTANCE_TRAIN_ROLES = frozenset(
+    {"powerHub", "observatoryControl", "flatScreen", "dewHeater"}
+)
+"""Known roles exempt from the one-per-train check (see `_SINGLE_INSTANCE_TRAIN_ROLES`).
+
+These commonly have more than one instance on the same physical train (e.g.
+two independently-controlled dew heater channels on one OTA).
+"""
+
+_SINGLE_INSTANCE_TRAIN_ROLES = frozenset(KNOWN_ROLES) - _MULTI_INSTANCE_TRAIN_ROLES
+"""Roles a train may have at most one of (see `Rig._check_train_roles_are_unique`).
+
+Derived from `KNOWN_ROLES` minus `_MULTI_INSTANCE_TRAIN_ROLES` so a newly
+added known role defaults to "singular per train" unless explicitly
+exempted, rather than the two lists silently drifting apart. Any role this
+schema has no dedicated name for (the `Role` Literal's `| str` escape
+hatch) is also exempt, since it can't appear in `KNOWN_ROLES` at all.
+"""
+
 
 class _StrictModel(BaseModel):
     """Base for rig schema models: reject unknown fields from hand-edited/uploaded YAML."""
@@ -121,10 +144,23 @@ class Component(_StrictModel):
     for a given camera's frames. `make`/`model` identify the product (e.g.
     `"ZWO"`/`"ASI2600MM Pro"`), useful once rigs are cross-referenced
     against a device library rather than each repeating full specs.
+
+    `trainId` is an optional, arbitrary tag (e.g. `"ota1"`) grouping
+    components that move together as one imaging train — a filter wheel,
+    camera, and rotator on the same OTA, distinct from a second OTA's
+    focuser mounted on the same rig. It carries no ordering; it just says
+    "these belong together". A train may have at most one component of a
+    given role for roles where that's the natural expectation (e.g. one
+    `"camera"`, one `"focuser"`) — see `_SINGLE_INSTANCE_TRAIN_ROLES` and
+    `Rig._check_train_roles_are_unique` — but roles that commonly repeat
+    (e.g. `"dewHeater"`) are exempt and may appear any number of times in
+    the same train. Components without a `trainId` aren't part of any
+    train — accessory roles like `"powerHub"` typically stay ungrouped.
     """
 
     role: Role
     id: str
+    trainId: str | None = Field(default=None, min_length=1)
     make: str | None = None
     model: str | None = None
     device: str | None = None
@@ -154,6 +190,21 @@ class Rig(_StrictModel):
             if component.id in seen:
                 raise ValueError(f"duplicate component id {component.id!r} within this rig")
             seen.add(component.id)
+        return self
+
+    @model_validator(mode="after")
+    def _check_train_roles_are_unique(self) -> "Rig":
+        roles_by_train: dict[str, set[Role]] = {}
+        for component in self.components:
+            if component.trainId is None or component.role not in _SINGLE_INSTANCE_TRAIN_ROLES:
+                continue
+            roles = roles_by_train.setdefault(component.trainId, set())
+            if component.role in roles:
+                raise ValueError(
+                    f"train {component.trainId!r} has more than one component with "
+                    f"role {component.role!r}"
+                )
+            roles.add(component.role)
         return self
 
 
