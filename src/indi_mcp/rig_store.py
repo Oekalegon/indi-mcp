@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Literal, TypedDict
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ class Component(_StrictModel):
 
     role: Role
     id: str
-    trainId: str | None = None
+    trainId: str | None = Field(default=None, min_length=1)
     make: str | None = None
     model: str | None = None
     device: str | None = None

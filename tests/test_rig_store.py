@@ -270,6 +270,11 @@ def test_load_rigs_skips_files_with_duplicate_role_in_the_same_train(tmp_path: P
     assert [rig.id for rig in rigs] == ["minimal"]
 
 
+def test_component_rejects_an_empty_train_id() -> None:
+    with pytest.raises(ValidationError, match="trainId"):
+        rig_store.Component(role="camera", id="camera-1", trainId="")
+
+
 def test_rig_rejects_two_components_with_the_same_role_sharing_a_train_id() -> None:
     with pytest.raises(ValidationError, match="train 'ota1'"):
         rig_store.Rig(
